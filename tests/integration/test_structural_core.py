@@ -1,11 +1,13 @@
 from typing import List, Tuple
 
+import numpy as np
+
 import pytest
 
 jax = pytest.importorskip("jax")
 jnp = pytest.importorskip("jax.numpy")
 
-from covertreex.algo import build_conflict_graph, traverse_collect_scopes
+from covertreex.algo import build_conflict_graph, plan_batch_insert, traverse_collect_scopes
 from covertreex.core.tree import DEFAULT_BACKEND, PCCTree, TreeLogStats
 
 
@@ -139,36 +141,49 @@ def test_conflict_graph_matches_bruteforce_edges():
     assert graph.scope_indices.tolist() == traversal.scope_indices.tolist()
 
 
-@pytest.mark.parametrize("seed", [0, 1, 7])
+@pytest.mark.parametrize("seed", [0, 1, 7, 11, 23])
 def test_randomized_structural_invariants(seed):
-    rng = jax.random.PRNGKey(seed)
     backend = DEFAULT_BACKEND
+    rng_np = np.random.default_rng(seed)
 
-    num_points = 12
-    points = jax.random.uniform(rng, (num_points, 3), dtype=backend.default_float)
-    levels = jnp.arange(num_points, dtype=backend.default_int)[::-1] % 4
-    parents = jnp.roll(jnp.arange(num_points, dtype=backend.default_int), -1)
-    parents = parents.at[-1].set(-1)
-    si_cache = jnp.full((num_points,), 2.0, dtype=backend.default_float)
-    next_cache = jnp.roll(jnp.arange(num_points, dtype=backend.default_int), -1)
-    next_cache = next_cache.at[-1].set(-1)
-    level_offsets = jnp.concatenate(
-        [jnp.asarray([0], dtype=backend.default_int), jnp.cumsum(jnp.ones((5,), dtype=backend.default_int) * (num_points // 4 + 1))]
-    )
+    num_points = 32
+    dim = 3
+    points_np = rng_np.normal(size=(num_points, dim)) * 2.0
+    levels_np = rng_np.integers(0, 5, size=num_points, endpoint=False)
+    levels_np[0] = levels_np.max() + 1
+
+    parents_np = np.full(num_points, -1, dtype=np.int32)
+    for i in range(1, num_points):
+        parents_np[i] = int(rng_np.integers(0, i))
+
+    children_np = np.full(num_points, -1, dtype=np.int32)
+    for idx, parent in enumerate(parents_np):
+        if parent >= 0:
+            children_np[parent] = idx
+
+    max_level = int(levels_np.max())
+    level_offsets_np = [0]
+    for lvl in range(max_level + 1):
+        level_offsets_np.append(level_offsets_np[-1] + int(np.sum(levels_np >= lvl)))
+    level_offsets_np.append(num_points)
+
+    si_cache_np = np.maximum(2.0 ** (levels_np + 1), 1.0)
+    next_cache_np = np.roll(np.arange(num_points, dtype=np.int32), -1)
+    next_cache_np[-1] = -1
 
     tree = PCCTree(
-        points=backend.asarray(points, dtype=backend.default_float),
-        top_levels=backend.asarray(levels, dtype=backend.default_int),
-        parents=backend.asarray(parents, dtype=backend.default_int),
-        children=backend.asarray(jnp.roll(jnp.arange(num_points, dtype=backend.default_int), -1), dtype=backend.default_int),
-        level_offsets=backend.asarray(level_offsets, dtype=backend.default_int),
-        si_cache=backend.asarray(si_cache, dtype=backend.default_float),
-        next_cache=backend.asarray(next_cache, dtype=backend.default_int),
+        points=backend.asarray(points_np, dtype=backend.default_float),
+        top_levels=backend.asarray(levels_np, dtype=backend.default_int),
+        parents=backend.asarray(parents_np, dtype=backend.default_int),
+        children=backend.asarray(children_np, dtype=backend.default_int),
+        level_offsets=backend.asarray(level_offsets_np, dtype=backend.default_int),
+        si_cache=backend.asarray(si_cache_np, dtype=backend.default_float),
+        next_cache=backend.asarray(next_cache_np, dtype=backend.default_int),
         stats=TreeLogStats(num_batches=1),
         backend=backend,
     )
 
-    batch = jax.random.uniform(rng, (5, 3), dtype=backend.default_float)
+    batch = backend.asarray(rng_np.normal(size=(12, dim)), dtype=backend.default_float)
     traversal = traverse_collect_scopes(tree, batch)
     graph = build_conflict_graph(tree, traversal, batch)
 
@@ -210,3 +225,66 @@ def test_randomized_structural_invariants(seed):
     assert graph.annulus_bins.shape == (batch.shape[0],)
     assert graph.annulus_bin_indices.shape == (batch.shape[0],)
     assert graph.annulus_bin_indptr.tolist()[-1] == batch.shape[0]
+
+
+@pytest.mark.parametrize("seed", [2, 5, 13])
+def test_randomized_mis_independence(seed):
+    backend = DEFAULT_BACKEND
+    rng_np = np.random.default_rng(seed)
+
+    num_points = 24
+    dim = 4
+    points_np = rng_np.normal(size=(num_points, dim))
+    levels_np = rng_np.integers(0, 6, size=num_points)
+    levels_np[0] = levels_np.max() + 1
+
+    parents_np = np.full(num_points, -1, dtype=np.int32)
+    for i in range(1, num_points):
+        parents_np[i] = int(rng_np.integers(0, i))
+
+    children_np = np.full(num_points, -1, dtype=np.int32)
+    for idx, parent in enumerate(parents_np):
+        if parent >= 0:
+            children_np[parent] = idx
+
+    max_level = int(levels_np.max())
+    level_offsets_np = [0]
+    for lvl in range(max_level + 1):
+        level_offsets_np.append(level_offsets_np[-1] + int(np.sum(levels_np >= lvl)))
+    level_offsets_np.append(num_points)
+
+    si_cache_np = np.maximum(2.0 ** (levels_np + 1), 1.0)
+    next_cache_np = np.roll(np.arange(num_points, dtype=np.int32), -1)
+    next_cache_np[-1] = -1
+
+    tree = PCCTree(
+        points=backend.asarray(points_np, dtype=backend.default_float),
+        top_levels=backend.asarray(levels_np, dtype=backend.default_int),
+        parents=backend.asarray(parents_np, dtype=backend.default_int),
+        children=backend.asarray(children_np, dtype=backend.default_int),
+        level_offsets=backend.asarray(level_offsets_np, dtype=backend.default_int),
+        si_cache=backend.asarray(si_cache_np, dtype=backend.default_float),
+        next_cache=backend.asarray(next_cache_np, dtype=backend.default_int),
+        stats=TreeLogStats(num_batches=1),
+        backend=backend,
+    )
+
+    batch = backend.asarray(rng_np.normal(size=(16, dim)), dtype=backend.default_float)
+    plan = plan_batch_insert(tree, batch, mis_seed=seed)
+
+    indicator = plan.mis_result.independent_set.tolist()
+    selected = {idx for idx, flag in enumerate(indicator) if flag == 1}
+    assert selected
+
+    indptr = plan.conflict_graph.indptr.tolist()
+    indices = plan.conflict_graph.indices.tolist()
+    for node in selected:
+        neighbors = set(indices[indptr[node] : indptr[node + 1]])
+        assert neighbors.isdisjoint(selected)
+
+    dominated = set(range(batch.shape[0])) - selected
+    for node in dominated:
+        neighbors = set(indices[indptr[node] : indptr[node + 1]])
+        assert neighbors & selected
+
+    assert plan.mis_result.iterations >= 1

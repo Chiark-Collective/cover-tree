@@ -146,17 +146,17 @@ To keep the pipeline tight while hitting meaningful milestones, introduce three 
 1. **Traversal + Cache Sanity**
    - After building the initial PCCTree, run batched `traverse_collect_scopes` and verify `(parent, level)` plus scope contents against the sequential traversal and the cached `S_i/Next` tables.
    - Ensures traversal logic, cover sets, and caches are aligned before MIS is involved.
-   - Status: `tests/integration/test_structural_core.py::test_traversal_matches_naive_computation` exercises this check on a hand-crafted tree; extend to auto-generated fixtures next.
+   - Status: `tests/integration/test_structural_core.py::test_traversal_matches_naive_computation` plus randomized fixtures (`test_randomized_structural_invariants`) cover deterministic and stochastic trees.
 2. **Scoped Conflict Graph**
    - For a fixed level `k`, construct `Π_{P_i} ∩ L_k` and resulting CSR edges, then compare against a brute-force “check all pairs” routine.
    - Confirms annulus restriction and edge generation behave before entering Luby MIS.
-   - Status: `tests/integration/test_structural_core.py::test_conflict_graph_matches_bruteforce_edges` now locks this behaviour; will expand to randomized batches once annulus binning lands.
+   - Status: `tests/integration/test_structural_core.py::test_conflict_graph_matches_bruteforce_edges` and randomized checks assert CSR edges and annulus bin metadata.
 
 ### Tier B – Parallel Update Mechanics
 3. **Level-wise MIS Update**
    - Feed a controlled batch through `batch_insert`, capturing intermediate MIS selections; compare against a reference MIS (deterministic seed) and ensure post-update levels satisfy separation.
    - Verifies orchestration of prefix-doubling, per-level MIS, and redistribution without yet touching Vecchia.
-   - Status: `plan_batch_insert` + `batch_insert` skeleton wired into integration test (`tests/integration/test_parallel_update.py`); next steps: enforce per-level redistribution and persistence diff checks.
+   - Status: `plan_batch_insert` + `batch_insert` skeleton wired into integration test (`tests/integration/test_parallel_update.py`), appending selected nodes while keeping originals untouched; next steps: enforce per-level redistribution and persistence diff checks.
 4. **Persistence Path Copy**
    - Execute successive updates, then diff consecutive tree versions to confirm only the intended level slices/child ranges changed and earlier versions remain queryable.
    - Confirms the path-copy strategy required for async rebuild.
