@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "covertreex"
+version = "0.0.1"
+description = "Parallel compressed cover tree (PCCT) library targeting JAX-based Vecchia GP workloads."
+requires-python = ">=3.12"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+authors = [
+  {name = "Liam", email = "liam@example.com"}
+]
+dependencies = [
+  "jax>=0.4.28",
+  "jaxlib>=0.4.28",
+  "numpy>=2.0.0",
+  "typing-extensions>=4.9.0"
+]
+
+[project.optional-dependencies]
+numba = ["numba>=0.59.0"]
+dev = [
+  "pytest>=8.2",
+  "pytest-benchmark>=4.0.0",
+  "rich>=13.7"
+]
+
+[project.urls]
+homepage = "https://github.com/chiark/cover-tree"
+repository = "https://github.com/chiark/cover-tree"
+
+[tool.setuptools]
+package-dir = {"" = "."}
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["covertreex*"]
