@@ -65,6 +65,33 @@ def _require_numba() -> None:
         )
 
 
+_SCOPE_WARMED = False
+
+
+def warmup_scope_builder() -> None:
+    """Trigger Numba compilation for the scope adjacency kernels."""
+
+    global _SCOPE_WARMED
+    if _SCOPE_WARMED or not NUMBA_SCOPE_AVAILABLE:
+        return
+
+    scope_indptr = np.asarray([0, 3, 5], dtype=np.int64)
+    scope_indices = np.asarray([0, 1, 2, 1, 2], dtype=np.int64)
+    pairwise = np.zeros((6, 6), dtype=np.float64)
+    radii = np.ones(6, dtype=np.float64)
+
+    build_conflict_graph_numba_dense(
+        scope_indptr,
+        scope_indices,
+        batch_size=2,
+        segment_dedupe=True,
+        chunk_target=0,
+        pairwise=pairwise,
+        radii=radii,
+    )
+    _SCOPE_WARMED = True
+
+
 if NUMBA_SCOPE_AVAILABLE:
 
     @nb.njit(cache=True)
@@ -465,3 +492,14 @@ else:  # pragma: no cover - executed when numba missing
     ) -> ScopeAdjacencyResult:
         _require_numba()
         raise AssertionError("unreachable")
+
+
+if NUMBA_SCOPE_AVAILABLE:
+    warmup_scope_builder()
+
+
+__all__ = [
+    "NUMBA_SCOPE_AVAILABLE",
+    "build_conflict_graph_numba_dense",
+    "warmup_scope_builder",
+]
