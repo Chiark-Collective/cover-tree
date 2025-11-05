@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Tuple
+from typing import Any, List, Tuple
 
 import jax
 import numpy as np
 
+from covertreex.algo.semisort import group_by_int
 from covertreex.algo.traverse import TraversalResult
 from covertreex.core.tree import PCCTree, TreeBackend
 
@@ -48,7 +49,6 @@ def build_conflict_graph(
     """Construct a conflict graph with distance-aware pruning."""
 
     backend = backend or tree.backend
-    scopes = traversal.conflict_scopes
     batch = backend.asarray(batch_points, dtype=backend.default_float)
     xp = backend.xp
     if batch.size:
@@ -59,8 +59,24 @@ def build_conflict_graph(
         pairwise_np = []
 
     batch_size = int(traversal.parents.shape[0])
-    adjacency: List[set[int]] = [set() for _ in range(batch_size)]
-    membership: Dict[int, List[int]] = {}
+
+    scope_indptr_np = np.asarray(backend.to_numpy(traversal.scope_indptr), dtype=np.int64)
+    scope_indices_np = np.asarray(backend.to_numpy(traversal.scope_indices), dtype=np.int64)
+    if scope_indices_np.size:
+        counts = np.diff(scope_indptr_np)
+        point_ids = np.repeat(np.arange(batch_size, dtype=np.int64), counts)
+        grouped_scopes = group_by_int(
+            backend.asarray(scope_indices_np, dtype=backend.default_int),
+            backend.asarray(point_ids, dtype=backend.default_int),
+            backend=backend,
+        )
+        group_keys = np.asarray(backend.to_numpy(grouped_scopes.keys), dtype=np.int64)
+        group_indptr = np.asarray(backend.to_numpy(grouped_scopes.indptr), dtype=np.int64)
+        group_values = np.asarray(backend.to_numpy(grouped_scopes.values), dtype=np.int64)
+    else:
+        group_keys = np.asarray([], dtype=np.int64)
+        group_indptr = np.asarray([0], dtype=np.int64)
+        group_values = np.asarray([], dtype=np.int64)
 
     parents_np = backend.to_numpy(traversal.parents)
     levels_np = backend.to_numpy(traversal.levels)
@@ -74,15 +90,17 @@ def build_conflict_graph(
             si = float(tree.si_cache[parent])
             radii.append(max(base, si))
 
-    for point_idx, scope in enumerate(scopes):
-        for node_idx in scope:
-            membership.setdefault(int(node_idx), []).append(point_idx)
-
-    for nodes in membership.values():
-        if len(nodes) < 2:
+    adjacency: List[set[int]] = [set() for _ in range(batch_size)]
+    for idx in range(group_keys.shape[0]):
+        start = group_indptr[idx]
+        end = group_indptr[idx + 1]
+        nodes = group_values[start:end]
+        if nodes.shape[0] < 2:
             continue
-        for i, u in enumerate(nodes):
-            for v in nodes[i + 1 :]:
+        for i in range(nodes.shape[0]):
+            u = int(nodes[i])
+            for j in range(i + 1, nodes.shape[0]):
+                v = int(nodes[j])
                 distance = pairwise_np[u][v] if batch_size else 0.0
                 threshold = min(radii[u], radii[v])
                 if distance <= threshold:
@@ -108,33 +126,24 @@ def build_conflict_graph(
     annulus_bins = xp.floor(log_r).astype(backend.default_int)
     annulus_bins = xp.where(xp.isinf(radii_arr), -1, annulus_bins)
 
-    annulus_bins_host = np.asarray(backend.to_numpy(annulus_bins), dtype=np.int64)
-    if annulus_bins_host.size:
-        sorted_order = np.argsort(annulus_bins_host, kind="stable")
-        sorted_bins = annulus_bins_host[sorted_order]
-        bin_ids: List[int] = []
-        counts: List[int] = []
-        current = int(sorted_bins[0])
-        count = 0
-        for val in sorted_bins:
-            if int(val) != current:
-                bin_ids.append(current)
-                counts.append(count)
-                current = int(val)
-                count = 1
-            else:
-                count += 1
-        bin_ids.append(current)
-        counts.append(count)
-        bin_indptr_np = np.concatenate([[0], np.cumsum(counts, dtype=np.int64)])
+    annulus_bins_np = np.asarray(backend.to_numpy(annulus_bins), dtype=np.int64)
+    if annulus_bins_np.size:
+        min_bin = int(annulus_bins_np.min())
+        shifted = annulus_bins_np - min_bin
+        indices_np = np.arange(annulus_bins_np.size, dtype=np.int64)
+        grouped_bins = group_by_int(
+            backend.asarray(shifted, dtype=backend.default_int),
+            backend.asarray(indices_np, dtype=backend.default_int),
+            backend=backend,
+        )
+        bin_ids_np = np.asarray(backend.to_numpy(grouped_bins.keys), dtype=np.int64) + min_bin
+        annulus_bin_ids = backend.asarray(bin_ids_np, dtype=backend.default_int)
+        annulus_bin_indptr = grouped_bins.indptr
+        annulus_bin_indices = grouped_bins.values
     else:
-        sorted_order = np.array([], dtype=np.int64)
-        bin_ids = []
-        bin_indptr_np = np.array([0], dtype=np.int64)
-
-    annulus_bin_indices = backend.asarray(sorted_order, dtype=backend.default_int)
-    annulus_bin_indptr = backend.asarray(bin_indptr_np, dtype=backend.default_int)
-    annulus_bin_ids = backend.asarray(bin_ids, dtype=backend.default_int)
+        annulus_bin_ids = backend.asarray([], dtype=backend.default_int)
+        annulus_bin_indptr = backend.asarray([0], dtype=backend.default_int)
+        annulus_bin_indices = backend.asarray([], dtype=backend.default_int)
 
     return ConflictGraph(
         indptr=indptr,

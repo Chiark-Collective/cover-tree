@@ -80,6 +80,7 @@ Deliver a reusable “parallel compressed cover tree” (PCCT) library that comb
    - Prefix-doubling grouping, per-level MIS loop, persistence-backed updates.
    - Redistribution: update `(P_j, ℓ_j)` via ceil-log₂ distance to new anchors.
    - Tests: invariants, distance counts, parity with sequential compressed build.
+   - Status: Level offsets now regenerated after inserts with copy-on-write coverage. Child adjacency now maintained (per-parent head pointer with singly linked list via `next_cache`), dominated points reattach to MIS-selected anchors via annulus neighborhoods, and prefix-doubling orchestration is available for randomized batches. Outstanding: integrate per-level semisort/annulus pruning with conflict-graph construction and replace host-side separation fallbacks with analytic guarantees.
 
 7. **Batch delete (Alg. 5)**
    - Implement uncovered-set processing, MIS promotion, new-root creation.
@@ -156,10 +157,10 @@ To keep the pipeline tight while hitting meaningful milestones, introduce three 
 3. **Level-wise MIS Update**
    - Feed a controlled batch through `batch_insert`, capturing intermediate MIS selections; compare against a reference MIS (deterministic seed) and ensure post-update levels satisfy separation.
    - Verifies orchestration of prefix-doubling, per-level MIS, and redistribution without yet touching Vecchia.
-   - Status: `plan_batch_insert` + `batch_insert` skeleton wired into integration test (`tests/integration/test_parallel_update.py`), appending selected nodes while keeping originals untouched; next steps: enforce per-level redistribution and persistence diff checks.
+   - Status: `plan_batch_insert` + `batch_insert` wired into integration tests (`tests/integration/test_parallel_update.py`), now inserting MIS winners plus redistributed followers while keeping originals untouched; next steps: enforce per-level separation invariants (especially when clamped at level 0) and persistence diff checks.
 4. **Persistence Path Copy**
    - Execute successive updates, then diff consecutive tree versions to confirm only the intended level slices/child ranges changed and earlier versions remain queryable.
-   - Confirms the path-copy strategy required for async rebuild.
+   - Status: `tests/integration/test_parallel_update.py::test_batch_insert_persistence_across_versions` exercises back-to-back inserts, confirming prior versions retain their buffers; upcoming work: automate diffing of level-offset slices.
 
 ### Tier C – Application Hooks
 5. **Async Refresh Harness**
@@ -234,3 +235,13 @@ tree3 = txn.commit()
 - **Playbook-style guides:** “Replace your existing cover tree build with PCCTree”, “Batch updates during streaming ingestion”, “Hooking PCCTree into scikit-learn pipelines”.
 - **Snippets-first:** every major method documented with minimal runnable code (works in REPL, Colab, or plain Python).
 - **Reference to theory:** docstrings link back to algorithm/lemma identifiers so practitioners can align implementation with the papers when auditing correctness.
+
+## Living Journal
+
+- 2025-11-03: Added level-offset recomputation to `batch_insert` (counts per level descending) and extended Tier-B integration tests to check copy-on-write behaviour and empty-tree bootstrap. Full suite (`uv run pytest`) passing. Outstanding work: wire child adjacency/Next updates during insert and implement redistribution for dominated batch points.
+- 2025-11-03: `BatchInsertPlan` now exposes dominated indices alongside MIS selections, and Tier-B tests assert coverage; redistribution uses these summaries downstream.
+- 2025-11-03: Sketched child-adjacency strategy — treat `children[p]` and `next_cache[p]` as the head of a per-parent singly linked list, inserting new anchors at the front while chaining the previous head behind the inserted node. New nodes keep `next_cache[new] = -1` when they lack descendants; dominated points will later splice under winning parents at lower levels.
+- 2025-11-03: Child adjacency wiring landed: `batch_insert` now updates parent head pointers and stitches the prior child chain behind the inserted anchors, with integration tests covering existing-child and leaf-parent cases.
+- 2025-11-03: Redistribution pass implemented—dominated points drop one level (host-side separation guard ensures >2^ℓ spacing unless already at level 0), and Tier-B invariants check ordering/level adjustments. Next iteration: enforce separation against new anchors and diff persistence snapshots.
+- 2025-11-03: Prefix-doubling orchestrator + semisort utility added; redistribution now targets MIS-selected anchors via annulus scopes. Remaining work: plug semisort into conflict-graph construction and replace separation fallbacks with invariant-based checks.
+- 2025-11-03: Persistence diff test added plus level-0 collision logging; back-to-back inserts keep previous versions intact while emitting debug breadcrumbs when separation falls back at leaf scale.
