@@ -19,6 +19,30 @@ _SUPPORTED_BACKENDS = {"jax", "numpy"}
 _SUPPORTED_PRECISION = {"float32", "float64"}
 _CONFLICT_GRAPH_IMPLS = {"dense", "segmented", "auto"}
 _DEFAULT_SCOPE_CHUNK_TARGET = 65_536
+_DEFAULT_NUMBA_THREADING_LAYER = "tbb"
+
+
+def _ensure_env(var: str, value: str) -> None:
+    if os.getenv(var) is None:
+        os.environ[var] = value
+
+
+def _configure_threading_defaults() -> None:
+    """Set conservative threading defaults unless the user overrides them."""
+
+    _ensure_env("OMP_NUM_THREADS", "1")
+    _ensure_env("OPENBLAS_NUM_THREADS", "1")
+    _ensure_env("MKL_NUM_THREADS", "1")
+    _ensure_env("NUMEXPR_NUM_THREADS", "1")
+    threads = os.getenv("NUMBA_NUM_THREADS")
+    if threads is None:
+        count = os.cpu_count() or 1
+        os.environ["NUMBA_NUM_THREADS"] = str(count)
+    if os.getenv("NUMBA_THREADING_LAYER") is None:
+        os.environ["NUMBA_THREADING_LAYER"] = _DEFAULT_NUMBA_THREADING_LAYER
+
+
+_configure_threading_defaults()
 
 
 def _bool_from_env(value: str | None, *, default: bool) -> bool:

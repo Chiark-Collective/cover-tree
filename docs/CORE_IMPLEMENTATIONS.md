@@ -81,6 +81,11 @@ To capture warm-up versus steady-state timings for plotting, append `--csv-outpu
 - The first PCCT build in any fresh Python session pays the full Numba compilation cost plus the actual 32 k build (≈40 s in the latest 8-dim profile). Subsequent builds reuse the cached kernels and drop to the steady-state numbers shown above (sub-second per batch).
 - To hide the one-time hit in production pipelines, kick off a tiny “warm-up” batch during process start-up—for example, build a 64-point tree with the same runtime flags before ingesting real data. This compiles all hot kernels without noticeably touching RSS or wall time.
 
+### Threading defaults
+
+- On import we clamp `OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS`, `MKL_NUM_THREADS`, and `NUMEXPR_NUM_THREADS` to 1 so NumPy/BLAS libraries do not oversubscribe the worker pool. We also set `NUMBA_THREADING_LAYER=tbb` and default `NUMBA_NUM_THREADS` to the host CPU count (override any of these via environment variables before importing `covertreex`).
+- For heavier boxes increase `NUMBA_NUM_THREADS` and, if needed, batch size (`--batch-size`) and `COVERTREEX_SCOPE_CHUNK_TARGET` to keep each worker busy. The TBB threading layer provides work-stealing, so threads redistribute skewed batches automatically once these pools are configured.
+
 ## Parallel Compressed Cover Tree — Conflict Graph Builder (dense + segmented)
 
 ```python
