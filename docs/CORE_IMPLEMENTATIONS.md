@@ -80,6 +80,7 @@ To capture warm-up versus steady-state timings for plotting, append `--csv-outpu
 
 - The first PCCT build in any fresh Python session pays the full Numba compilation cost plus the actual 32 k build (≈40 s in the latest 8-dim profile). Subsequent builds reuse the cached kernels and drop to the steady-state numbers shown above (sub-second per batch).
 - To hide the one-time hit in production pipelines, kick off a tiny “warm-up” batch during process start-up—for example, build a 64-point tree with the same runtime flags before ingesting real data. This compiles all hot kernels without noticeably touching RSS or wall time.
+- To quantify the difference in practice, run `benchmarks.runtime_breakdown` with `--runs 5` (or similar). The CSV now includes a `run` column, letting you compare the first-build warm-up against subsequent steady-state runs directly.
 
 ### Threading defaults
 

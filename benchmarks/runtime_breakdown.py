@@ -7,6 +7,7 @@ import os
 import resource
 import time
 from dataclasses import dataclass
+from statistics import mean, median
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -159,6 +160,40 @@ def _format_resource_summary(
         f"rssΔ={_format_bytes(rss_delta)} "
         f"max={_format_bytes(max_rss)}"
     )
+
+
+def _print_multi_run_summary(all_results: List[List[ImplementationResult]]) -> None:
+    labels = sorted({res.label for run in all_results for res in run})
+    print("=== Aggregate Summary ===")
+    for label in labels:
+        label_results: List[ImplementationResult] = []
+        for run in all_results:
+            match = next((res for res in run if res.label == label), None)
+            if match is not None:
+                label_results.append(match)
+        if not label_results:
+            continue
+
+        build_totals = [res.build_seconds for res in label_results]
+        build_warmups = [res.build_warmup_seconds for res in label_results]
+        query_totals = [res.query_seconds for res in label_results]
+
+        print(f"{label}:")
+        print(
+            f"  build total: first={build_totals[0]:.3f}s "
+            f"mean={mean(build_totals):.3f}s median={median(build_totals):.3f}s "
+            f"min={min(build_totals):.3f}s max={max(build_totals):.3f}s"
+        )
+        print(
+            f"  build warmup: first={build_warmups[0]:.3f}s "
+            f"mean={mean(build_warmups):.3f}s median={median(build_warmups):.3f}s "
+            f"min={min(build_warmups):.3f}s max={max(build_warmups):.3f}s"
+        )
+        print(
+            f"  query steady: first={query_totals[0]:.3f}s "
+            f"mean={mean(query_totals):.3f}s median={median(query_totals):.3f}s "
+            f"min={min(query_totals):.3f}s max={max(query_totals):.3f}s"
+        )
 
 
 @contextlib.contextmanager
@@ -546,6 +581,12 @@ def _parse_args() -> argparse.Namespace:
         default="",
         help="Optional path to write warm-up vs steady-state metrics as CSV.",
     )
+    parser.add_argument(
+        "--runs",
+        type=int,
+        default=1,
+        help="Number of repeated benchmark runs (default: 1).",
+    )
     return parser.parse_args()
 
 
@@ -559,76 +600,101 @@ def main() -> None:
         seed=args.seed,
     )
 
-    results: List[ImplementationResult] = []
+    runs = max(1, args.runs)
+    all_results: List[List[ImplementationResult]] = []
 
-    if not args.skip_jax and DEFAULT_BACKEND.name == "jax":
-        results.append(
-            _run_pcct_variant(
-                label="PCCT (JAX)",
-                points=points_np,
-                queries=queries_np,
-                batch_size=args.batch_size,
-                k=args.k,
-                seed=args.seed,
-                enable_numba=False,
+    for run_idx in range(runs):
+        if runs > 1:
+            print(f"=== Run {run_idx + 1}/{runs} ===")
+        run_seed = args.seed + run_idx
+        run_results: List[ImplementationResult] = []
+
+        if not args.skip_jax and DEFAULT_BACKEND.name == "jax":
+            run_results.append(
+                _run_pcct_variant(
+                    label="PCCT (JAX)",
+                    points=points_np,
+                    queries=queries_np,
+                    batch_size=args.batch_size,
+                    k=args.k,
+                    seed=run_seed,
+                    enable_numba=False,
+                )
             )
-        )
 
-    if not args.skip_numba:
-        results.append(
-            _run_pcct_variant(
-                label="PCCT (Numba)",
-                points=points_np,
-                queries=queries_np,
-                batch_size=args.batch_size,
-                k=args.k,
-                seed=args.seed,
-                enable_numba=True,
+        if not args.skip_numba:
+            run_results.append(
+                _run_pcct_variant(
+                    label="PCCT (Numba)",
+                    points=points_np,
+                    queries=queries_np,
+                    batch_size=args.batch_size,
+                    k=args.k,
+                    seed=run_seed,
+                    enable_numba=True,
+                )
             )
-        )
 
-    if not args.skip_sequential:
-        results.append(
-            _run_sequential_baseline(
-                label="Sequential Baseline",
-                points=points_np,
-                queries=queries_np,
-                k=args.k,
-                constructor=BaselineCoverTree,
-            )
-        )
-
-    if not args.skip_gpboost:
-        if has_gpboost_cover_tree():
-            results.append(
+        if not args.skip_sequential:
+            run_results.append(
                 _run_sequential_baseline(
-                    label="GPBoost CoverTree",
+                    label="Sequential Baseline",
                     points=points_np,
                     queries=queries_np,
                     k=args.k,
-                    constructor=GPBoostCoverTreeBaseline,
+                    constructor=BaselineCoverTree,
                 )
             )
-        else:
-            print("GPBoost cover tree baseline unavailable; skipping.")
 
-    if not args.skip_external and has_external_cover_tree():
-        results.append(
-            _run_sequential_baseline(
-                label="External CoverTree",
-                points=points_np,
-                queries=queries_np,
-                k=args.k,
-                constructor=ExternalCoverTreeBaseline,
+        if not args.skip_gpboost:
+            if has_gpboost_cover_tree():
+                run_results.append(
+                    _run_sequential_baseline(
+                        label="GPBoost CoverTree",
+                        points=points_np,
+                        queries=queries_np,
+                        k=args.k,
+                        constructor=GPBoostCoverTreeBaseline,
+                    )
+                )
+            elif run_idx == 0:
+                print("GPBoost cover tree baseline unavailable; skipping.")
+
+        if not args.skip_external and has_external_cover_tree():
+            run_results.append(
+                _run_sequential_baseline(
+                    label="External CoverTree",
+                    points=points_np,
+                    queries=queries_np,
+                    k=args.k,
+                    constructor=ExternalCoverTreeBaseline,
+                )
             )
-        )
-    elif not has_external_cover_tree():
-        print("External cover tree baseline unavailable; skipping.")
+        elif (not args.skip_external) and run_idx == 0:
+            print("External cover tree baseline unavailable; skipping.")
+
+        for res in run_results:
+            notes = f" ({res.notes})" if res.notes else ""
+            print(
+                f"{res.label}: "
+                f"build={res.build_seconds:.3f}s "
+                f"[{_format_resource_summary(res.build_cpu_seconds, res.build_cpu_utilisation, res.build_rss_delta_bytes, res.build_max_rss_bytes)}] "
+                f"query={res.query_seconds:.3f}s "
+                f"[{_format_resource_summary(res.query_cpu_seconds, res.query_cpu_utilisation, res.query_rss_delta_bytes, res.query_max_rss_bytes)}]"
+                f"{notes}"
+            )
+
+        all_results.append(run_results)
+
+    # Use the last run for plotting to keep behaviour predictable
+    results = all_results[-1] if all_results else []
 
     output_path = args.output or None
     _plot_results(results, output=output_path, show=args.show)
+
     if args.csv_output:
         fieldnames = [
+            "run",
             "label",
             "build_warmup_seconds",
             "build_steady_seconds",
@@ -647,44 +713,38 @@ def main() -> None:
         with open(args.csv_output, "w", newline="") as csv_file:
             writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
             writer.writeheader()
-            for res in results:
-                writer.writerow(
-                    {
-                        "label": res.label,
-                        "build_warmup_seconds": res.build_warmup_seconds,
-                        "build_steady_seconds": res.build_steady_seconds,
-                        "build_total_seconds": res.build_seconds,
-                        "query_warmup_seconds": res.query_warmup_seconds,
-                        "query_steady_seconds": res.query_steady_seconds,
-                        "build_cpu_seconds": res.build_cpu_seconds,
-                        "build_cpu_utilisation": res.build_cpu_utilisation,
-                        "build_rss_delta_bytes": res.build_rss_delta_bytes
-                        if res.build_rss_delta_bytes is not None
-                        else "",
-                        "build_max_rss_bytes": res.build_max_rss_bytes
-                        if res.build_max_rss_bytes is not None
-                        else "",
-                        "query_cpu_seconds": res.query_cpu_seconds,
-                        "query_cpu_utilisation": res.query_cpu_utilisation,
-                        "query_rss_delta_bytes": res.query_rss_delta_bytes
-                        if res.query_rss_delta_bytes is not None
-                        else "",
-                        "query_max_rss_bytes": res.query_max_rss_bytes
-                        if res.query_max_rss_bytes is not None
-                        else "",
-                    }
-                )
+            for run_idx, run in enumerate(all_results, start=1):
+                for res in run:
+                    writer.writerow(
+                        {
+                            "run": run_idx,
+                            "label": res.label,
+                            "build_warmup_seconds": res.build_warmup_seconds,
+                            "build_steady_seconds": res.build_steady_seconds,
+                            "build_total_seconds": res.build_seconds,
+                            "query_warmup_seconds": res.query_warmup_seconds,
+                            "query_steady_seconds": res.query_steady_seconds,
+                            "build_cpu_seconds": res.build_cpu_seconds,
+                            "build_cpu_utilisation": res.build_cpu_utilisation,
+                            "build_rss_delta_bytes": res.build_rss_delta_bytes
+                            if res.build_rss_delta_bytes is not None
+                            else "",
+                            "build_max_rss_bytes": res.build_max_rss_bytes
+                            if res.build_max_rss_bytes is not None
+                            else "",
+                            "query_cpu_seconds": res.query_cpu_seconds,
+                            "query_cpu_utilisation": res.query_cpu_utilisation,
+                            "query_rss_delta_bytes": res.query_rss_delta_bytes
+                            if res.query_rss_delta_bytes is not None
+                            else "",
+                            "query_max_rss_bytes": res.query_max_rss_bytes
+                            if res.query_max_rss_bytes is not None
+                            else "",
+                        }
+                    )
 
-    for res in results:
-        notes = f" ({res.notes})" if res.notes else ""
-        print(
-            f"{res.label}: "
-            f"build={res.build_seconds:.3f}s "
-            f"[{_format_resource_summary(res.build_cpu_seconds, res.build_cpu_utilisation, res.build_rss_delta_bytes, res.build_max_rss_bytes)}] "
-            f"query={res.query_seconds:.3f}s "
-            f"[{_format_resource_summary(res.query_cpu_seconds, res.query_cpu_utilisation, res.query_rss_delta_bytes, res.query_max_rss_bytes)}]"
-            f"{notes}"
-        )
+    if runs > 1:
+        _print_multi_run_summary(all_results)
 
 
 if __name__ == "__main__":
