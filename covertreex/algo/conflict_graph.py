@@ -81,6 +81,8 @@ class _AdjacencyBuild:
     targets_seconds: float
     scatter_seconds: float
     dedup_seconds: float
+    csr_indptr: Any | None = None
+    csr_indices: Any | None = None
     total_pairs: int = 0
     candidate_pairs: int = 0
     max_group_size: int = 0
@@ -125,6 +127,8 @@ def _build_dense_adjacency(
     bytes_d2h = 0
     bytes_h2d = 0
     radius_pruned = False
+    csr_indptr_np: np.ndarray | None = None
+    csr_indices_np: np.ndarray | None = None
 
     if batch_size and scope_indices.size:
         runtime = cx_config.runtime_config()
@@ -164,14 +168,10 @@ def _build_dense_adjacency(
                 radii=radii_np,
             )
             numba_seconds = time.perf_counter() - numba_start
-            sources = backend.asarray(
-                adjacency.sources.astype(np.int32), dtype=backend.default_int
-            )
-            targets = backend.asarray(
-                adjacency.targets.astype(np.int32), dtype=backend.default_int
-            )
-            _block_until_ready(sources)
-            _block_until_ready(targets)
+            sources = adjacency.sources.astype(np.int32, copy=False)
+            targets = adjacency.targets.astype(np.int32, copy=False)
+            csr_indptr_np = adjacency.csr_indptr.astype(np.int64, copy=False)
+            csr_indices_np = adjacency.csr_indices.astype(np.int32, copy=False)
             scatter_seconds = numba_seconds
             total_pairs = int(adjacency.total_pairs)
             candidate_pairs = int(adjacency.candidate_pairs)
@@ -181,9 +181,7 @@ def _build_dense_adjacency(
             scope_domination_ratio = (
                 scope_groups_unique / scope_groups if scope_groups else 0.0
             )
-            bytes_h2d = int(
-                adjacency.sources.nbytes + adjacency.targets.nbytes
-            )
+            bytes_h2d = int(csr_indptr_np.nbytes + csr_indices_np.nbytes)
             radius_pruned = True
         else:
             counts_np = np.diff(scope_indptr_np)
@@ -356,6 +354,8 @@ def _build_dense_adjacency(
     return _AdjacencyBuild(
         sources=sources,
         targets=targets,
+        csr_indptr=csr_indptr_np,
+        csr_indices=csr_indices_np,
         membership_seconds=membership_seconds,
         targets_seconds=targets_seconds,
         scatter_seconds=scatter_seconds,
@@ -567,7 +567,23 @@ def build_conflict_graph(
     adjacency_sort_seconds = 0.0
     adjacency_csr_seconds = 0.0
 
-    if sources.size:
+    csr_indptr_np = adjacency_build.csr_indptr
+    csr_indices_np = adjacency_build.csr_indices
+
+    if csr_indptr_np is not None and csr_indices_np is not None:
+        csr_start = time.perf_counter()
+        indptr = backend.asarray(
+            np.asarray(csr_indptr_np, dtype=np.int64), dtype=backend.default_int
+        )
+        indices = backend.asarray(
+            np.asarray(csr_indices_np, dtype=np.int32), dtype=backend.default_int
+        )
+        adjacency_csr_seconds = time.perf_counter() - csr_start
+
+        indptr = backend.device_put(indptr)
+        indices = backend.device_put(indices)
+        _block_until_ready(indices)
+    elif sources.size:
         csr_start = time.perf_counter()
         sources_np = np.asarray(backend.to_numpy(sources), dtype=np.int64)
         targets_np = np.asarray(backend.to_numpy(targets), dtype=np.int64)

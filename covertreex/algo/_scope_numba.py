@@ -24,6 +24,8 @@ class ScopeAdjacencyResult:
 
     sources: np.ndarray
     targets: np.ndarray
+    csr_indptr: np.ndarray
+    csr_indices: np.ndarray
     max_group_size: int
     total_pairs: int
     candidate_pairs: int
@@ -328,20 +330,26 @@ if NUMBA_SCOPE_AVAILABLE:
         return sources, targets, used
 
     @nb.njit(cache=True)
-    def _compact_pairs(
+    def _pairs_to_csr(
         sources: np.ndarray,
         targets: np.ndarray,
         offsets: np.ndarray,
         used: np.ndarray,
+        batch_size: int,
     ):
         total_used = I64(0)
-        for i in range(used.size):
-            total_used += used[i]
-        if total_used == sources.size:
-            return sources, targets, int(total_used)
+        for node in range(used.size):
+            total_used += used[node]
 
-        out_src = np.empty(total_used, dtype=I32)
-        out_dst = np.empty(total_used, dtype=I32)
+        total_used_int = int(total_used)
+        if total_used_int == 0:
+            indptr = np.zeros(batch_size + 1, dtype=I64)
+            indices = np.empty(0, dtype=I32)
+            return indptr, indices, total_used_int
+
+        trimmed_src = np.empty(total_used_int, dtype=I32)
+        trimmed_dst = np.empty(total_used_int, dtype=I32)
+        counts = np.zeros(batch_size, dtype=I64)
         cursor = I64(0)
         for node in range(used.size):
             count = used[node]
@@ -349,10 +357,28 @@ if NUMBA_SCOPE_AVAILABLE:
                 continue
             start_in = offsets[node]
             for j in range(count):
-                out_src[cursor + j] = sources[start_in + j]
-                out_dst[cursor + j] = targets[start_in + j]
-            cursor += count
-        return out_src, out_dst, int(total_used)
+                src = int(sources[start_in + j])
+                tgt = targets[start_in + j]
+                trimmed_src[cursor] = src
+                trimmed_dst[cursor] = tgt
+                counts[src] += 1
+                cursor += 1
+        indptr = np.empty(batch_size + 1, dtype=I64)
+        acc = I64(0)
+        indptr[0] = 0
+        for i in range(batch_size):
+            acc += counts[i]
+            indptr[i + 1] = acc
+
+        indices = np.empty(total_used_int, dtype=I32)
+        heads = indptr[:-1].copy()
+        for i in range(total_used_int):
+            src = int(trimmed_src[i])
+            pos = heads[src]
+            indices[pos] = trimmed_dst[i]
+            heads[src] = pos + 1
+
+        return indptr, indices, total_used_int
 
     def build_conflict_graph_numba_dense(
         scope_indptr: np.ndarray,
@@ -368,6 +394,8 @@ if NUMBA_SCOPE_AVAILABLE:
             return ScopeAdjacencyResult(
                 sources=np.empty(0, dtype=I32),
                 targets=np.empty(0, dtype=I32),
+                csr_indptr=np.zeros(batch_size + 1, dtype=I64),
+                csr_indices=np.empty(0, dtype=I32),
                 max_group_size=0,
                 total_pairs=0,
                 candidate_pairs=0,
@@ -409,6 +437,8 @@ if NUMBA_SCOPE_AVAILABLE:
             return ScopeAdjacencyResult(
                 sources=np.empty(0, dtype=I32),
                 targets=np.empty(0, dtype=I32),
+                csr_indptr=np.zeros(batch_size + 1, dtype=I64),
+                csr_indices=np.empty(0, dtype=I32),
                 max_group_size=int(max_group_size),
                 total_pairs=0,
                 candidate_pairs=0,
@@ -423,6 +453,8 @@ if NUMBA_SCOPE_AVAILABLE:
             return ScopeAdjacencyResult(
                 sources=np.empty(0, dtype=I32),
                 targets=np.empty(0, dtype=I32),
+                csr_indptr=np.zeros(batch_size + 1, dtype=I64),
+                csr_indices=np.empty(0, dtype=I32),
                 max_group_size=int(max_group_size),
                 total_pairs=0,
                 candidate_pairs=candidate_pairs,
@@ -437,6 +469,8 @@ if NUMBA_SCOPE_AVAILABLE:
             return ScopeAdjacencyResult(
                 sources=np.empty(0, dtype=I32),
                 targets=np.empty(0, dtype=I32),
+                csr_indptr=np.zeros(batch_size + 1, dtype=I64),
+                csr_indices=np.empty(0, dtype=I32),
                 max_group_size=int(max_group_size),
                 total_pairs=0,
                 candidate_pairs=candidate_pairs,
@@ -452,16 +486,19 @@ if NUMBA_SCOPE_AVAILABLE:
             pairwise_arr,
             radii_arr,
         )
-        sources, targets, actual_pairs = _compact_pairs(
+        csr_indptr, csr_indices, actual_pairs = _pairs_to_csr(
             sources,
             targets,
             offsets,
             used_counts,
+            batch_size,
         )
         if actual_pairs == 0:
             return ScopeAdjacencyResult(
                 sources=np.empty(0, dtype=I32),
                 targets=np.empty(0, dtype=I32),
+                csr_indptr=np.zeros(batch_size + 1, dtype=I64),
+                csr_indices=np.empty(0, dtype=I32),
                 max_group_size=int(max_group_size),
                 total_pairs=0,
                 candidate_pairs=candidate_pairs,
@@ -469,8 +506,10 @@ if NUMBA_SCOPE_AVAILABLE:
                 num_unique_groups=num_unique_groups,
             )
         return ScopeAdjacencyResult(
-            sources=sources,
-            targets=targets,
+            sources=np.empty(0, dtype=I32),
+            targets=np.empty(0, dtype=I32),
+            csr_indptr=csr_indptr,
+            csr_indices=csr_indices,
             max_group_size=int(max_group_size),
             total_pairs=actual_pairs,
             candidate_pairs=candidate_pairs,
