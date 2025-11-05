@@ -522,6 +522,11 @@ def _parse_args() -> argparse.Namespace:
         help="Skip the GPBoost cover tree baseline if numba is installed.",
     )
     parser.add_argument(
+        "--skip-sequential",
+        action="store_true",
+        help="Skip the sequential cover tree baseline.",
+    )
+    parser.add_argument(
         "--csv-output",
         type=str,
         default="",
@@ -568,15 +573,16 @@ def main() -> None:
             )
         )
 
-    results.append(
-        _run_sequential_baseline(
-            label="Sequential Baseline",
-            points=points_np,
-            queries=queries_np,
-            k=args.k,
-            constructor=BaselineCoverTree,
+    if not args.skip_sequential:
+        results.append(
+            _run_sequential_baseline(
+                label="Sequential Baseline",
+                points=points_np,
+                queries=queries_np,
+                k=args.k,
+                constructor=BaselineCoverTree,
+            )
         )
-    )
 
     if not args.skip_gpboost:
         if has_gpboost_cover_tree():
