@@ -202,6 +202,25 @@ def _build_dense_adjacency(
                     bytes_d2h=bytes_d2h,
                 )
 
+            if counts_np.size and np.max(counts_np) <= 1:
+                non_empty = int(np.count_nonzero(counts_np))
+                scope_groups = int(counts_np.shape[0])
+                return _AdjacencyBuild(
+                    sources=sources,
+                    targets=targets,
+                    membership_seconds=membership_seconds,
+                    targets_seconds=targets_seconds,
+                    scatter_seconds=scatter_seconds,
+                    dedup_seconds=0.0,
+                    total_pairs=0,
+                    candidate_pairs=0,
+                    max_group_size=int(np.max(counts_np)) if counts_np.size else 0,
+                    scope_groups=scope_groups,
+                    scope_groups_unique=non_empty,
+                    scope_domination_ratio=(1.0 if scope_groups else 0.0),
+                    bytes_d2h=bytes_d2h,
+                )
+
             point_ids_np = np.repeat(
                 np.arange(batch_size, dtype=np.int64),
                 counts_np,
