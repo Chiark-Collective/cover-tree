@@ -1,241 +1,372 @@
-You're right: with the current code you can make the build fast **or** the queries fast, but the defaults aren’t yet arranged so you get *both* in one path.
-
-Below is a concrete, implementation‑level plan to land a configuration and a few small code changes that **prioritize build time** and, *given that*, deliver near‑best query time—without branching into fundamentally different code paths or reintroducing GPU/JAX overhead.
+Below is a focused, concrete optimisation plan to drive **Numba PCCT build time** down further. I’ve organised it by *where the time still goes* (based on your latest logs) and then by **high‑leverage changes** with code‑level sketches. Everything stays exact/correct (no ANN shortcuts) and preserves your immutability/persistence contract.
 
 ---
 
-## TL;DR (what to do now)
+## Where the cost still hides (from your latest snapshots)
 
-1. **Go all‑in on the CPU+Numba pipeline end‑to‑end** (you already forced CPU in config): use the Numba scope/adjacency builder *and* the Numba k‑NN walker by default.
-2. **Make “fast‑build” the shipped default profile** and keep it balanced for queries:
+* At **small/medium n** (2 k–8 k), you’ve crushed conflict‑graph/MIS costs; build wall time is now dominated by traversal + persistence book‑keeping.
+* At **large n (32 k)**:
 
-   * Chunked, deduped scope → radius‑pruned adjacency (Numba) → histogram‑CSR (no argsort) → Luby MIS.
-   * After each batch, run a **lightweight “finalize_for_query” step** (O(n)) that materialises a compact `NumbaTreeView` for the k‑NN path.
-3. **Turn three knobs adaptively per batch** to keep build bounded:
+  * CPU utilisation during **build** ~**1.2×** ⇒ most work is still **serial** (traversal/persistence).
+  * Conflict-graph CSR is essentially free (sub‑ms); MIS ~sub‑ms; the remaining wall time comes from:
 
-   * **Batch size** via a pairs budget.
-   * **Conflict graph impl** via `auto` (dense/Numba until pairs budget exceeded, segmented otherwise).
-   * **Degenerate fast‑path**: switch to sequential insertion when MIS would keep ≤1.
-4. **Use the Numba k‑NN by default** with tiny, query‑only buffers—no Python loops, no device conversions, cached child chains and distances.
+    1. traversal mask/distances that didn’t yet migrate to fully parallel kernels in all paths, and
+    2. **copy‑on‑write (CoW) persistence updates** (level-offset recompute, children/next splicing, cache maintenance) that still do significant Python/NumPy work and repeated allocations.
 
-This combination gives you the fastest build you’ve measured so far *and* the sub‑millisecond per‑query latencies you’ve already seen from the Numba walker, in one consistent runtime.
+The fastest route to another 2–4× reduction is therefore: **(A)** eliminate residual serial traversal and **(B)** collapse CoW/persistence writes into one parallel Numba “apply‑updates” sweep with pooled scratch memory.
 
 ---
 
-## “Golden path” defaults (production)
+## A. Traversal: finish the migration & add early-exit distance kernels
 
-Set these as the default profile your API chooses unless the user explicitly asks otherwise.
+You already ported scope assembly to Numba and saw big wins. There are two more practical gains:
 
-```bash
-# Runtime
-COVERTREEX_DEVICE=cpu:0
-COVERTREEX_ENABLE_NUMBA=1
-COVERTREEX_PRECISION=float64     # keep FP64 as required by Vecchia
+### A1) Bound‑aware Euclidean distances with early termination (tight inner loop)
 
-# Conflict graph
-COVERTREEX_CONFLICT_GRAPH_IMPL=auto     # see heuristic below
-COVERTREEX_SCOPE_SEGMENT_DEDUP=1
-COVERTREEX_SCOPE_CHUNK_TARGET=65536     # good L2-sized default on modern CPUs
-
-# Diagnostics
-COVERTREEX_ENABLE_DIAGNOSTICS=0         # keep off for throughput
-COVERTREEX_LOG_LEVEL=warning
-```
-
-In code, expose the same “fast‑build” profile:
+When forming masks/radii and during redistribution, you’re still doing full L2 on many pairs. Use a **squared distance accumulator** with **early abort** against the per‑pair bound (min of node radii). This speeds dominated/near‑dominated cases dramatically.
 
 ```python
-tree = PCCTree.build(points, profile="fast-build")  # applies the knobs below
+# covertreex/algo/_dist_numba.py
+import numba as nb, numpy as np
+
+@nb.njit(cache=True, fastmath=True, nogil=True, inline='always')
+def _sqdist_leq_bound(x: np.ndarray, y: np.ndarray, bound2: float) -> (float, b1):
+    acc = 0.0
+    # unroll by 4 if dims are small/fixed
+    for t in range(x.size):
+        d = y[t] - x[t]
+        acc += d * d
+        if acc > bound2:  # early exit
+            return acc, False
+    return acc, True
 ```
 
----
+Integrate this into:
 
-## 1) Keep the **fastest build path** by default
+* traversal pair checks (mask formation), and
+* redistribution where you compute `ceil_log2(dist)` (you can return `acc` directly; avoid `sqrt` until the final `ceil_log2` calculation).
 
-You already have the pieces; unify them behind `profile="fast-build"`:
+### A2) Fast `ceil_log2` without `log`/`sqrt`
 
-### 1.1 Scope → adjacency pipeline (stay Numba, avoid argsort)
+Replace `ceil_log2(dist)` with a bit‑trick on squared distance to avoid `sqrt() + log2()`:
 
-* **Scope grouping:** keep your chunked, Numba path with segment‑level hashing and counting‑sort grouping. This removed the previous 150–250 ms hotspot per dominated batch—retain it.
-* **Radius‑pruned expansion:** continue writing **directed** edges inside the Numba kernel while checking `dist² ≤ min(r_i², r_j²)` in the expansion loop. (You’ve landed this; it’s the right place for the filter.)
-* **Histogram CSR assembly (replace argsort):**
-
-  * Precount out‑degree with `np.bincount(sources, minlength=batch_size)`.
-  * Build `indptr` by prefix sum.
-  * Fill `indices` by a single pass that uses a thread‑local cursor array.
-  * *Do not* sort per‑row unless a consumer requires it; MIS does not.
-
-  Sketch:
-
-  ```python
-  # sources, targets: directed edges written by the Numba builder
-  deg = np.bincount(sources, minlength=batch_size).astype(np.int32)
-  indptr = np.empty(batch_size + 1, np.int32)
-  indptr[0] = 0
-  np.cumsum(deg, out=indptr[1:])
-  # row_cursors starts as a copy of indptr
-  row_cursors = indptr[:-1].copy()
-  indices = np.empty_like(sources, dtype=np.int32)
-  for s, t in zip(sources, targets):
-      pos = row_cursors[s]
-      indices[pos] = t
-      row_cursors[s] = pos + 1
-  # Optional: unique per row only if MIS impl requires it (usually not)
-  ```
-
-  This removes the `argsort` hotspot you noted and keeps build time flat as n grows, until the pairs budget (next point) is hit.
-
-### 1.2 Pairs budget + adaptive batch size
-
-Keep build fast by bounding work per batch:
-
-* Compute an **upper bound on pairs per batch** from scope group sizes you already have:
-
-  [
-  \text{pairs} = \sum_g m_g (m_g-1)
-  ]
-
-* Choose `batch_size` (prefix‑doubling cap) so `pairs ≤ P_budget`. Good defaults:
-
-  * `P_budget = 4–8 × 10^6` directed pairs per batch on a 16–32‑core workstation.
-  * `batch_size_cap = 256` for n ≤ 8 k, 128 for larger n unless the scope histogram shows low co‑occurrence.
-
-* If the observed `pairs` for the current batch exceeds the budget, **halve** the batch and retry (you already have the prefix structure to do this deterministically).
-
-This one heuristic prevents an O(b²) cliff and keeps your new Numba path in the “few ms per batch” zone.
-
-### 1.3 Degenerate‑batch fast path
-
-You have this sketched—turn it on by default:
-
-* If MIS would keep ≤1 anchor in a level (use your domination ratio or a quick greedy pass), skip conflict‑graph/MIS and run **sequential insertion** for that subset immediately.
-
-On your dominated quick runs this skips all the machinery and wins ~hundreds of ms per batch without touching correctness.
-
-### 1.4 MIS: keep Luby, fuse “finalize”
-
-MIS is already a rounding error for you. Two tiny tweaks keep it that way:
-
-* Use **int32** CSR throughout MIS to reduce memory bandwidth.
-* After Luby’s parallel rounds, run a *single* greedy finalize over remaining vertices to guarantee maximality; this removes rare long tails at high degrees with negligible cost.
-
----
-
-## 2) Make queries fast without hurting build
-
-The trick is to *not* slow the builder with query‑time conveniences, and instead do a cheap “finalize” after each batch.
-
-### 2.1 Post‑batch `finalize_for_query()` (O(n), cache‑friendly)
-
-Right after each batch is applied, **materialise a query view** in contiguous arrays:
-
-* `child_starts: int32[n+1]`, `child_indices: int32[num_edges]` (CSR children).
-* `next_cache: int32[n]`, already present—pack it into the same SoA layout.
-* `si_cache: int32[...]` and per‑node radii **squared** (`float64[n]`).
-* Optional: a **BFS‑order renumbering** into a dense `[0..n)` “query id” space so child lists and `next` chains are cache‑friendly.
-
-Export this as a `NumbaTreeView` and keep it alongside the immutable `PCCTree` version. The finalize step is linear and measured in milliseconds at your scales; it gives the Numba walker everything it needs without paying costs during the build.
-
-### 2.2 Default to the **Numba k‑NN walker**
-
-* Always use `queries._knn_numba` when `ENABLE_NUMBA=1`. It already:
-
-  * Reuses distances,
-  * Uses precomputed child lists,
-  * Keeps deterministic tie‑breaks.
-* Keep k‑selection **heapless** for small `k` (≤32): maintain a fixed‑size top‑k array plus running max instead of a Python heap; guard with a tiny templated helper in Numba.
-* **Leaf dense fallback:** when a local frontier exceeds a threshold (e.g., >512 candidates) or the cover radius drops below a small ε, switch to a dense distance pass on that frontier and finish with a stable `argpartition`. This improved your early prototype to ~30 ms; re‑enable it with a low threshold so it rarely triggers.
-
-These keep the query tight (≈0.1–0.2 ms/query at your 2 k/8 k sizes in your notes) without back‑pressuring the builder.
-
----
-
-## 3) One runtime, two internal “impls” with **auto** switch
-
-Keep a single public path but switch internals automatically:
-
-```text
-COVERTREEX_CONFLICT_GRAPH_IMPL=auto
-└── if pairs_per_batch <= P_budget and batch_size <= 256:
-      use numba_dense (chunked, deduped, radius-pruned, histogram CSR)
-    else:
-      use segmented (CSR-by-scope)  # avoids dense membership blow-up
+```python
+@nb.njit(cache=True, inline='always', fastmath=True)
+def ceil_log2_from_sqdist(acc_sq: float) -> int:
+    # dist = sqrt(acc_sq);  ceil(log2(dist)) == ceil(0.5 * log2(acc_sq))
+    # use frexp: acc_sq == m * 2**e, where m in [0.5, 1)
+    m, e = np.frexp(acc_sq)    # e is exponent s.t. acc_sq = m * 2**e
+    # log2(dist) = 0.5 * (e + log2(m)) ; with m in [0.5,1) => log2(m) in [-1,0)
+    # Conservatively ceil by using only exponent e:
+    #   ceil(0.5*e + delta) with delta in [-0.5,0)
+    # Upper bound (safe): ceil(0.5*e - 0.5) == ((e-1)+1)//2  == (e)//2
+    # To keep separation conservative, use:
+    return (e + 1) // 2  # tight and monotone for our purposes
 ```
 
-This avoids regressing large‑n builds while keeping small/medium builds extremely fast.
+This keeps redistribution integer‑only and branch‑free.
 
 ---
 
-## 4) A few small correctness‑neutral optimizations
+## B. Persistence & updates: one parallel sweep + pooled scratch
 
-All cheap, all measurable:
+Most of your 32 k build wall time is now hidden in **copy‑on‑write fragmentation** and Python‑side array surgery. Fix that with an **“overlay then freeze”** application pattern:
 
-* **Use squared distances & radii everywhere** (you already do in places). Don’t take square roots in the builder or walker.
-* **Indices as int32** end‑to‑end (CSR + MIS + k‑NN). You’ve already moved many arrays; make it uniform.
-* **Precompute norms** per point once (Numba) and use `‖x−y‖² = ‖x‖²+‖y‖²−2x·y` in dense fallbacks. It shaved ms in your earlier dense path.
-* **Warm the Numba caches**: run a 1‑query dry call in `PCCTree.from_points()` (guarded by a flag) so first “real” queries don’t pay compilation. (This doesn’t change throughput; it just amortizes the first‑call blip you observed.)
+### B1) Transaction overlay (journal) inside the batch → single CoW sweep
+
+* **Today:** path‑copy at multiple points in the batch (levels, children/next, offsets), causing repeated slices/allocations.
+* **Proposal:** During `batch_insert`, accumulate all mutations into a **journal** (SoA arrays of equal length):
+
+  * `journal_parent[i] = new_parent_id or -1`
+  * `journal_level[i] = new_level or -1`
+  * `journal_child_head_updates[parent] = new_head` (record only the *new* head)
+  * `journal_next[child] = next_id` (for chain splices)
+  * `journal_level_counts_delta[level] += δ`
+* Then call a **single Numba kernel** to apply the journal to the current snapshot using **CoW at segment granularity** (copy each touched segment *once*).
+
+Sketch:
+
+```python
+# covertreex/core/_persistence_numba.py
+@nb.njit(cache=True, nogil=True, parallel=True)
+def apply_journal_cow(
+    parent: np.ndarray, level: np.ndarray,
+    child_head: np.ndarray, next_sib: np.ndarray,
+    level_counts: np.ndarray,
+    # journal buffers (same length = num_mutations)
+    j_nodes: np.ndarray, j_parent: np.ndarray, j_level: np.ndarray,
+    j_head_parents: np.ndarray, j_head_values: np.ndarray,
+    j_next_nodes: np.ndarray, j_next_values: np.ndarray,
+    j_level_delta_levels: np.ndarray, j_level_delta_vals: np.ndarray,
+    # out: cloned arrays (preallocated or alias input for in-place-with-copy)
+    parent_out: np.ndarray, level_out: np.ndarray,
+    child_head_out: np.ndarray, next_sib_out: np.ndarray,
+    level_counts_out: np.ndarray,
+):
+    # 1) bulk copy untouched arrays (parallel)
+    n = parent.size
+    for i in nb.prange(n):
+        parent_out[i] = parent[i]
+        level_out[i] = level[i]
+        next_sib_out[i] = next_sib[i]
+    for i in nb.prange(child_head.size):
+        child_head_out[i] = child_head[i]
+    for i in range(level_counts.size):
+        level_counts_out[i] = level_counts[i]
+
+    # 2) apply node parent/level updates (parallel)
+    for k in nb.prange(j_nodes.size):
+        u = j_nodes[k]
+        if j_parent[k] >= 0:
+            parent_out[u] = j_parent[k]
+        if j_level[k]  >= 0:
+            level_out[u]  = j_level[k]
+
+    # 3) apply head updates (parents potentially repeat; last one wins)
+    for k in nb.prange(j_head_parents.size):
+        p = j_head_parents[k]
+        child_head_out[p] = j_head_values[k]
+
+    # 4) apply next-sibling splices
+    for k in nb.prange(j_next_nodes.size):
+        u = j_next_nodes[k]
+        next_sib_out[u] = j_next_values[k]
+
+    # 5) apply level count deltas
+    for k in range(j_level_delta_levels.size):
+        lvl = j_level_delta_levels[k]
+        level_counts_out[lvl] += j_level_delta_vals[k]
+```
+
+**Effect:** immutability maintained, but **only one CoW** per batch, with parallel copies. For 32 k this eliminates a large fraction of Python overhead and small allocations.
+
+> Implementation detail: keep these `*_out` buffers **preallocated** (see B2) and swap references at the end of the batch.
+
+### B2) Scratch/pool the big temporaries inside Numba
+
+Your scope/adjacency builder already prewarms JIT; do the same for the large CoW scratch:
+
+* Maintain a **module‑local pool** (capacity grows geometrically) for:
+
+  * `sources/targets` (when you need them)
+  * `csr_indptr/indices` (if you need host copies)
+  * `*_out` arrays used by `apply_journal_cow`
+* Provide a tiny **ensure_capacity** kernel:
+
+```python
+# covertreex/algo/_pool_numba.py
+POOL_PARENT = np.empty(1, dtype=np.int32)  # grows on demand
+# ... same for others
+
+@nb.njit(cache=True)
+def ensure_capacity(arr: np.ndarray, new_n: int) -> np.ndarray:
+    if arr.size >= new_n:
+        return arr
+    m = max(new_n, arr.size * 2)
+    out = np.empty(m, arr.dtype)
+    out[:arr.size] = arr
+    return out
+```
+
+Use the pool across batches to avoid repeated `np.empty`/GC churn and paging spikes (your logs show 230–950 MB spikes at 32 k without pooling).
+
+### B3) Bulk children/next splicing
+
+You already switched to “insert at head and chain old head behind”. Make it **bulk** with a single pass:
+
+Input:
+
+* `anchors[]` (newly selected MIS nodes)
+* `old_head[parent]` (snapshot)
+* `attach_lists[parent]` (dominated inserts that must go under `parent`)
+
+Single pass:
+
+```python
+@nb.njit(cache=True, nogil=True, parallel=True)
+def bulk_splice_heads(
+    child_head: np.ndarray, next_sib: np.ndarray,
+    anchors: np.ndarray, parents_of_anchor: np.ndarray,
+    dominated_nodes: np.ndarray, dominated_parent: np.ndarray,
+    # journal outputs (parallel writable)
+    j_head_parents: np.ndarray, j_head_values: np.ndarray,
+    j_next_nodes: np.ndarray, j_next_values: np.ndarray
+):
+    # anchors become new heads (parent->anchor)
+    for i in nb.prange(anchors.size):
+        p = parents_of_anchor[i]
+        a = anchors[i]
+        j_head_parents[i] = p
+        j_head_values[i]  = a
+        j_next_nodes[i]   = a
+        j_next_values[i]  = child_head[p]  # old head behind
+    # dominated nodes are spliced to their chosen parents in a second block
+    base = anchors.size
+    for i in nb.prange(dominated_nodes.size):
+        u = dominated_nodes[i]
+        p = dominated_parent[i]
+        # typical policy: insert dominated as head too
+        j_head_parents[base + i] = p
+        j_head_values[base + i]  = u
+        j_next_nodes[base + i]   = u
+        j_next_values[base + i]  = child_head[p]
+```
+
+You then feed these two blocks straight into the **journal** and let `apply_journal_cow` do one CoW.
+
+### B4) Level offsets / counts: incremental, not recompute
+
+Stop recomputing level offsets from scratch. Track:
+
+* `level_counts[]` and mutate via `j_level_delta_*`.
+* Derive offsets once per batch via a **parallel prefix sum** (Numba):
+
+```python
+@nb.njit(cache=True)
+def prefix_sum_inplace(a: np.ndarray):  # int64 OK
+    acc = 0
+    for i in range(a.size):
+        acc += a[i]
+        a[i] = acc
+```
+
+At 32 k this avoids O(L) Python loops per micro‑update.
 
 ---
 
-## 5) Instrumentation that matters for the auto‑knobs
+## C. Parallelism & scheduling hygiene (make your prange actually scale)
 
-Keep diagnostics light but preserve the counters that drive the adaptive logic:
+### C1) Avoid thread oversubscription
 
-* `conflict_adj_pairs`, `conflict_adj_max_group`, `scope_groups`, `scope_groups_unique`, `scope_domination_ratio`, and **wall ms** for `scope_group`, `adjacency_filter`, `csr_build`, `mis`.
-* Log **pairs_per_batch** and the selected `batch_size_cap` so you can verify the auto‑scaler behaves. Suppress per‑pair logs by default.
+When NumPy BLAS kicks in (sometimes via incidental ops), it can fight Numba’s pool. Set these in the benchmark harness and docs:
 
----
+```
+# One worker pool at a time
+export OMP_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+# Let Numba own parallelism; tune to sockets/LLC
+export NUMBA_NUM_THREADS=$(nproc)          # or a measured sweet spot
+export NUMBA_THREADING_LAYER=tbb           # ‘tbb’ often wins over ‘omp’
+```
 
-## 6) What this yields (based on your current snapshots)
+Your utilisation tables already show under‑parallelisation at 32 k; this fixes a common cause.
 
-* On 2 048/512/k=8 with Numba enabled and diagnostics off you’ve already seen:
+### C2) Use `schedule='dynamic'` for skewed groups
 
-  * Build ≈ **10–15 s** (depending on which iteration), Queries ≈ **0.10–0.12 s** total (≈0.2 ms/query).
-* On 8 192/1 024/k=16:
+Where group sizes vary (dominated vs mixed batches), use:
 
-  * Build ≈ **23–32 s**, Queries ≈ **0.93–1.0 s** total (≈1 ms/query) once the histogram‑CSR and pairs budget are in.
-* The remaining variability was from `argsort` in CSR and degenerate batches paying full pipelines. The histogram CSR and degenerate fast‑path remove those outliers.
+```python
+@nb.njit(cache=True, parallel=True)
+def kernel(...):
+    for g in nb.prange(num_groups, schedule='dynamic'):
+        ...
+```
 
-These are within striking distance of the sequential baseline query times while keeping a *parallel* build that’s orders of magnitude faster than the external baselines you logged.
-
----
-
-## 7) Minimal code changes to land
-
-1. **CSR histogram builder** (replace per‑batch argsort as above).
-2. **Auto batch‑size & impl switch** driven by `pairs_per_batch` and `P_budget`.
-3. **Finalize‑for‑query**: add `tree.materialise_for_numba()` in the builder and call it after each batch apply.
-4. **Default profile plumbing**: `profile="fast-build"` applies the env knobs, enables Numba MIS and k‑NN, sets `CONFLICT_GRAPH_IMPL=auto`, and turns on degenerate fast‑path.
-5. **Leaf dense fallback** in `_knn_numba` with a small `frontier_dense_threshold` (configurable).
-
-All of these are local and do not change external semantics.
+This mitigates long‑tail groups stalling the pool.
 
 ---
 
-## 8) Suggested defaults (you can tune later)
+## D. Data layout & cache locality
 
-* `P_budget = 6_000_000` directed pairs/batch.
-* `batch_size_cap = 256` if n ≤ 16 k else 128.
-* `frontier_dense_threshold = 512`.
-* `scope_chunk_target = 65_536` (leave exposed as env).
-* `int dtype = int32`, `float dtype = float64`.
+### D1) 32‑bit indices end‑to‑end
 
----
+You already use `I32/I64`. Push **I32** everywhere feasible (node ids, parents, heads, next), **I64 only for indptr**. This shaves bandwidth and improves cache residency in the big 32 k runs.
 
-## 9) Sanity & safety checks to keep green
+### D2) Level‑major node ordering (periodic renumbering)
 
-* Keep your **Tier‑A/B invariants** on by default in CI (not in prod): separation, nesting, persistence diff.
-* Add two **regression micro‑bench** tests to catch performance cliffs:
+After large builds (e.g., every 8–16 prefix batches), **relabel nodes by (level, parent order)**. This:
 
-  1. Verify `conflict_adj_pairs / batch` stays ≤ `P_budget` for the quick run.
-  2. Assert `csr_build_ms` never exceeds, say, 25 ms on the quick run.
+* makes per‑level sweeps contiguous,
+* reduces TLB misses in traversal and persistence,
+* and makes `child_head/next_sib` chains touch fewer cache lines.
+
+Do it via a “renumbering journal”: build a permutation `perm[]` and apply it once with `apply_journal_cow`. Queries don’t care about ids as long as you rewrite `parents/children/next` consistently.
 
 ---
 
-### Why this works
+## E. Conflict graph: keep it sub‑ms at scale
 
-* The builder stays dominated by *linear* and *chunked quadratic* work with a strict pairs budget, no global sorts.
-* The query path becomes a thin, branch‑predictable Numba loop over contiguous arrays, warmed once, with distance reuse.
-* The only time you “lose” is when scopes explode; the budget + degenerate fast‑path cut those off early.
+You’ve already fused radius filtering + CSR emission inside Numba. Two small cleanups keep it fast at 32 k:
 
-If you want, I can translate the CSR histogram and the finalize‑for‑query helper into concrete code against your current module layout.
+* **Exact capacity reservation** per kept group (`pair_counts` → offsets) is already there. Ensure the kernel *doesn’t* allocate new arrays per batch; obtain them from the **pool** (B2).
+* **Symmetric writes in‑kernel** (you already do). Keep this, it removes a post‑pass.
+
+---
+
+## F. Guardrails: “degenerate fast‑paths” done right
+
+You sketched this earlier; bake it in with tiny checks:
+
+* If `scope_groups_unique == 1` and `max_group_size <= 1`: **skip** MIS/adjacency, emit empty CSR, go straight to bulk splice with dominated reattachments. This avoids ~sub‑ms work per batch and, more importantly, avoids touching shared scratch (better cache locality for the hot traversal/persistence passes).
+
+---
+
+## G. Compilation & lifetime
+
+* Use **explicit signatures** on your hot kernels to avoid accidental recompiles on dtype/shape drift.
+  Example: `@nb.njit("(i8[:],i4[:],i4[:],i4[:],i4[:],i8[:])", cache=True, parallel=True)`.
+* **Import‑time warm‑up** as you already added: call the kernels once with tiny arrays so the cold start disappears from the first real batch.
+* Keep **diagnostics off** in prod runs; they meaningfully perturb large‑n timings in your notes, especially at 32 k.
+
+---
+
+## H. What to expect (conservative deltas)
+
+On typical hardware similar to your logs:
+
+* **A1+A2** (bound‑aware distance + `ceil_log2_from_sqdist`)
+  1.3–1.8× faster traversal on dominated/mixed batches; negligible overhead on cold batches.
+* **B1–B4** (journal + one CoW + pooled scratch + bulk splice + incremental level counts)
+  1.5–2.5× faster build at 32 k, mostly from removing repeated Python‑side slicing and small transient allocations. Also flattens RSS spikes.
+* **C1–C2** (threading hygiene)
+  Brings build CPU utilisation from ~1.2× to ~2–3× on 32 k (depending on cores), typically another ~1.2–1.5× wall‑time improvement if you were oversubscribed before.
+* **D1–D2** (I32 and relabel)
+  10–25% on large builds from cache hits + lower bandwidth.
+
+Taken together, these are realistically a **2–4× further reduction** in **32 k build wall time**, with stability gains (lower variance, lower RSS deltas).
+
+---
+
+## Drop‑in code hooks (where to put things)
+
+* `covertreex/algo/_dist_numba.py` – A1/A2 distance helpers.
+* `covertreex/core/_persistence_numba.py` – B1/B3/B4 (apply‑journal & splice).
+* `covertreex/algo/_pool_numba.py` – B2 buffer pool.
+* Wire the **journal** in `batch_insert.py`:
+
+  1. build scopes → conflict graph → MIS,
+  2. fill journal arrays (`j_*`) for parent/level/head/next/level_counts,
+  3. call `apply_journal_cow(...)`,
+  4. swap in `*_out` arrays.
+
+Add counters to your existing diagnostics:
+
+* `cow_bytes_copied`, `cow_segments`, `pool_grow_bytes`, `pool_reuse_hits`, `journal_entries`, `splice_count`, `level_delta_nonzeros`.
+
+---
+
+## CI/regression knobs to lock the gains
+
+* New tests:
+
+  * `tests/integration/test_persistence_apply_journal.py`: verifies that only touched nodes/parents/levels changed across versions and that previous versions stay readable.
+  * `tests/test_pool_reuse.py`: asserts the pool doesn’t reallocate for identical batch shapes.
+  * `tests/test_dist_bound.py`: correctness of early‑exit distance vs full distance; randomised property tests with tight/loose bounds.
+* Extend `benchmarks/runtime_breakdown` CSV with:
+
+  * `build_cow_ms`, `pool_reuse_ratio`, `journal_size`, `splice_ms`, `level_prefix_ms`, and `traversal_bound_hit_rate`.
+
+---
+
+### Final checklist (do these first)
+
+1. **Journal + single CoW sweep** (B1) — biggest structural win.
+2. **Pool large temporaries** (B2) — removes 32 k RSS spikes and allocator overhead.
+3. **Bound‑aware squared distances + fast ceil_log2** (A1/A2) — cheap, wide‑impact.
+4. **Threading hygiene** (C1) — ensures Numba threads aren’t fighting BLAS.
+5. **Bulk splice + incremental level counts** (B3/B4) — keeps the update phase O(1) per change in one pass.
+6. **I32 end‑to‑end** (D1) — bandwidth/caches.
+7. **Optional renumbering** (D2) — apply after big batches; measurable at 32 k+.
+
+If you want, I can turn the sketches above into concrete PR‑ready modules (`_persistence_numba.py`, `_dist_numba.py`, and a minimal pool) and a small benchmark harness that isolates **apply‑journal CoW** cost before/after the change.
