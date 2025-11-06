@@ -68,6 +68,7 @@ To capture warm-up versus steady-state timings for plotting, append `--csv-outpu
 - The Numba conflict-graph path (segment dedupe + directed pair expansion) now lands at 3–4 ms per dominated batch, with `conflict_scope_group_ms < 0.01 ms` and `conflict_adj_scatter_ms ≈ 1.0–1.3 ms`. No GPU kernels are invoked in the NumPy backend configuration.
 - MIS is effectively free (`mis_ms ≤ 0.2 ms`). Remaining variation comes from first-call warm-up; post-compilation runs stay under 0.1 ms.
 - Running strictly on the CPU (NumPy backend, diagnostics optional) keeps comparisons against the GPBoost baseline reproducible while avoiding the slower sequential/external references that we now skip by default.
+- GPBoost’s cover tree baseline is sequential and Euclidean-only: it inserts points one at a time, mutates its structure in-place, and never builds a conflict graph or MIS. PCCT, by design, processes large batches (typically 256 points) with exact Euclidean distance checks, parallel MIS, and immutable journals, so even with the same metric the PCCT build is ~15× heavier. Once we port the residual-correlation kernels, expect the gap to widen unless we land the traversal optimisations outlined below.
 
 ### Persistence journal (NumPy backend)
 
@@ -81,6 +82,7 @@ To capture warm-up versus steady-state timings for plotting, append `--csv-outpu
 - The first PCCT build in any fresh Python session pays the full Numba compilation cost plus the actual 32 k build (≈40 s in the latest 8-dim profile). Subsequent builds reuse the cached kernels and drop to the steady-state numbers shown above (sub-second per batch).
 - To hide the one-time hit in production pipelines, kick off a tiny “warm-up” batch during process start-up—for example, build a 64-point tree with the same runtime flags before ingesting real data. This compiles all hot kernels without noticeably touching RSS or wall time.
 - To quantify the difference in practice, run `benchmarks.runtime_breakdown` with `--runs 5` (or similar). The CSV now includes a `run` column, letting you compare the first-build warm-up against subsequent steady-state runs directly.
+- When running synthetic benchmarks we keep `COVERTREEX_METRIC` at its default (`euclidean`). The residual-correlation metric is registered but not active until you install custom kernels via `configure_residual_metric`. If you flip the runtime metric to `residual_correlation` without registering handlers, the run will raise.
 
 ### Threading defaults
 
