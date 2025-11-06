@@ -199,7 +199,7 @@ def _collect_residual_scopes_streaming(
                 query_idx_arr,
                 chunk_ids,
             )[0]
-            distances, mask = compute_residual_distances_with_radius(
+            _distances, mask = compute_residual_distances_with_radius(
                 backend=host_backend,
                 query_index=query_id,
                 chunk_indices=chunk_ids,
@@ -209,8 +209,8 @@ def _collect_residual_scopes_streaming(
             if mask.size == 0:
                 continue
             include_idx = np.nonzero(mask)[0]
-            if include_idx.size == 0 and radius >= 1.0:
-                include_idx = np.arange(chunk_ids.size, dtype=np.int64)
+            if include_idx.size == 0:
+                continue
             for idx_local in include_idx:
                 cid = chunk_ids[idx_local]
                 pos = tree_id_to_pos.get(int(cid))

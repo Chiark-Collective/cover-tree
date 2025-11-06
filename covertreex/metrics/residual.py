@@ -278,6 +278,10 @@ def configure_residual_correlation(backend: ResidualCorrHostData) -> None:
 
     from covertreex.core.metrics import configure_residual_metric
 
+    if backend.v_norm_sq is None:
+        v_matrix = np.asarray(backend.v_matrix, dtype=np.float64)
+        object.__setattr__(backend, "v_norm_sq", np.sum(v_matrix * v_matrix, axis=1))
+
     set_residual_backend(backend)
 
     def pairwise_kernel(tree_backend, lhs: ArrayLike, rhs: ArrayLike):

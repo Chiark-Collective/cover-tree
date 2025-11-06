@@ -111,23 +111,23 @@ python -m benchmarks.queries \
 
 | Metric | Mean | Share of phase |
 |--------|------|----------------|
-| Wall time per dominated batch | 4.33 s | — |
-| `traversal_ms` | 1.07 s | 24.7 % of wall |
-| • `traversal_pairwise_ms` | 0.39 s | 36.3 % of traversal |
-| • `traversal_semisort_ms` | 0.36 s | 33.3 % of traversal |
-| • `traversal_assemble_ms` | 0.32 s | 30.1 % of traversal |
-| `conflict_graph_ms` | 3.14 s | 72.5 % of wall |
-| • `conflict_adjacency_ms` | 3.12 s | 99.5 % of conflict graph |
-| • `conflict_adj_filter_ms` | 0.59 s | 18.9 % of conflict graph |
-| `mis_ms` | 0.10 s | 2.4 % of wall |
+| Wall time per dominated batch | 0.90 s | — |
+| `traversal_ms` | 0.79 s | 87.4 % of wall |
+| • `traversal_pairwise_ms` | 0.43 s | 54.4 % of traversal |
+| • `traversal_semisort_ms` | 0.027 s | 3.4 % of traversal |
+| • `traversal_assemble_ms` | 0.33 s | 42.2 % of traversal |
+| `conflict_graph_ms` | 0.092 s | 10.2 % of wall |
+| • `conflict_adjacency_ms` | 0.075 s | 81.4 % of conflict graph |
+| • `conflict_adj_filter_ms` | ~0.000 s | ≈0 % of conflict graph |
+| `mis_ms` | 0.0002 s (0.20 ms) | <0.1 % of wall |
 | Residual scope size (`conflict_scope_groups`) | 16 384 | — |
 | Host transfer (`conflict_scope_bytes_d2h`) | 67 MB | — |
 | RSS delta per batch | 288 MB | — |
 
 **Status & follow-up**
-- The residual path is functionally correct but lacks pruning: every dominated batch processes the full 512×511 edge set.
-- Adjacency filtering recomputes residual distances even when the dense matrix is already available; caching/backing-array reuse should trim ≥0.6 s per batch.
-- Once pruning and reuse land, rerun the benchmark to give auditors an updated telemetry sheet and reconcile the Euclidean vs residual bottlenecks.
+- Reusing the dense residual matrix for CSR filtering eliminates the 0.6 s per-batch recomputation; `conflict_adj_filter_ms` now vanishes and conflict graph time drops to ~0.09 s.
+- Early-reject bounds trim residual pairwise work (now ~0.43 s of the 0.79 s traversal block), but scopes are still near-dense (average `conflict_scope_groups` ≈ 16 k). Further pruning must focus on radius tightening or scope segmentation.
+- Memory churn is lower but still sizable (≈ 275 MB RSS delta per dominated batch). Explore segment caps or tile-based adjacency to reduce temporary buffers once the above pruning lands.
 
 ### Residual-correlation machinery — key source excerpts
 
@@ -141,6 +141,7 @@ class ResidualCorrHostData:
     kernel_provider: KernelProvider
     point_decoder: PointDecoder = _default_point_decoder
     chunk_size: int = 512
+    v_norm_sq: np.ndarray = None  # type: ignore[misc]
 
 def compute_residual_distances_with_radius(
     backend: ResidualCorrHostData,
@@ -163,6 +164,8 @@ def compute_residual_distances_with_radius(
     return distances, mask
 
 def configure_residual_correlation(backend: ResidualCorrHostData) -> None:
+    if backend.v_norm_sq is None:
+        object.__setattr__(backend, "v_norm_sq", np.sum(backend.v_matrix * backend.v_matrix, axis=1))
     set_residual_backend(backend)
     def pairwise_kernel(tree_backend, lhs, rhs):
         host_backend = get_residual_backend()
@@ -181,7 +184,7 @@ def configure_residual_correlation(backend: ResidualCorrHostData) -> None:
 
 ```python
 # covertreex/metrics/_residual_numba.py (excerpt)
-@njit(cache=True)
+@njit(cache=True, fastmath=True, parallel=True)
 def _distance_chunk(
     v_query: np.ndarray,
     v_chunk: np.ndarray,
@@ -194,14 +197,34 @@ def _distance_chunk(
     eps: float,
 ) -> Tuple[np.ndarray, np.ndarray]:
     threshold = 1.0 - radius * radius
-    for j in range(v_chunk.shape[0]):
+    for j in prange(v_chunk.shape[0]):
         denom = math.sqrt(max(p_i * p_chunk[j], eps * eps))
-        # partial dot-product accumulation with residual bound pruning
-        ...
-        numerator = kernel_chunk[j] - partial
-        rho = max(min(numerator / denom if denom else 0.0, 1.0), -1.0)
-        distances[j] = math.sqrt(max(0.0, 1.0 - abs(rho)))
-        within[j] = 1 if distances[j] <= radius + eps else 0
+        partial = 0.0
+        qi_sq = 0.0
+        qj_sq = 0.0
+        pruned = False
+        for d in range(v_query.shape[0]):
+            vq = v_query[d]
+            vc = v_chunk[j, d]
+            partial += vq * vc
+            qi_sq += vq * vq
+            qj_sq += vc * vc
+            tail = math.sqrt(max(norm_query - qi_sq, 0.0) * max(norm_chunk[j] - qj_sq, 0.0))
+            if denom > 0.0 and threshold > 0.0:
+                base = kernel_chunk[j] - partial
+                max_abs = abs(base + tail) if tail > 0.0 else abs(base)
+                if max_abs / denom + eps < threshold:
+                    distances[j] = radius + eps
+                    within[j] = 0
+                    pruned = True
+                    break
+        if pruned:
+            continue
+        rho = (kernel_chunk[j] - partial) / denom if denom > 0.0 else 0.0
+        rho = max(min(rho, 1.0), -1.0)
+        dist = math.sqrt(max(0.0, 1.0 - abs(rho)))
+        distances[j] = dist
+        within[j] = 1 if dist <= radius + eps else 0
     return distances, within
 
 def compute_distance_chunk(...):

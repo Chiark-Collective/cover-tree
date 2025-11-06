@@ -338,8 +338,16 @@ if NUMBA_SCOPE_AVAILABLE:
         batch_size: int,
     ):
         total_used = I64(0)
+        counts = np.zeros(batch_size, dtype=I64)
         for node in range(used.size):
-            total_used += used[node]
+            count = used[node]
+            total_used += count
+            if count == 0:
+                continue
+            start_in = offsets[node]
+            for j in range(count):
+                src = int(sources[start_in + j])
+                counts[src] += 1
 
         total_used_int = int(total_used)
         if total_used_int == 0:
@@ -347,22 +355,6 @@ if NUMBA_SCOPE_AVAILABLE:
             indices = np.empty(0, dtype=I32)
             return indptr, indices, total_used_int
 
-        trimmed_src = np.empty(total_used_int, dtype=I32)
-        trimmed_dst = np.empty(total_used_int, dtype=I32)
-        counts = np.zeros(batch_size, dtype=I64)
-        cursor = I64(0)
-        for node in range(used.size):
-            count = used[node]
-            if count == 0:
-                continue
-            start_in = offsets[node]
-            for j in range(count):
-                src = int(sources[start_in + j])
-                tgt = targets[start_in + j]
-                trimmed_src[cursor] = src
-                trimmed_dst[cursor] = tgt
-                counts[src] += 1
-                cursor += 1
         indptr = np.empty(batch_size + 1, dtype=I64)
         acc = I64(0)
         indptr[0] = 0
@@ -372,13 +364,74 @@ if NUMBA_SCOPE_AVAILABLE:
 
         indices = np.empty(total_used_int, dtype=I32)
         heads = indptr[:-1].copy()
-        for i in range(total_used_int):
-            src = int(trimmed_src[i])
-            pos = heads[src]
-            indices[pos] = trimmed_dst[i]
-            heads[src] = pos + 1
+        for node in range(used.size):
+            count = used[node]
+            if count == 0:
+                continue
+            start_in = offsets[node]
+            for j in range(count):
+                src = int(sources[start_in + j])
+                pos = heads[src]
+                indices[pos] = targets[start_in + j]
+                heads[src] = pos + 1
 
         return indptr, indices, total_used_int
+
+    @nb.njit(cache=True, parallel=True)
+    def _count_edges_within_radius(indptr: np.ndarray, indices: np.ndarray, radii: np.ndarray, pairwise: np.ndarray) -> np.ndarray:
+        n = indptr.size - 1
+        out = np.zeros(n, dtype=I64)
+        for i in nb.prange(n):
+            s = indptr[i]
+            e = indptr[i + 1]
+            ri = radii[i]
+            cnt = 0
+            for p in range(s, e):
+                j = indices[p]
+                bound = ri if ri < radii[j] else radii[j]
+                if pairwise[i, j] <= bound:
+                    cnt += 1
+            out[i] = cnt
+        return out
+
+    @nb.njit(cache=True)
+    def _prefix_sum64(x: np.ndarray) -> np.ndarray:
+        n = x.size
+        out = np.empty(n + 1, dtype=I64)
+        acc = I64(0)
+        out[0] = 0
+        for i in range(n):
+            acc += x[i]
+            out[i + 1] = acc
+        return out
+
+    @nb.njit(cache=True)
+    def filter_csr_by_radii_from_pairwise(
+        indptr: np.ndarray,
+        indices: np.ndarray,
+        radii: np.ndarray,
+        pairwise: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        counts = _count_edges_within_radius(indptr, indices, radii, pairwise)
+        new_indptr = _prefix_sum64(counts)
+        total = int(new_indptr[-1])
+        new_indices = np.empty(total, dtype=I32)
+
+        heads = new_indptr[:-1].copy()
+        n = indptr.size - 1
+        for i in range(n):
+            s = indptr[i]
+            e = indptr[i + 1]
+            ri = radii[i]
+            for p in range(s, e):
+                j = indices[p]
+                bound = ri if ri < radii[j] else radii[j]
+                if pairwise[i, j] <= bound:
+                    pos = heads[i]
+                    new_indices[pos] = j
+                    heads[i] = pos + 1
+
+        return new_indptr, new_indices
 
     def build_conflict_graph_numba_dense(
         scope_indptr: np.ndarray,
@@ -532,6 +585,15 @@ else:  # pragma: no cover - executed when numba missing
         _require_numba()
         raise AssertionError("unreachable")
 
+    def filter_csr_by_radii_from_pairwise(
+        indptr: np.ndarray,
+        indices: np.ndarray,
+        radii: np.ndarray,
+        pairwise: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        _require_numba()
+        raise AssertionError("unreachable")
+
 
 if NUMBA_SCOPE_AVAILABLE:
     warmup_scope_builder()
@@ -540,5 +602,6 @@ if NUMBA_SCOPE_AVAILABLE:
 __all__ = [
     "NUMBA_SCOPE_AVAILABLE",
     "build_conflict_graph_numba_dense",
+    "filter_csr_by_radii_from_pairwise",
     "warmup_scope_builder",
 ]

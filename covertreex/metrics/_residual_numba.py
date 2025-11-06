@@ -6,17 +6,18 @@ from typing import Tuple
 import numpy as np
 
 try:  # pragma: no cover - optional dependency
-    from numba import njit  # type: ignore
+    from numba import njit, prange  # type: ignore
 
     NUMBA_RESIDUAL_AVAILABLE = True
 except Exception:  # pragma: no cover - when numba unavailable
     njit = None  # type: ignore
+    prange = None  # type: ignore
     NUMBA_RESIDUAL_AVAILABLE = False
 
 
 if NUMBA_RESIDUAL_AVAILABLE:
 
-    @njit(cache=True)
+    @njit(cache=True, fastmath=True, parallel=True)
     def _distance_chunk(
         v_query: np.ndarray,
         v_chunk: np.ndarray,
@@ -37,7 +38,7 @@ if NUMBA_RESIDUAL_AVAILABLE:
         if radius >= 1.0:
             threshold = -1.0  # effectively disable pruning
 
-        for j in range(chunk_size):
+        for j in prange(chunk_size):
             denom = math.sqrt(max(p_i * p_chunk[j], eps * eps))
             partial = 0.0
             accum_q = 0.0
@@ -66,7 +67,7 @@ if NUMBA_RESIDUAL_AVAILABLE:
                         max_abs = abs(base)
                     max_rho = max_abs / denom
                     if max_rho + eps < threshold:
-                        distances[j] = 1.0
+                        distances[j] = radius + eps
                         within[j] = 0
                         pruned = True
                         break
@@ -128,12 +129,35 @@ def compute_distance_chunk(
 
     for j in range(v_chunk.shape[0]):
         denom = math.sqrt(max(p_i * p_chunk[j], eps * eps))
-        partial = float(np.dot(v_query, v_chunk[j]))
+        partial = 0.0
+        accum_q = 0.0
+        accum_c = 0.0
+        pruned = False
+        for d in range(v_query.shape[0]):
+            vq = v_query[d]
+            vc = v_chunk[j, d]
+            partial += vq * vc
+            accum_q += vq * vq
+            accum_c += vc * vc
+            rem_bound = math.sqrt(max(norm_query - accum_q, 0.0) * max(norm_chunk[j] - accum_c, 0.0))
+            if denom > 0.0 and threshold > 0.0:
+                base = kernel_chunk[j] - partial
+                if rem_bound > 0.0:
+                    hi = abs(base + rem_bound)
+                    lo = abs(base - rem_bound)
+                    max_abs = hi if hi > lo else lo
+                else:
+                    max_abs = abs(base)
+                max_rho = max_abs / denom
+                if max_rho + eps < threshold:
+                    distances[j] = radius + eps
+                    within[j] = 0
+                    pruned = True
+                    break
+        if pruned:
+            continue
         numerator = kernel_chunk[j] - partial
-        if denom > 0.0:
-            rho = numerator / denom
-        else:
-            rho = 0.0
+        rho = numerator / denom if denom > 0.0 else 0.0
         rho = max(min(rho, 1.0), -1.0)
         dist = math.sqrt(max(0.0, 1.0 - abs(rho)))
         distances[j] = dist

@@ -147,9 +147,10 @@ Deliver a reusable “parallel compressed cover tree” (PCCT) library that comb
 3. Fold the annulus binning into the same segmented pass: reuse the padded table and group masks to accumulate annulus metadata, so we touch the grouped buffers only once.
 4. Once adjacency indices are produced, reuse the existing CSR builder (lexsort + bincount) and feed the results into MIS. Profile the new `group_by_int` + fusion path to ensure scope grouping time drops below the ≤1 s/batch target before moving to MIS tweaks.
 
-#### Profiling Notes — 2025-11-04
+#### Profiling Notes — 2025-11-04 (Euclidean) / 2025-11-06 (Residual)
 
-- Added `BatchInsertTimings` instrumentation so `log_operation` now reports `traversal_ms`, `conflict_graph_ms`, and `mis_ms` per prefix batch. Latest run (same benchmark, diagnostics enabled) highlights traversal as the dominant cost: mean traversal 5.53 s (median 4.54 s, max 13.4 s) versus conflict-graph 1.33 s (median 1.24 s) and MIS 0.39 s (median 0.35 s). Aggregated over 16 batches, traversal consumed 88.5 s of the 135 s build (65 %), conflict graph 21.3 s (16 %), and MIS 6.3 s (5 %).
+- Added `BatchInsertTimings` instrumentation so `log_operation` now reports `traversal_ms`, `conflict_graph_ms`, and `mis_ms` per prefix batch. Latest Euclidean run (same benchmark, diagnostics enabled) highlights traversal as the dominant cost: mean traversal 5.53 s (median 4.54 s, max 13.4 s) versus conflict-graph 1.33 s (median 1.24 s) and MIS 0.39 s (median 0.35 s). Aggregated over 16 batches, traversal consumed 88.5 s of the 135 s build (65 %), conflict graph 21.3 s (16 %), and MIS 6.3 s (5 %).
+- Residual benchmark telemetry (32 k pts / 512 batch) after the Nov 6 changes: dominated batches now average 0.90 s wall (`traversal_ms` 0.79 s, `conflict_graph_ms` 0.092 s, `mis_ms` 0.0002 s). Conflict filtering is negligible (reuses cached pairwise), but traversal scopes remain near-dense (~16 k members), keeping memory deltas around 275 MB per dominated batch.
 - The inflated wall times relative to the earlier snapshot stem from the device being shared; GPU utilisation stayed flat while CPU user+system scaled with traversal_ms growth, confirming that host-side traversal/scoping is the first optimisation target.
 - Next action: spike `traverse_collect_scopes` to identify why per-batch traversal cost increases with batch index (e.g., parent cache misses, redundant distance recomputation, or semisort buffer churn) before touching MIS or CSR code.
 - Instrumented `TraversalResult` with `TraversalTimings` to expose `pairwise`, `mask`, and `semisort` slices. On the 48.97 s build, semisort (Python-side scope assembly) alone consumed 20.7 s, versus 2.7 s for mask formation and 1.4 s for pairwise distance evaluation; conflict-graph construction added 11.6 s and MIS only 3.4 s. These numbers confirm that the semisort/chain stitching path is the highest-leverage optimisation target.
@@ -163,8 +164,13 @@ Deliver a reusable “parallel compressed cover tree” (PCCT) library that comb
   - PCCT build 28.27 s (down from 45.95 s) and query batch 3.12 s (164 q/s, unchanged). Sequential baseline unaffected (build 2.17 s, 21 239 q/s).
   - Per-batch traversal metrics: `traversal_semisort_ms` now 7–28 ms, `traversal_chain_ms` ≈0.2–4 ms, while conflict-graph construction remains 0.3–1.4 s and MIS ≈0.19–0.21 s.
   - Overall traversal contribution fell to 4.0 s per build (14 %), leaving conflict-graph assembly (~19 s, 67 %) and pairwise mask formation (~3.1 s, 11 %) as the dominant hotspots.
-- Conflict-graph construction now streams residual tiles through the Numba builder (~59 ms per dominated batch on the 32 k workload); residual traversal still spends ~200 ms in the pairwise phase and ~300 ms assembling CSR scopes, so the traversal hot path is the limiting factor.
-- Immediate optimisation focus (Nov 6): (i) land the residual-specific early-exit traversal kernel (partial dot-product pruning against the residual bound), (ii) replace the residual `traversal_assemble_ms` path with a streaming CSR emitter that never materialises the dense mask, and (iii) re-run the 32 k dominated-batch benchmark with the residual metric enabled to validate the build-time drop.
+- Conflict-graph construction now streams residual tiles through the Numba builder (~75 ms per dominated batch on the 32 k workload after the 2025-11-06 updates); residual traversal still spends ~430 ms in the pairwise phase and ~330 ms assembling CSR scopes, so traversal/mask assembly remain the limiting factor in residual mode.
+- Immediate optimisation focus (Nov 6): ✅ landed. Residual conflict filtering now reuses cached pairwise data; early-reject pruning keeps traversal chunk computations lean; the 32 k residual benchmark dropped from 290 s build / 156 s query to 59 s / 0.42 s (see `docs/CORE_IMPLEMENTATIONS.md`).
+- Next optimisation focus (post-Nov 6):
+  1. Introduce residual scope segmentation / caps so dominated batches stop materialising ~16 k members (still near-dense even after early rejects). Explore parent-level chunking or segmented builder reuse.
+  2. Prototype tile-based traversal pair enumeration (upper-triangle tiles + guided scheduling) to balance work and cut `traversal_pairwise_ms` / `traversal_assemble_ms` on near-cliques.
+  3. Optionally materialise residual pairwise matrices in float32 (with epsilon guard) and enforce scope caps to reduce the ~275 MB RSS spike per dominated batch.
+  4. Add a telemetry export helper that parses benchmark logs into CSV summaries so auditors can diff before/after runs without manual parsing.
 
 #### Visual Diagnostics
 

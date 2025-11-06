@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import time
@@ -11,6 +11,7 @@ from covertreex.algo.semisort import group_by_int
 from covertreex.algo._scope_numba import (
     NUMBA_SCOPE_AVAILABLE,
     build_conflict_graph_numba_dense,
+    filter_csr_by_radii_from_pairwise,
     warmup_scope_builder,
 )
 from covertreex.algo.traverse import TraversalResult
@@ -602,6 +603,26 @@ def build_conflict_graph(
             pairwise=pairwise,
             radii=radii_np,
             residual_pairwise=residual_pairwise_np,
+        )
+
+    if (
+        residual_mode
+        and residual_pairwise_np is not None
+        and adjacency_build.csr_indptr is not None
+        and adjacency_build.csr_indices is not None
+    ):
+        filtered_indptr, filtered_indices = filter_csr_by_radii_from_pairwise(
+            np.asarray(adjacency_build.csr_indptr, dtype=np.int64),
+            np.asarray(adjacency_build.csr_indices, dtype=np.int32),
+            radii_np,
+            residual_pairwise_np,
+        )
+        adjacency_build = replace(
+            adjacency_build,
+            csr_indptr=filtered_indptr,
+            csr_indices=filtered_indices,
+            total_pairs=int(filtered_indptr[-1]),
+            radius_pruned=True,
         )
 
     sources = adjacency_build.sources
