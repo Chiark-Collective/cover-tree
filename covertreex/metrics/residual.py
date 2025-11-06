@@ -227,6 +227,29 @@ def compute_residual_lower_bounds_from_kernel(
     return np.sqrt(np.maximum(1.0 - ratio, 0.0))
 
 
+def compute_residual_pairwise_matrix(
+    host_backend: ResidualCorrHostData,
+    batch_indices: np.ndarray,
+) -> np.ndarray:
+    total = int(batch_indices.shape[0])
+    if total == 0:
+        return np.empty((0, 0), dtype=np.float64)
+    result = np.empty((total, total), dtype=np.float64)
+    chunk = int(host_backend.chunk_size or 512)
+    for start in range(0, total, chunk):
+        stop = min(start + chunk, total)
+        rows = batch_indices[start:stop]
+        kernel_block = host_backend.kernel_provider(rows, batch_indices)
+        distances = compute_residual_distances_from_kernel(
+            host_backend,
+            rows,
+            batch_indices,
+            kernel_block,
+        )
+        result[start:stop, :] = distances
+    return result
+
+
 def compute_residual_distances_with_radius(
     backend: ResidualCorrHostData,
     query_index: int,
@@ -323,4 +346,5 @@ __all__ = [
     "decode_indices",
     "compute_residual_distances_from_kernel",
     "compute_residual_lower_bounds_from_kernel",
+    "compute_residual_pairwise_matrix",
 ]

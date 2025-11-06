@@ -6,7 +6,7 @@ import csv
 import os
 import resource
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from statistics import mean, median
 from typing import Dict, List, Optional
 
@@ -55,6 +55,7 @@ class ImplementationResult:
     query_rss_delta_bytes: Optional[int]
     query_max_rss_bytes: Optional[int]
     notes: Optional[str] = None
+    chunk_metrics: Dict[str, float] = field(default_factory=dict)
 
 
 def _generate_dataset(
@@ -264,6 +265,35 @@ def _summarise_batches(batch_metrics: List[Dict[str, float]], build_seconds: flo
     return segments
 
 
+def _summarise_chunk_metrics(batch_metrics: List[Dict[str, float]]) -> Dict[str, float]:
+    def _phases(key: str) -> tuple[float, float]:
+        if not batch_metrics:
+            return 0.0, 0.0
+        values = [metrics.get(key, 0.0) for metrics in batch_metrics]
+        warmup = values[0]
+        if len(values) > 1:
+            steady = float(sum(values[1:])) / float(len(values) - 1)
+        else:
+            steady = warmup
+        return warmup, steady
+
+    summary: Dict[str, float] = {}
+    metric_fields = (
+        ("traversal", "segments"),
+        ("traversal", "emitted"),
+        ("traversal", "max_members"),
+        ("conflict", "segments"),
+        ("conflict", "emitted"),
+        ("conflict", "max_members"),
+    )
+    for prefix, field in metric_fields:
+        key = f"{prefix}_chunk_{field}"
+        warmup, steady = _phases(key)
+        summary[f"{key}_warmup"] = warmup
+        summary[f"{key}_steady"] = steady
+    return summary
+
+
 def _run_pcct_variant(
     *,
     label: str,
@@ -306,6 +336,18 @@ def _run_pcct_variant(
                     "semisort": float(timing.semisort_seconds),
                     "conflict_graph": float(plan.timings.conflict_graph_seconds),
                     "mis": float(plan.timings.mis_seconds),
+                    "traversal_chunk_segments": float(timing.scope_chunk_segments),
+                    "traversal_chunk_emitted": float(timing.scope_chunk_emitted),
+                    "traversal_chunk_max_members": float(timing.scope_chunk_max_members),
+                    "conflict_chunk_segments": float(
+                        plan.conflict_graph.timings.scope_chunk_segments
+                    ),
+                    "conflict_chunk_emitted": float(
+                        plan.conflict_graph.timings.scope_chunk_emitted
+                    ),
+                    "conflict_chunk_max_members": float(
+                        plan.conflict_graph.timings.scope_chunk_max_members
+                    ),
                 }
             )
 
@@ -346,6 +388,7 @@ def _run_pcct_variant(
         ) = _resource_delta(query_resource_start, query_resource_end)
 
     segments = _summarise_batches(batch_metrics, build_seconds)
+    chunk_summary = _summarise_chunk_metrics(batch_metrics)
     return ImplementationResult(
         label=label,
         build_seconds=build_seconds,
@@ -364,6 +407,7 @@ def _run_pcct_variant(
         query_rss_delta_bytes=query_rss_delta,
         query_max_rss_bytes=query_max_rss,
         notes=notes,
+        chunk_metrics=chunk_summary,
     )
 
 
@@ -694,6 +738,20 @@ def main() -> None:
     _plot_results(results, output=output_path, show=args.show)
 
     if args.csv_output:
+        chunk_fieldnames = [
+            "traversal_chunk_segments_warmup",
+            "traversal_chunk_segments_steady",
+            "traversal_chunk_emitted_warmup",
+            "traversal_chunk_emitted_steady",
+            "traversal_chunk_max_members_warmup",
+            "traversal_chunk_max_members_steady",
+            "conflict_chunk_segments_warmup",
+            "conflict_chunk_segments_steady",
+            "conflict_chunk_emitted_warmup",
+            "conflict_chunk_emitted_steady",
+            "conflict_chunk_max_members_warmup",
+            "conflict_chunk_max_members_steady",
+        ]
         fieldnames = [
             "run",
             "label",
@@ -710,39 +768,40 @@ def main() -> None:
             "query_cpu_utilisation",
             "query_rss_delta_bytes",
             "query_max_rss_bytes",
-        ]
+        ] + chunk_fieldnames
         with open(args.csv_output, "w", newline="") as csv_file:
             writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
             writer.writeheader()
             for run_idx, run in enumerate(all_results, start=1):
                 for res in run:
-                    writer.writerow(
-                        {
-                            "run": run_idx,
-                            "label": res.label,
-                            "build_warmup_seconds": res.build_warmup_seconds,
-                            "build_steady_seconds": res.build_steady_seconds,
-                            "build_total_seconds": res.build_seconds,
-                            "query_warmup_seconds": res.query_warmup_seconds,
-                            "query_steady_seconds": res.query_steady_seconds,
-                            "build_cpu_seconds": res.build_cpu_seconds,
-                            "build_cpu_utilisation": res.build_cpu_utilisation,
-                            "build_rss_delta_bytes": res.build_rss_delta_bytes
-                            if res.build_rss_delta_bytes is not None
-                            else "",
-                            "build_max_rss_bytes": res.build_max_rss_bytes
-                            if res.build_max_rss_bytes is not None
-                            else "",
-                            "query_cpu_seconds": res.query_cpu_seconds,
-                            "query_cpu_utilisation": res.query_cpu_utilisation,
-                            "query_rss_delta_bytes": res.query_rss_delta_bytes
-                            if res.query_rss_delta_bytes is not None
-                            else "",
-                            "query_max_rss_bytes": res.query_max_rss_bytes
-                            if res.query_max_rss_bytes is not None
-                            else "",
-                        }
-                    )
+                    row = {
+                        "run": run_idx,
+                        "label": res.label,
+                        "build_warmup_seconds": res.build_warmup_seconds,
+                        "build_steady_seconds": res.build_steady_seconds,
+                        "build_total_seconds": res.build_seconds,
+                        "query_warmup_seconds": res.query_warmup_seconds,
+                        "query_steady_seconds": res.query_steady_seconds,
+                        "build_cpu_seconds": res.build_cpu_seconds,
+                        "build_cpu_utilisation": res.build_cpu_utilisation,
+                        "build_rss_delta_bytes": res.build_rss_delta_bytes
+                        if res.build_rss_delta_bytes is not None
+                        else "",
+                        "build_max_rss_bytes": res.build_max_rss_bytes
+                        if res.build_max_rss_bytes is not None
+                        else "",
+                        "query_cpu_seconds": res.query_cpu_seconds,
+                        "query_cpu_utilisation": res.query_cpu_utilisation,
+                        "query_rss_delta_bytes": res.query_rss_delta_bytes
+                        if res.query_rss_delta_bytes is not None
+                        else "",
+                        "query_max_rss_bytes": res.query_max_rss_bytes
+                        if res.query_max_rss_bytes is not None
+                        else "",
+                    }
+                    for chunk_field in chunk_fieldnames:
+                        row[chunk_field] = res.chunk_metrics.get(chunk_field, "")
+                    writer.writerow(row)
 
     if runs > 1:
         _print_multi_run_summary(all_results)

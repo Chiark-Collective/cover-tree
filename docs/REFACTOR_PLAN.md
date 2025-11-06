@@ -85,8 +85,15 @@ now reuses builder CSR outputs (2025-11-06).
 
 Status: JAX moved to an optional extra; JAX-only tests now skip when the backend is not available (2025-11-06).
 
+## Recent updates — 2025-11-07
+
+- **32 768-point residual regression sweep.** Re-ran the synthetic residual benchmark (`benchmarks/queries.py --metric residual --baseline gpboost`) after the chunk-builder changes. With diagnostics disabled and default chunk target, the run now reports **82.52 s build / 0.307 s query (3 330 q/s)** for PCCT and **3.47 s build / 19.30 s query (53.1 q/s)** for the GPBoost baseline. Forcing `COVERTREEX_SCOPE_CHUNK_TARGET=8192` kept per-chunk volumes bounded but stretched the build to **96.82 s** and dropped query throughput to **2 834 q/s**, while the GPBoost baseline slowed to **4.97 s build / 24.42 s query (41.9 q/s)**. Massive single-batch scopes (16 M+ members) and sustained `conflict_adj_scatter_ms>300 ms` confirm the residual scope-cap wiring needs to be tightened before we can rely on chunked traversal.
+
+- **Scope chunk limiter wiring.** `RuntimeConfig.scope_chunk_target` now flows through the Euclidean sparse traversal path and the conflict-graph builders. Chunk segmentation stats (`scope_chunk_segments/emitted/max_members`) are captured in `TraversalResult` timings and forwarded to the batch-insert logger so dominated batches expose chunk-hit telemetry without extra instrumentation.
+- **Residual pipeline tightening.** Residual traversal streams now carry a cached pairwise matrix (`ResidualTraversalCache`) that the conflict-graph builder reuses instead of re-encoding kernels. `_collect_residual_scopes_streaming` enforces a configurable scope cap (default 16 384, overridable via `COVERTREEX_SCOPE_CHUNK_TARGET`) to keep residual scopes from exploding, and the integration tests cover both the capped traversal path and the cached pairwise reuse.
+
 ## Next Steps
 
-1. Wire the scope chunk limiter (runtime `scope_chunk_target`, segmented builder) through the new builder split and surface chunk-hit telemetry in the batch logs.
-2. Optimise the residual path by reusing the cached pairwise matrix inside the adjacency filter and tightening `_collect_residual_scopes_streaming` so residual scopes stop ballooning past 16 k members.
-3. Promote the Tier-C async refresh + GPU smoke tests so the journal pipeline and builder split are exercised under concurrency/backends beyond NumPy.
+1. **Clamp residual scopes before adjacency.** Audit `_collect_residual_scopes_streaming`/`_trim_residual_scope_vector` to ensure the 16 384-member cap actually applies per dominated batch, then re-run the 32 768-point benchmark until traversal stays under ~150 ms and chunk telemetry never reports eight-digit memberships.
+2. **Retune chunked adjacency + logging.** Iterate on the chunk-builder tiling so `conflict_scope_chunk_segments` stays in the low hundreds (e.g., merge adjacent shards when candidate pairs fall below a threshold) and add a structured file sink (`--log-file` / JSON lines) to `benchmarks/queries.py` so these long residual runs capture every batch without spamming stdout.
+3. **Refresh published metrics.** Once the scope cap + chunk fixes land, regenerate the 32 768-point Euclidean and residual tables (plus the new chunk telemetry CSV) and update `docs/CORE_IMPLEMENTATIONS.md` so auditors see the recovered 4 400–4 700 q/s steady state alongside the GPBoost baseline numbers.

@@ -224,11 +224,24 @@ CPU benchmark highlights (diagnostics on unless stated):
 
 Latest logs: `runtime_breakdown_output_2048_numba_baselines.txt`, `runtime_breakdown_output_8192_numba_baselines.txt`, and `runtime_breakdown_output_32768_numba_gpboost.txt` alongside the diagnostics-on/off PCCT traces. The first dominated batch still pays the Numba compilation penalty (~20 ms build, <0.2 ms query warm-up), after which steady-state adjacency per batch holds at 12–18 ms.
 
-###### Next steps — 2025-11-05
+###### Scope chunk limiter + residual cache reuse — 2025-11-06
 
-1. Trim the remaining `conflict_adj_scatter_ms` hotspot (12–18 ms on dominated batches) by chunking the directed pair expansion or fusing the scatter with the CSR write.
-2. Add regression coverage for the NumPy backend (config defaults, persistence updates) and ensure the test suite exercises both NumPy-only and NumPy+Numba paths.
-3. Extend the runtime breakdown CLI to emit warm-up vs steady-state metrics directly (CSV artefact) so we can track improvements as we iterate on the adjacency builder.
+- Threaded `scope_chunk_target` through the sparse traversal dispatcher and the dense builder, so chunk segmentation counters propagate into `TraversalResult`, `AdjacencyBuild`, and the batch-insert logger. Chunk hit/emitted/max-member telemetry now ships with every dominated batch, making it easy to spot pathological scopes without enabling extra diagnostics.
+- Residual traversal emits a `ResidualTraversalCache` that carries the precomputed pairwise matrix; `build_conflict_graph` reuses it instead of re-materialising kernels and the residual CSR filter consumes the cached distances directly. `_collect_residual_scopes_streaming` enforces a configurable cap (default 16 384 members) and guarantees parent retention even when a scope is trimmed.
+- Added regression coverage to lock the new behaviour in place: `tests/test_traverse.py::test_residual_scope_limit_applies_scope_chunk_target` exercises the traversal cap, while `tests/test_conflict_graph.py::test_residual_conflict_graph_reuses_pairwise_cache` asserts that the cached pairwise matrix is reused when building the residual conflict graph.
+
+###### Residual benchmark regression — 2025-11-07
+
+- Replayed the 32 768-point residual benchmark (dimension 8, batch 512, 1 024 queries, k = 8, seed 42, `--baseline gpboost`). With diagnostics disabled and no chunk target we now see **82.52 s build / 0.307 s query (3 330 q/s)** for PCCT vs. **3.47 s / 19.30 s (53.1 q/s)** for the GPBoost baseline. Enabling `COVERTREEX_SCOPE_CHUNK_TARGET=8192` kept each shard under 8 192 members but ballooned the build to **96.82 s** and dropped throughput to **2.83 k q/s**, while GPBoost slid further to **4.97 s / 24.42 s (41.9 q/s)**. Chunk telemetry recorded 1.9 k+ segments per dominated batch and zero trimming, confirming that the residual scope cap is not binding.
+- The offending batches report `conflict_adj_scatter_ms>300 ms` and `conflict_scope_chunk_max_members` in the eight figures when chunking is disabled, so `_collect_residual_scopes_streaming`/`_trim_residual_scope_vector` either skip or overwrite the capped scopes. Until we enforce the cap before adjacency, chunked traversal will remain slower than the dense baseline.
+- These long-lived runs now spew thousands of INFO lines; we need an opt-in file sink (JSONL/CSV) so every batch insert logs timings + chunk metrics to disk while the console only prints the PCCT/GPBoost summary. That will make before/after comparisons for auditors practical.
+
+###### Next steps — 2025-11-07
+
+1. **Enforce residual scope limits** in traversal: guarantee `_trim_residual_scope_vector` runs for every dominated batch and persist the trimmed memberships through to the journal so no chunk exceeds the configured cap (16 384 by default). Success criteria: traversal per dominated batch <150 ms and `conflict_scope_chunk_max_members` < cap throughout the 32 k benchmark.
+2. **Retune chunked adjacency and logging:** merge consecutive shards once candidate pair counts drop enough to keep `conflict_scope_chunk_segments` in the low hundreds and `conflict_adj_scatter_ms` ≤50 ms. Ship this alongside a structured `--log-file` option in `benchmarks/queries.py` that writes per-batch telemetry (timings, chunk stats, RSS deltas) to disk for offline analysis.
+3. **Refresh published benchmark tables:** after (1) and (2) land, regenerate the 32 768-point Euclidean + residual rows in `docs/CORE_IMPLEMENTATIONS.md` and attach the new log artefacts + chunk telemetry CSV so the documentation reflects the recovered ~4.5 k q/s steady state.
+4. **Tier-C coverage remains CPU-only:** keep the async refresh harness running under NumPy/Numba thread pools; GPU/JAX smoke tests stay deprecated until we need that backend again.
 
 ###### Implementation plan — 2025-11-06
 

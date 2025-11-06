@@ -112,11 +112,27 @@ def test_runtime_breakdown_csv_output(tmp_path, monkeypatch):
     cx_config.reset_runtime_config_cache()
     assert csv_path.exists()
     contents = csv_path.read_text().strip().splitlines()
+    chunk_tail = ",".join(
+        [
+            "traversal_chunk_segments_warmup",
+            "traversal_chunk_segments_steady",
+            "traversal_chunk_emitted_warmup",
+            "traversal_chunk_emitted_steady",
+            "traversal_chunk_max_members_warmup",
+            "traversal_chunk_max_members_steady",
+            "conflict_chunk_segments_warmup",
+            "conflict_chunk_segments_steady",
+            "conflict_chunk_emitted_warmup",
+            "conflict_chunk_emitted_steady",
+            "conflict_chunk_max_members_warmup",
+            "conflict_chunk_max_members_steady",
+        ]
+    )
     expected_tail = (
         "label,build_warmup_seconds,build_steady_seconds,build_total_seconds," "query_warmup_seconds,"
         "query_steady_seconds,build_cpu_seconds,build_cpu_utilisation," "build_rss_delta_bytes,"
         "build_max_rss_bytes,query_cpu_seconds,query_cpu_utilisation," "query_rss_delta_bytes,"
-        "query_max_rss_bytes"
+        "query_max_rss_bytes," + chunk_tail
     )
     header = contents[0]
     if header.startswith("run,"):

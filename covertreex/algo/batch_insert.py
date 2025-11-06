@@ -222,6 +222,12 @@ def _batch_insert_impl(
             conflict_scope_domination_ratio=float(conflict_timings.scope_domination_ratio),
             conflict_scope_bytes_d2h=int(conflict_timings.scope_bytes_d2h),
             conflict_scope_bytes_h2d=int(conflict_timings.scope_bytes_h2d),
+            traversal_scope_chunk_segments=int(plan.traversal.timings.scope_chunk_segments),
+            traversal_scope_chunk_emitted=int(plan.traversal.timings.scope_chunk_emitted),
+            traversal_scope_chunk_max_members=int(plan.traversal.timings.scope_chunk_max_members),
+            conflict_scope_chunk_segments=int(conflict_timings.scope_chunk_segments),
+            conflict_scope_chunk_emitted=int(conflict_timings.scope_chunk_emitted),
+            conflict_scope_chunk_max_members=int(conflict_timings.scope_chunk_max_members),
             conflict_mis_ms=conflict_timings.mis_seconds * 1e3,
         )
 

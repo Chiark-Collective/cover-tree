@@ -24,6 +24,7 @@ from covertreex.core.metrics import get_metric
 from covertreex.core.tree import PCCTree, TreeBackend
 from covertreex.metrics.residual import (
     compute_residual_distances_from_kernel,
+    compute_residual_pairwise_matrix,
     decode_indices,
     get_residual_backend,
 )
@@ -87,29 +88,6 @@ class ConflictGraphTimings:
     mis_seconds: float = 0.0
 
 
-
-
-def _compute_residual_pairwise_matrix(
-    *,
-    host_backend: "ResidualCorrHostData",
-    batch_indices: np.ndarray,
-) -> np.ndarray:
-    total = batch_indices.shape[0]
-    result = np.empty((total, total), dtype=np.float64)
-    chunk = int(host_backend.chunk_size or 512)
-    for start in range(0, total, chunk):
-        stop = min(start + chunk, total)
-        rows = batch_indices[start:stop]
-        kernel_block = host_backend.kernel_provider(rows, batch_indices)
-        distances = compute_residual_distances_from_kernel(
-            host_backend,
-            rows,
-            batch_indices,
-            kernel_block,
-        )
-        result[start:stop, :] = distances
-    return result
-
 def build_conflict_graph(
     tree: PCCTree,
     traversal: TraversalResult,
@@ -131,16 +109,21 @@ def build_conflict_graph(
 
     residual_pairwise_np: np.ndarray | None = None
     batch_indices_np: np.ndarray | None = None
+    residual_cache = traversal.residual_cache if residual_mode else None
 
     pairwise_start = time.perf_counter()
     if residual_mode:
         host_backend = get_residual_backend()
-        batch_np = np.asarray(backend.to_numpy(batch))
-        batch_indices_np = decode_indices(host_backend, batch_np)
-        residual_pairwise_np = _compute_residual_pairwise_matrix(
-            host_backend=host_backend,
-            batch_indices=batch_indices_np,
-        )
+        if residual_cache is not None:
+            batch_indices_np = np.asarray(residual_cache.batch_indices, dtype=np.int64)
+            residual_pairwise_np = np.asarray(residual_cache.pairwise, dtype=np.float64)
+        else:
+            batch_np = np.asarray(backend.to_numpy(batch))
+            batch_indices_np = decode_indices(host_backend, batch_np)
+            residual_pairwise_np = compute_residual_pairwise_matrix(
+                host_backend,
+                batch_indices_np,
+            )
         pairwise = backend.asarray(residual_pairwise_np, dtype=backend.default_float)
     else:
         pairwise = metric.pairwise(backend, batch, batch)

@@ -333,6 +333,104 @@ if NUMBA_SCOPE_AVAILABLE:
         return sources, targets, used
 
     @nb.njit(cache=True)
+    def _expand_pairs_chunked_to_csr(
+        values: np.ndarray,
+        indptr: np.ndarray,
+        keep_mask: np.ndarray,
+        chunk_ranges: np.ndarray,
+        pairwise: np.ndarray,
+        radii: np.ndarray,
+        batch_size: int,
+    ) -> tuple[np.ndarray, np.ndarray, int, int, int]:
+        counts = np.zeros(batch_size, dtype=I64)
+        chunk_emitted = 0
+        chunk_max_members = 0
+        total_pairs = I64(0)
+
+        chunk_count = chunk_ranges.shape[0]
+        for chunk_idx in range(chunk_count):
+            start = int(chunk_ranges[chunk_idx, 0])
+            end = int(chunk_ranges[chunk_idx, 1])
+            if end <= start:
+                continue
+            volume = int(indptr[end] - indptr[start])
+            if volume > chunk_max_members:
+                chunk_max_members = volume
+            chunk_has_edges = False
+            for node in range(start, end):
+                if not keep_mask[node]:
+                    continue
+                s = indptr[node]
+                e = indptr[node + 1]
+                c = e - s
+                if c <= 1:
+                    continue
+                for a in range(c - 1):
+                    pa = int(values[s + a])
+                    ra = radii[pa]
+                    for b in range(a + 1, c):
+                        pb = int(values[s + b])
+                        rb = radii[pb]
+                        bound = ra if ra < rb else rb
+                        if pairwise[pa, pb] <= bound:
+                            counts[pa] += 1
+                            counts[pb] += 1
+                            total_pairs += I64(2)
+                            chunk_has_edges = True
+            if chunk_has_edges:
+                chunk_emitted += 1
+
+        total_pairs_int = int(total_pairs)
+        if total_pairs_int == 0:
+            return (
+                np.zeros(batch_size + 1, dtype=I64),
+                np.empty(0, dtype=I32),
+                0,
+                chunk_emitted,
+                chunk_max_members,
+            )
+
+        indptr_out = np.empty(batch_size + 1, dtype=I64)
+        acc = I64(0)
+        indptr_out[0] = 0
+        for i in range(batch_size):
+            acc += counts[i]
+            indptr_out[i + 1] = acc
+
+        indices_out = np.empty(total_pairs_int, dtype=I32)
+        heads = indptr_out[:-1].copy()
+
+        for chunk_idx in range(chunk_count):
+            start = int(chunk_ranges[chunk_idx, 0])
+            end = int(chunk_ranges[chunk_idx, 1])
+            if end <= start:
+                continue
+            for node in range(start, end):
+                if not keep_mask[node]:
+                    continue
+                s = indptr[node]
+                e = indptr[node + 1]
+                c = e - s
+                if c <= 1:
+                    continue
+                for a in range(c - 1):
+                    pa = int(values[s + a])
+                    ra = radii[pa]
+                    for b in range(a + 1, c):
+                        pb = int(values[s + b])
+                        rb = radii[pb]
+                        bound = ra if ra < rb else rb
+                        if pairwise[pa, pb] <= bound:
+                            pos_a = heads[pa]
+                            indices_out[pos_a] = pb
+                            heads[pa] = pos_a + 1
+                            pos_b = heads[pb]
+                            indices_out[pos_b] = pa
+                            heads[pb] = pos_b + 1
+
+        return indptr_out, indices_out, total_pairs_int, chunk_emitted, chunk_max_members
+
+    @nb.njit(cache=True)
     def _pairs_to_csr(
         sources: np.ndarray,
         targets: np.ndarray,
@@ -524,8 +622,14 @@ if NUMBA_SCOPE_AVAILABLE:
                 chunk_max_members=0,
             )
 
-        chunk_ranges = _chunk_ranges_from_indptr(indptr_nodes, chunk_target)
-        use_chunks = chunk_target > 0 and len(chunk_ranges) > 1
+        chunk_ranges_list = _chunk_ranges_from_indptr(indptr_nodes, chunk_target)
+        chunk_count = len(chunk_ranges_list)
+        if chunk_count:
+            chunk_ranges_arr = np.asarray(chunk_ranges_list, dtype=np.int64).reshape(chunk_count, 2)
+        else:
+            chunk_ranges_arr = np.zeros((0, 2), dtype=np.int64)
+        use_chunks = chunk_target > 0 and chunk_count > 1
+        full_volume = int(indptr_nodes[-1] - indptr_nodes[0]) if indptr_nodes.size else 0
 
         if not use_chunks:
             pair_counts_kept = pair_counts[keep]
@@ -543,9 +647,9 @@ if NUMBA_SCOPE_AVAILABLE:
                     candidate_pairs=candidate_pairs,
                     num_groups=num_groups,
                     num_unique_groups=num_unique_groups,
-                    chunk_count=len(chunk_ranges),
+                    chunk_count=chunk_count,
                     chunk_emitted=0,
-                    chunk_max_members=int(indptr_nodes[-1] - indptr_nodes[0]),
+                    chunk_max_members=full_volume,
                 )
 
             sources, targets, used_counts = _expand_pairs_directed(
@@ -574,9 +678,9 @@ if NUMBA_SCOPE_AVAILABLE:
                     candidate_pairs=candidate_pairs,
                     num_groups=num_groups,
                     num_unique_groups=num_unique_groups,
-                    chunk_count=len(chunk_ranges),
+                    chunk_count=chunk_count,
                     chunk_emitted=0,
-                    chunk_max_members=int(indptr_nodes[-1] - indptr_nodes[0]),
+                    chunk_max_members=full_volume,
                 )
             return ScopeAdjacencyResult(
                 sources=np.empty(0, dtype=I32),
@@ -588,62 +692,27 @@ if NUMBA_SCOPE_AVAILABLE:
                 candidate_pairs=candidate_pairs,
                 num_groups=num_groups,
                 num_unique_groups=num_unique_groups,
-                chunk_count=len(chunk_ranges),
-                chunk_emitted=len(chunk_ranges) if actual_pairs > 0 else 0,
-                chunk_max_members=int(indptr_nodes[-1] - indptr_nodes[0]),
+                chunk_count=chunk_count,
+                chunk_emitted=chunk_count if actual_pairs > 0 else 0,
+                chunk_max_members=full_volume,
             )
 
-        counts_per_source = np.zeros(batch_size, dtype=I64)
-        chunk_results: list[tuple[np.ndarray, np.ndarray]] = []
-        chunk_emitted = 0
-        chunk_max_members = 0
-        total_pairs_accum = I64(0)
-
-        for chunk_start, chunk_end in chunk_ranges:
-            if chunk_end <= chunk_start:
-                continue
-            start_offset = int(indptr_nodes[chunk_start])
-            end_offset = int(indptr_nodes[chunk_end])
-            volume = end_offset - start_offset
-            if volume > chunk_max_members:
-                chunk_max_members = volume
-
-            keep_slice = keep[chunk_start:chunk_end]
-            if not np.any(keep_slice):
-                continue
-
-            local_kept = np.nonzero(keep_slice)[0].astype(I64)
-            local_pair_counts = pair_counts[chunk_start:chunk_end]
-            local_directed = local_pair_counts[keep_slice] * 2
-            offsets = _prefix_sum(local_directed)
-            capacity = int(offsets[-1])
-            if capacity == 0:
-                continue
-
-            local_members = node_members[start_offset:end_offset]
-            local_indptr = indptr_nodes[chunk_start : chunk_end + 1] - indptr_nodes[chunk_start]
-
-            sources, targets, used_counts = _expand_pairs_directed(
-                local_members,
-                local_indptr,
-                local_kept,
-                offsets,
-                pairwise_arr,
-                radii_arr,
-            )
-            csr_indptr_chunk, csr_indices_chunk, actual_pairs_chunk = _pairs_to_csr(
-                sources,
-                targets,
-                offsets,
-                used_counts,
-                batch_size,
-            )
-            if actual_pairs_chunk == 0:
-                continue
-            chunk_emitted += 1
-            chunk_results.append((csr_indptr_chunk, csr_indices_chunk))
-            counts_per_source += csr_indptr_chunk[1:] - csr_indptr_chunk[:-1]
-            total_pairs_accum += I64(actual_pairs_chunk)
+        keep_mask = keep.astype(np.bool_)
+        (
+            global_indptr,
+            global_indices,
+            total_pairs_accum,
+            chunk_emitted,
+            chunk_max_members,
+        ) = _expand_pairs_chunked_to_csr(
+            node_members,
+            indptr_nodes,
+            keep_mask,
+            chunk_ranges_arr,
+            pairwise_arr,
+            radii_arr,
+            batch_size,
+        )
 
         if total_pairs_accum == 0:
             return ScopeAdjacencyResult(
@@ -656,26 +725,10 @@ if NUMBA_SCOPE_AVAILABLE:
                 candidate_pairs=candidate_pairs,
                 num_groups=num_groups,
                 num_unique_groups=num_unique_groups,
-                chunk_count=len(chunk_ranges),
+                chunk_count=chunk_count,
                 chunk_emitted=chunk_emitted,
-                chunk_max_members=chunk_max_members,
+                chunk_max_members=int(chunk_max_members),
             )
-
-        global_indptr = _prefix_sum64(counts_per_source.astype(I64))
-        total_edges = int(global_indptr[-1])
-        global_indices = np.empty(total_edges, dtype=I32)
-        heads = global_indptr[:-1].copy()
-
-        for csr_indptr_chunk, csr_indices_chunk in chunk_results:
-            for src in range(batch_size):
-                start = int(csr_indptr_chunk[src])
-                end = int(csr_indptr_chunk[src + 1])
-                if start == end:
-                    continue
-                dst_start = int(heads[src])
-                dst_end = dst_start + (end - start)
-                global_indices[dst_start:dst_end] = csr_indices_chunk[start:end]
-                heads[src] = dst_end
 
         return ScopeAdjacencyResult(
             sources=np.empty(0, dtype=I32),
@@ -687,9 +740,9 @@ if NUMBA_SCOPE_AVAILABLE:
             candidate_pairs=candidate_pairs,
             num_groups=num_groups,
             num_unique_groups=num_unique_groups,
-            chunk_count=len(chunk_ranges),
+            chunk_count=chunk_count,
             chunk_emitted=chunk_emitted,
-            chunk_max_members=chunk_max_members,
+            chunk_max_members=int(chunk_max_members),
         )
 
 else:  # pragma: no cover - executed when numba missing

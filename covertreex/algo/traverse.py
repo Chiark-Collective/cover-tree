@@ -14,6 +14,7 @@ from covertreex.metrics.residual import (
     ResidualCorrHostData,
     compute_residual_distances_from_kernel,
     compute_residual_distances_with_radius,
+    compute_residual_pairwise_matrix,
     decode_indices,
     get_residual_backend,
 )
@@ -30,6 +31,13 @@ from covertreex.queries._knn_numba import (
 
 LOGGER = get_logger("algo.traverse")
 _RESIDUAL_SCOPE_EPS = 1e-9
+_RESIDUAL_SCOPE_DEFAULT_LIMIT = 16_384
+
+
+@dataclass(frozen=True)
+class ResidualTraversalCache:
+    batch_indices: np.ndarray
+    pairwise: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -42,6 +50,7 @@ class TraversalResult:
     scope_indptr: Any
     scope_indices: Any
     timings: "TraversalTimings"
+    residual_cache: ResidualTraversalCache | None = None
 
 
 @dataclass(frozen=True)
@@ -121,7 +130,7 @@ class _ResidualTraversal(TraversalStrategy):
         backend: TreeBackend,
         runtime: Any,
     ) -> TraversalResult:
-        return _collect_residual(tree, batch, backend=backend)
+        return _collect_residual(tree, batch, backend=backend, runtime=runtime)
 
 
 def _collect_euclidean_dense(
@@ -344,7 +353,8 @@ def _collect_residual_scopes_streaming(
     tree_indices: np.ndarray,
     parent_positions: np.ndarray,
     radii: np.ndarray,
-) -> Tuple[np.ndarray, np.ndarray, Tuple[Tuple[int, ...], ...]]:
+    scope_limit: int | None = None,
+) -> Tuple[np.ndarray, np.ndarray, Tuple[Tuple[int, ...], ...], int, int]:
     batch_size = int(query_indices.shape[0])
     total_points = int(tree_indices.shape[0])
     next_cache_np = np.asarray(tree.next_cache, dtype=np.int64)
@@ -354,6 +364,10 @@ def _collect_residual_scopes_streaming(
     scopes: list[np.ndarray] = []
     scope_indptr = np.zeros(batch_size + 1, dtype=np.int64)
     chunk = int(host_backend.chunk_size or 512)
+    trimmed_scopes = 0
+    max_scope_members = 0
+    max_scope_after = 0
+    limit = scope_limit if scope_limit and scope_limit > 0 else None
 
     for qi in range(batch_size):
         parent_pos = int(parent_positions[qi])
@@ -407,6 +421,20 @@ def _collect_residual_scopes_streaming(
         else:
             scope_vec = np.empty(0, dtype=np.int64)
 
+        original_size = scope_vec.size
+        max_scope_members = max(max_scope_members, original_size)
+
+        if limit and original_size > limit:
+            trimmed_scopes += 1
+            scope_vec = _trim_residual_scope_vector(
+                scope_vec,
+                parent_pos,
+                top_levels_np,
+                limit,
+            )
+
+        max_scope_after = max(max_scope_after, scope_vec.size)
+
         scopes.append(scope_vec)
         scope_indptr[qi + 1] = scope_indptr[qi] + scope_vec.size
 
@@ -422,7 +450,31 @@ def _collect_residual_scopes_streaming(
         else:
             conflict_scopes.append(())
 
-    return scope_indptr, scope_indices, tuple(conflict_scopes)
+    return (
+        scope_indptr,
+        scope_indices,
+        tuple(conflict_scopes),
+        trimmed_scopes,
+        max_scope_after,
+    )
+
+
+def _trim_residual_scope_vector(
+    scope_vec: np.ndarray,
+    parent_pos: int,
+    top_levels_np: np.ndarray,
+    scope_limit: int,
+) -> np.ndarray:
+    trimmed = scope_vec[:scope_limit].copy()
+    if parent_pos not in trimmed:
+        trimmed = np.concatenate([trimmed, np.asarray([parent_pos], dtype=np.int64)])
+    # Remove duplicates while preserving intent to keep highest-level nodes first.
+    trimmed = np.unique(trimmed)
+    order = np.lexsort((trimmed, -top_levels_np[trimmed]))
+    trimmed = trimmed[order]
+    if trimmed.size > scope_limit:
+        trimmed = trimmed[:scope_limit]
+    return trimmed
 
 
 def _collect_euclidean_sparse(
@@ -553,6 +605,7 @@ def _collect_residual(
     batch_points: Any,
     *,
     backend: TreeBackend,
+    runtime: Any,
 ) -> TraversalResult:
     queries_np = np.asarray(backend.to_numpy(batch_points), dtype=np.float64)
     if queries_np.ndim == 1:
@@ -564,6 +617,7 @@ def _collect_residual(
 
     host_backend = get_residual_backend()
     query_indices = decode_indices(host_backend, queries_np)
+    batch_indices_np = np.asarray(query_indices, dtype=np.int64)
     tree_points_np = np.asarray(backend.to_numpy(tree.points))
     tree_indices = decode_indices(host_backend, tree_points_np)
     if tree_indices.shape[0] != tree.num_points:
@@ -575,10 +629,16 @@ def _collect_residual(
     pairwise_start = time.perf_counter()
     parent_dataset_idx, _parent_distances = _residual_find_parents(
         host_backend=host_backend,
-        query_indices=np.asarray(query_indices, dtype=np.int64),
+        query_indices=batch_indices_np,
         tree_indices=np.asarray(tree_indices, dtype=np.int64),
     )
     pairwise_seconds = time.perf_counter() - pairwise_start
+
+    residual_pairwise_np = compute_residual_pairwise_matrix(
+        host_backend=host_backend,
+        batch_indices=batch_indices_np,
+    )
+    residual_pairwise_np = np.ascontiguousarray(residual_pairwise_np, dtype=np.float64)
 
     tree_indices_np = np.asarray(tree_indices, dtype=np.int64)
     dataset_to_pos = {int(tree_indices_np[i]): int(i) for i in range(tree_indices_np.shape[0])}
@@ -608,14 +668,22 @@ def _collect_residual(
         si_values[valid_mask] = si_cache_np[parents_np[valid_mask]]
     radii_np = np.maximum(base_radii, si_values)
 
+    scope_limit = int(runtime.scope_chunk_target) if int(runtime.scope_chunk_target) > 0 else _RESIDUAL_SCOPE_DEFAULT_LIMIT
     scope_start = time.perf_counter()
-    scope_indptr_np, scope_indices_np, conflict_scopes = _collect_residual_scopes_streaming(
+    (
+        scope_indptr_np,
+        scope_indices_np,
+        conflict_scopes,
+        chunk_hits,
+        chunk_max_members,
+    ) = _collect_residual_scopes_streaming(
         tree=tree,
         host_backend=host_backend,
-        query_indices=np.asarray(query_indices, dtype=np.int64),
+        query_indices=batch_indices_np,
         tree_indices=tree_indices_np,
         parent_positions=parents_np,
         radii=radii_np,
+        scope_limit=scope_limit,
     )
     semisort_seconds = time.perf_counter() - scope_start
 
@@ -638,6 +706,13 @@ def _collect_residual(
             nonzero_seconds=0.0,
             sort_seconds=0.0,
             assemble_seconds=0.0,
+            scope_chunk_segments=batch_size,
+            scope_chunk_emitted=int(chunk_hits),
+            scope_chunk_max_members=int(chunk_max_members),
+        ),
+        residual_cache=ResidualTraversalCache(
+            batch_indices=batch_indices_np,
+            pairwise=residual_pairwise_np,
         ),
     )
 
