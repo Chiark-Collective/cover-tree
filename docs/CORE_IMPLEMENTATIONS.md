@@ -34,7 +34,7 @@ _Set `COVERTREEX_ENABLE_DIAGNOSTICS=1` to collect the instrumentation counters (
 | Workload (tree pts / queries / k) | PCCT Build (s) | PCCT Query (s) | PCCT q/s | Sequential Build (s) | Sequential q/s | GPBoost Build (s) | GPBoost q/s | External Build (s) | External q/s |
 |-----------------------------------|----------------|----------------|----------|----------------------|----------------|-------------------|-------------|--------------------|---------------|
 | 8 192 / 1 024 / 16                | 4.03           | 0.934          | 1 096    | 33.65               | 5 327         | 0.569             | 306         | 14.14              | 122           |
-| 32 768 / 2 048 / 16               | 66.06          | 8.28           | 248      | —                   | —             | 2.41              | 102         | —                  | —             |
+| 32 768 / 2 048 / 16               | 41.01          | 0.419          | 4 889    | —                   | —             | 2.80              | 98          | —                  | —             |
 
 The 32 768-point run currently logs PCCT and the GPBoost baseline; sequential/external baselines are still pending optimisations to keep runtime manageable at that scale.
 
@@ -64,7 +64,8 @@ To capture warm-up versus steady-state timings for plotting, append `--csv-outpu
 
 ## Current Observations & Hypotheses
 
-- Dominated batches still pay ~14–20 ms in `traversal_ms` (dense mask construction + chain expansion), making traversal the clear build-time bottleneck despite Numba scope helpers.
+- Dominated batches still pay ~200 ms in `traversal_pairwise_ms` (even with the residual-aware early exit disabled for Euclidean runs) and spend ~300 ms in `traversal_assemble_ms` when we push 32 k points. Conflict-graph construction has dropped to ~59 ms on the same workload, so traversal remains the clear bottleneck.
+- Fresh 32 768-point benchmark on 2025-11-06 landed at **41.01 s build / 0.42 s query (4 889 q/s)** for PCCT with NumPy+Numba, while the GPBoost baseline stayed at 2.80 s build / 20.94 s query (98 q/s). The residual-aware chunking keeps adjacency cheap (~59 ms per dominated batch), highlighting traversal and mask assembly as the remaining hotspots.
 - The Numba conflict-graph path (segment dedupe + directed pair expansion) now lands at 3–4 ms per dominated batch, with `conflict_scope_group_ms < 0.01 ms` and `conflict_adj_scatter_ms ≈ 1.0–1.3 ms`. No GPU kernels are invoked in the NumPy backend configuration.
 - MIS is effectively free (`mis_ms ≤ 0.2 ms`). Remaining variation comes from first-call warm-up; post-compilation runs stay under 0.1 ms.
 - Running strictly on the CPU (NumPy backend, diagnostics optional) keeps comparisons against the GPBoost baseline reproducible while avoiding the slower sequential/external references that we now skip by default.

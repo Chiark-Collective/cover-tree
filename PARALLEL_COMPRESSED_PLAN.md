@@ -163,7 +163,8 @@ Deliver a reusable “parallel compressed cover tree” (PCCT) library that comb
   - PCCT build 28.27 s (down from 45.95 s) and query batch 3.12 s (164 q/s, unchanged). Sequential baseline unaffected (build 2.17 s, 21 239 q/s).
   - Per-batch traversal metrics: `traversal_semisort_ms` now 7–28 ms, `traversal_chain_ms` ≈0.2–4 ms, while conflict-graph construction remains 0.3–1.4 s and MIS ≈0.19–0.21 s.
   - Overall traversal contribution fell to 4.0 s per build (14 %), leaving conflict-graph assembly (~19 s, 67 %) and pairwise mask formation (~3.1 s, 11 %) as the dominant hotspots.
-- Next optimisation focus: rewrite conflict-graph construction (`build_conflict_graph`) to avoid Python adjacency assembly (currently ~1 s per batch) and reuse pairwise distance work, then reassess MIS once conflict graph is <25 % of wall time.
+- Conflict-graph construction now streams residual tiles through the Numba builder (~59 ms per dominated batch on the 32 k workload); residual traversal still spends ~200 ms in the pairwise phase and ~300 ms assembling CSR scopes, so the traversal hot path is the limiting factor.
+- Immediate optimisation focus (Nov 6): (i) land the residual-specific early-exit traversal kernel (partial dot-product pruning against the residual bound), (ii) replace the residual `traversal_assemble_ms` path with a streaming CSR emitter that never materialises the dense mask, and (iii) re-run the 32 k dominated-batch benchmark with the residual metric enabled to validate the build-time drop.
 
 #### Visual Diagnostics
 
