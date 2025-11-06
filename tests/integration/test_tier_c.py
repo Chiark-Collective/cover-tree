@@ -8,12 +8,12 @@ jax = pytest.importorskip("jax")
 jnp = pytest.importorskip("jax.numpy")
 
 from covertreex.algo import batch_delete, batch_insert
-from covertreex.core.tree import DEFAULT_BACKEND, PCCTree, TreeLogStats
+from covertreex.core.tree import PCCTree, TreeLogStats, get_runtime_backend
 from covertreex.queries import knn
 
 
 def _base_tree() -> PCCTree:
-    backend = DEFAULT_BACKEND
+    backend = get_runtime_backend()
     points = backend.asarray(
         [
             [0.0, 0.0],
@@ -70,7 +70,9 @@ def test_async_batch_insert_harness():
 
 
 def test_device_builder_smoke():
-    backend = DEFAULT_BACKEND
+    backend = get_runtime_backend()
+    if backend.name != "jax":
+        pytest.skip("JAX backend unavailable; device builder smoke test requires JAX arrays.")
     tree = PCCTree.empty(dimension=2, backend=backend)
 
     initial = jax.device_put(

@@ -103,17 +103,19 @@ class TreeBackend:
         return np.asarray(value)
 
 
-def _init_default_backend() -> TreeBackend:
-    runtime = cx_config.runtime_config()
-    if runtime.backend == "jax":
-        return TreeBackend.jax(precision=runtime.precision)
-    if runtime.backend == "numpy":
-        return TreeBackend.numpy(precision=runtime.precision)
-    raise NotImplementedError(f"Backend '{runtime.backend}' is not supported yet.")
-
-
-DEFAULT_BACKEND = _init_default_backend()
 LOGGER = get_logger("core.tree")
+
+
+def _context_backend() -> TreeBackend:
+    """Return the backend provided by the active runtime context."""
+
+    return cx_config.runtime_context().get_backend()
+
+
+def get_runtime_backend() -> TreeBackend:
+    """Public helper to access the backend from the active runtime context."""
+
+    return cx_config.runtime_context().get_backend()
 
 
 def compute_level_offsets(backend: TreeBackend, top_levels: ArrayLike) -> ArrayLike:
@@ -170,7 +172,7 @@ class PCCTree:
     si_cache: ArrayLike
     next_cache: ArrayLike
     stats: TreeLogStats = field(default_factory=TreeLogStats)
-    backend: TreeBackend = field(default=DEFAULT_BACKEND)
+    backend: TreeBackend = field(default_factory=_context_backend)
 
     def __post_init__(self) -> None:
         self._validate_shapes()
@@ -282,7 +284,7 @@ class PCCTree:
     def empty(cls, *, dimension: int, backend: TreeBackend | None = None) -> "PCCTree":
         """Construct an empty tree with the requested dimensionality."""
 
-        backend = backend or DEFAULT_BACKEND
+        backend = backend or _context_backend()
         points = backend.empty((0, dimension), dtype=backend.default_float)
         zeros_1d = backend.empty((0,), dtype=backend.default_int)
         return cls(

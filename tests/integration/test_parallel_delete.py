@@ -5,11 +5,11 @@ jax = pytest.importorskip("jax")
 jnp = pytest.importorskip("jax.numpy")
 
 from covertreex.algo import batch_delete, batch_insert, plan_batch_delete
-from covertreex.core.tree import DEFAULT_BACKEND, PCCTree, TreeLogStats
+from covertreex.core.tree import PCCTree, TreeLogStats, get_runtime_backend
 
 
 def _setup_tree() -> PCCTree:
-    backend = DEFAULT_BACKEND
+    backend = get_runtime_backend()
     points = backend.asarray(
         [
             [0.0, 0.0],

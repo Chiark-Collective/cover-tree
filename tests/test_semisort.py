@@ -4,11 +4,11 @@ import pytest
 jax = pytest.importorskip("jax")
 
 from covertreex.algo import group_by_int
-from covertreex.core.tree import DEFAULT_BACKEND
+from covertreex.core.tree import get_runtime_backend
 
 
 def test_group_by_int_basic():
-    backend = DEFAULT_BACKEND
+    backend = get_runtime_backend()
     keys = backend.asarray([2, 0, 2, 1, 1, 0], dtype=backend.default_int)
     values = backend.asarray(
         np.array([[1], [2], [3], [4], [5], [6]], dtype=np.float64),
@@ -28,7 +28,7 @@ def test_group_by_int_basic():
 
 
 def test_group_by_int_empty():
-    backend = DEFAULT_BACKEND
+    backend = get_runtime_backend()
     result = group_by_int(
         backend.asarray([], dtype=backend.default_int),
         backend.asarray([], dtype=backend.default_float),

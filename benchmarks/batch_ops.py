@@ -10,7 +10,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from covertreex.algo import batch_delete, batch_insert
-from covertreex.core.tree import DEFAULT_BACKEND, PCCTree
+from covertreex.core.tree import PCCTree, get_runtime_backend
 
 
 @dataclass(frozen=True)
@@ -24,7 +24,8 @@ class BenchmarkResult:
 
 
 def _generate_batch(key: jax.Array, batch_size: int, dimension: int) -> jnp.ndarray:
-    return jax.random.normal(key, (batch_size, dimension), dtype=DEFAULT_BACKEND.default_float)
+    backend = get_runtime_backend()
+    return jax.random.normal(key, (batch_size, dimension), dtype=backend.default_float)
 
 
 def benchmark_insert(
@@ -34,7 +35,8 @@ def benchmark_insert(
     batches: int,
     seed: int,
 ) -> Tuple[PCCTree, BenchmarkResult]:
-    tree = PCCTree.empty(dimension=dimension, backend=DEFAULT_BACKEND)
+    backend = get_runtime_backend()
+    tree = PCCTree.empty(dimension=dimension, backend=backend)
     key = jax.random.PRNGKey(seed)
     start = time.perf_counter()
     for idx in range(batches):

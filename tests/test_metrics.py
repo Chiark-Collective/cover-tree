@@ -12,7 +12,7 @@ from covertreex.core.metrics import (
     Metric,
     reset_residual_metric,
 )
-from covertreex.core.tree import DEFAULT_BACKEND, TreeBackend
+from covertreex.core.tree import TreeBackend, get_runtime_backend
 from covertreex.metrics.residual import (
     ResidualCorrHostData,
     configure_residual_correlation,
@@ -27,7 +27,7 @@ from covertreex.metrics.residual import (
 
 
 def test_euclidean_pairwise_matches_manual():
-    backend = DEFAULT_BACKEND
+    backend = get_runtime_backend()
     metric = get_metric("euclidean")
     lhs = backend.asarray([[0.0, 0.0], [1.0, 1.0]], dtype=backend.default_float)
     rhs = backend.asarray([[1.0, 1.0], [2.0, 1.0]], dtype=backend.default_float)
@@ -40,7 +40,7 @@ def test_euclidean_pairwise_matches_manual():
 
 
 def test_euclidean_pointwise_supports_vector_inputs():
-    backend = DEFAULT_BACKEND
+    backend = get_runtime_backend()
     metric = get_metric()
     lhs = backend.asarray([[0.0, 0.0], [1.0, 1.0]], dtype=backend.default_float)
     rhs = backend.asarray([[0.0, 0.0], [2.0, 2.0]], dtype=backend.default_float)
@@ -89,7 +89,7 @@ def test_available_metrics_contains_euclidean():
 
 
 def test_residual_metric_requires_configuration():
-    backend = DEFAULT_BACKEND
+    backend = get_runtime_backend()
     metric = get_metric("residual_correlation")
     lhs = backend.asarray([[0.0, 0.0]], dtype=backend.default_float)
     rhs = backend.asarray([[1.0, 1.0]], dtype=backend.default_float)
@@ -230,7 +230,7 @@ def test_residual_correlation_helper_computes_distances():
     configure_residual_correlation(backend)
 
     metric = get_metric("residual_correlation")
-    tree_backend = DEFAULT_BACKEND
+    tree_backend = get_runtime_backend()
     lhs = tree_backend.asarray([0, 2], dtype=tree_backend.default_int)
     rhs = tree_backend.asarray([1], dtype=tree_backend.default_int)
 

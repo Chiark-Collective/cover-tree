@@ -7,7 +7,7 @@ jnp = pytest.importorskip("jax.numpy")
 from covertreex import config as cx_config
 from covertreex.algo.traverse import TraversalResult, traverse_collect_scopes
 from covertreex.core.metrics import reset_residual_metric
-from covertreex.core.tree import DEFAULT_BACKEND, PCCTree, TreeLogStats
+from covertreex.core.tree import PCCTree, TreeLogStats, get_runtime_backend
 from covertreex.metrics.residual import (
     ResidualCorrHostData,
     configure_residual_correlation,
@@ -16,7 +16,7 @@ from covertreex.metrics.residual import (
 
 
 def _sample_tree():
-    backend = DEFAULT_BACKEND
+    backend = get_runtime_backend()
     points = backend.asarray([[0.0, 0.0], [1.0, 1.0]], dtype=backend.default_float)
     top_levels = backend.asarray([1, 0], dtype=backend.default_int)
     parents = backend.asarray([-1, 0], dtype=backend.default_int)
@@ -84,7 +84,7 @@ def test_traversal_uses_tree_backend_by_default():
 
 
 def test_traversal_handles_empty_tree():
-    backend = DEFAULT_BACKEND
+    backend = get_runtime_backend()
     empty_tree = PCCTree.empty(dimension=2, backend=backend)
 
     result = traverse_collect_scopes(empty_tree, [[1.0, 1.0]])
@@ -99,7 +99,7 @@ def test_traversal_handles_empty_tree():
 
 
 def test_traversal_semisorts_scopes_by_level():
-    backend = DEFAULT_BACKEND
+    backend = get_runtime_backend()
     points = backend.asarray(
         [
             [0.0, 0.0],
@@ -145,7 +145,7 @@ def test_sparse_traversal_matches_dense(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_residual_sparse_traversal_matches_dense(monkeypatch: pytest.MonkeyPatch):
-    backend = DEFAULT_BACKEND
+    backend = get_runtime_backend()
     points = backend.asarray([[0.0], [1.0], [2.0]], dtype=backend.default_float)
     top_levels = backend.asarray([1, 0, 0], dtype=backend.default_int)
     parents = backend.asarray([-1, 0, 0], dtype=backend.default_int)

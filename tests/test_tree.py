@@ -7,11 +7,16 @@ from covertreex import config as cx_config
 
 cx_config.reset_runtime_config_cache()
 
-from covertreex.core.tree import DEFAULT_BACKEND, PCCTree, TreeBackend, TreeLogStats
+from covertreex.core.tree import (
+    PCCTree,
+    TreeBackend,
+    TreeLogStats,
+    get_runtime_backend,
+)
 
 
 def _sample_tree() -> PCCTree:
-    backend = DEFAULT_BACKEND
+    backend = get_runtime_backend()
     points = backend.array([[0.0, 0.0], [1.0, 1.0]])
     top_levels = backend.asarray([1, 0], dtype=backend.default_int)
     parents = backend.asarray([-1, 0], dtype=backend.default_int)
@@ -53,7 +58,7 @@ def test_replace_returns_new_instance():
 def test_materialise_roundtrip():
     tree = _sample_tree()
     snapshot = tree.materialise()
-    assert snapshot["backend"] == "jax"
+    assert snapshot["backend"] == get_runtime_backend().name
     assert snapshot["points"].shape == (2, 2)
     assert snapshot["stats"]["num_insertions"] == 2
 

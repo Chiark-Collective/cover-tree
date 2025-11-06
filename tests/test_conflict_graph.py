@@ -7,7 +7,7 @@ jnp = pytest.importorskip("jax.numpy")
 from covertreex.algo.conflict_graph import ConflictGraph, build_conflict_graph
 from covertreex.algo.traverse import traverse_collect_scopes
 from covertreex.core.metrics import reset_residual_metric
-from covertreex.core.tree import DEFAULT_BACKEND, PCCTree, TreeLogStats
+from covertreex.core.tree import PCCTree, TreeLogStats, get_runtime_backend
 from covertreex.metrics.residual import (
     ResidualCorrHostData,
     configure_residual_correlation,
@@ -17,7 +17,7 @@ from covertreex import config as cx_config
 
 
 def _sample_tree():
-    backend = DEFAULT_BACKEND
+    backend = get_runtime_backend()
     points = backend.asarray([[0.0, 0.0], [2.0, 2.0]], dtype=backend.default_float)
     top_levels = backend.asarray([1, 0], dtype=backend.default_int)
     parents = backend.asarray([-1, 0], dtype=backend.default_int)
@@ -95,7 +95,7 @@ def test_segmented_conflict_graph_matches_dense(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_residual_conflict_graph_matches_dense(monkeypatch: pytest.MonkeyPatch):
-    backend = DEFAULT_BACKEND
+    backend = get_runtime_backend()
     points = backend.asarray([[0.0], [1.0], [2.0]], dtype=backend.default_float)
     top_levels = backend.asarray([1, 0, 0], dtype=backend.default_int)
     parents = backend.asarray([-1, 0, 0], dtype=backend.default_int)

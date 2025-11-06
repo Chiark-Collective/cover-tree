@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Tuple
+from typing import Any, Protocol, Tuple
 
 import time
 import numpy as np
@@ -74,6 +74,178 @@ def _broadcast_batch(backend: TreeBackend, batch_points: Any) -> Any:
 def _collect_distances(tree: PCCTree, batch: Any, backend: TreeBackend) -> Any:
     metric = get_metric()
     return metric.pairwise(backend, batch, tree.points)
+
+
+class TraversalStrategy(Protocol):
+    def collect(
+        self,
+        tree: PCCTree,
+        batch: Any,
+        *,
+        backend: TreeBackend,
+        runtime: Any,
+    ) -> TraversalResult:
+        ...
+
+
+class _EuclideanDenseTraversal(TraversalStrategy):
+    def collect(
+        self,
+        tree: PCCTree,
+        batch: Any,
+        *,
+        backend: TreeBackend,
+        runtime: Any,
+    ) -> TraversalResult:
+        return _collect_euclidean_dense(tree, batch, backend=backend, runtime=runtime)
+
+
+class _EuclideanSparseTraversal(TraversalStrategy):
+    def collect(
+        self,
+        tree: PCCTree,
+        batch: Any,
+        *,
+        backend: TreeBackend,
+        runtime: Any,
+    ) -> TraversalResult:
+        return _collect_euclidean_sparse(tree, batch, backend=backend, runtime=runtime)
+
+
+class _ResidualTraversal(TraversalStrategy):
+    def collect(
+        self,
+        tree: PCCTree,
+        batch: Any,
+        *,
+        backend: TreeBackend,
+        runtime: Any,
+    ) -> TraversalResult:
+        return _collect_residual(tree, batch, backend=backend)
+
+
+def _collect_euclidean_dense(
+    tree: PCCTree,
+    batch: Any,
+    *,
+    backend: TreeBackend,
+    runtime: Any,
+) -> TraversalResult:
+    xp = backend.xp
+    batch_size = int(batch.shape[0]) if batch.size else 0
+
+    start = time.perf_counter()
+    distances = _collect_distances(tree, batch, backend)
+    _block_until_ready(distances)
+    pairwise_seconds = time.perf_counter() - start
+
+    start = time.perf_counter()
+    parents = xp.argmin(distances, axis=1).astype(backend.default_int)
+    levels = tree.top_levels[parents]
+
+    base_radius = xp.power(2.0, levels.astype(backend.default_float) + 1.0)
+    si_values = tree.si_cache[parents]
+    radius = xp.maximum(base_radius, si_values)
+    node_indices = xp.arange(tree.num_points, dtype=backend.default_int)
+    parent_mask = node_indices[None, :] == parents[:, None]
+    within_radius = distances <= radius[:, None]
+    mask = xp.logical_or(within_radius, parent_mask)
+    _block_until_ready(mask)
+    mask_seconds = time.perf_counter() - start
+
+    parents_np = np.asarray(parents, dtype=np.int64)
+    top_levels_np = np.asarray(tree.top_levels, dtype=np.int64)
+    next_cache_np = np.asarray(tree.next_cache, dtype=np.int64)
+
+    mask_np = np.asarray(backend.to_numpy(mask), dtype=bool)
+    if mask_np.ndim != 2:
+        mask_np = np.reshape(mask_np, (batch_size, tree.num_points))
+
+    use_numba = runtime.enable_numba and NUMBA_TRAVERSAL_AVAILABLE
+
+    if use_numba:
+        numba_start = time.perf_counter()
+        scope_indptr_np, scope_indices_np = build_scopes_numba(
+            mask_np,
+            parents_np,
+            next_cache_np,
+            top_levels_np,
+        )
+        numba_end = time.perf_counter()
+        semisort_seconds = numba_end - start
+        chain_seconds = numba_end - numba_start
+        nonzero_seconds = 0.0
+        sort_seconds = 0.0
+        assemble_seconds = 0.0
+    else:
+        unique_parents = {int(p) for p in parents_np if int(p) >= 0}
+        chain_update_start = time.perf_counter()
+        chain_map = {
+            parent: _collect_next_chain(tree, parent, next_cache=next_cache_np)
+            for parent in unique_parents
+        }
+        if chain_map:
+            for idx, parent in enumerate(parents_np):
+                if parent >= 0:
+                    chain = chain_map.get(int(parent))
+                    if chain:
+                        mask_np[idx, list(chain)] = True
+        chain_seconds = time.perf_counter() - chain_update_start
+
+        nonzero_start = time.perf_counter()
+        row_ids, col_ids = np.nonzero(mask_np)
+        nonzero_seconds = time.perf_counter() - nonzero_start
+
+        sort_start = time.perf_counter()
+        if row_ids.size:
+            level_vals = top_levels_np[col_ids]
+            order = np.lexsort((col_ids, -level_vals, row_ids))
+            row_sorted = row_ids[order]
+            col_sorted = col_ids[order]
+            counts = np.bincount(row_sorted, minlength=batch_size)
+            scope_indptr_np = np.concatenate(
+                ([0], np.cumsum(counts, dtype=np.int64))
+            )
+            scope_indices_np = col_sorted.astype(np.int64, copy=False)
+        else:
+            scope_indptr_np = np.zeros(batch_size + 1, dtype=np.int64)
+            scope_indices_np = np.zeros(0, dtype=np.int64)
+        sort_seconds = time.perf_counter() - sort_start
+
+        semisort_seconds = time.perf_counter() - start
+        assemble_seconds = 0.0
+
+    assemble_start = time.perf_counter()
+    conflict_scopes = tuple(
+        tuple(int(x) for x in scope_indices_np[scope_indptr_np[i] : scope_indptr_np[i + 1]])
+        for i in range(batch_size)
+    )
+    scope_indptr_arr = backend.asarray(scope_indptr_np, dtype=backend.default_int)
+    scope_indices_arr = backend.asarray(scope_indices_np, dtype=backend.default_int)
+    assemble_seconds += time.perf_counter() - assemble_start
+
+    LOGGER.debug(
+        "Traversal assigned parents %s at levels %s",
+        backend.to_numpy(parents),
+        backend.to_numpy(levels),
+    )
+
+    return TraversalResult(
+        parents=backend.device_put(parents),
+        levels=backend.device_put(levels),
+        conflict_scopes=conflict_scopes,
+        scope_indptr=scope_indptr_arr,
+        scope_indices=scope_indices_arr,
+        timings=TraversalTimings(
+            pairwise_seconds=pairwise_seconds,
+            mask_seconds=mask_seconds,
+            semisort_seconds=semisort_seconds,
+            chain_seconds=chain_seconds,
+            nonzero_seconds=nonzero_seconds,
+            sort_seconds=sort_seconds,
+            assemble_seconds=assemble_seconds,
+        ),
+    )
 
 
 def _empty_result(backend: TreeBackend, batch_size: int) -> TraversalResult:
@@ -253,11 +425,12 @@ def _collect_residual_scopes_streaming(
     return scope_indptr, scope_indices, tuple(conflict_scopes)
 
 
-def _traverse_collect_sparse(
+def _collect_euclidean_sparse(
     tree: PCCTree,
     batch_points: Any,
     *,
     backend: TreeBackend,
+    runtime: Any,
 ) -> TraversalResult:
     queries_np = np.asarray(backend.to_numpy(batch_points), dtype=np.float64)
     if queries_np.ndim == 1:
@@ -290,7 +463,6 @@ def _traverse_collect_sparse(
 
     radii_np = np.maximum(base_radii, si_values)
 
-    runtime = cx_config.runtime_config()
     chunk_target = int(runtime.scope_chunk_target)
 
     scope_start = time.perf_counter()
@@ -376,7 +548,7 @@ def _traverse_collect_sparse(
         ),
     )
 
-def _traverse_collect_residual(
+def _collect_residual(
     tree: PCCTree,
     batch_points: Any,
     *,
@@ -471,6 +643,25 @@ def _traverse_collect_residual(
 
 
 
+def _select_traversal_strategy(runtime: Any, backend: TreeBackend) -> TraversalStrategy:
+    if (
+        runtime.metric == "residual_correlation"
+        and runtime.enable_sparse_traversal
+        and runtime.enable_numba
+        and backend.name == "numpy"
+    ):
+        return _ResidualTraversal()
+    if (
+        runtime.enable_sparse_traversal
+        and runtime.enable_numba
+        and runtime.metric == "euclidean"
+        and NUMBA_SPARSE_TRAVERSAL_AVAILABLE
+        and backend.name == "numpy"
+    ):
+        return _EuclideanSparseTraversal()
+    return _EuclideanDenseTraversal()
+
+
 def traverse_collect_scopes(
     tree: PCCTree,
     batch_points: Any,
@@ -490,139 +681,5 @@ def traverse_collect_scopes(
         return _empty_result(backend, batch_size)
 
     runtime = cx_config.runtime_config()
-
-    if (
-        runtime.metric == "residual_correlation"
-        and runtime.enable_sparse_traversal
-        and runtime.enable_numba
-        and backend.name == "numpy"
-    ):
-        return _traverse_collect_residual(tree, batch, backend=backend)
-
-    if (
-        runtime.enable_sparse_traversal
-        and runtime.enable_numba
-        and runtime.metric == "euclidean"
-        and NUMBA_SPARSE_TRAVERSAL_AVAILABLE
-        and backend.name == "numpy"
-    ):
-        return _traverse_collect_sparse(tree, batch, backend=backend)
-
-    xp = backend.xp
-    start = time.perf_counter()
-    distances = _collect_distances(tree, batch, backend)
-    _block_until_ready(distances)
-    pairwise_seconds = time.perf_counter() - start
-
-    start = time.perf_counter()
-    parents = xp.argmin(distances, axis=1).astype(backend.default_int)
-    levels = tree.top_levels[parents]
-
-    base_radius = xp.power(2.0, levels.astype(backend.default_float) + 1.0)
-    si_values = tree.si_cache[parents]
-    radius = xp.maximum(base_radius, si_values)
-    node_indices = xp.arange(tree.num_points, dtype=backend.default_int)
-    parent_mask = node_indices[None, :] == parents[:, None]
-    within_radius = distances <= radius[:, None]
-    mask = xp.logical_or(within_radius, parent_mask)
-    _block_until_ready(mask)
-    mask_seconds = time.perf_counter() - start
-
-    parents_np = np.asarray(parents, dtype=np.int64)
-    top_levels_np = np.asarray(tree.top_levels, dtype=np.int64)
-    next_cache_np = np.asarray(tree.next_cache, dtype=np.int64)
-
-    mask_np = np.asarray(backend.to_numpy(mask), dtype=bool)
-    if mask_np.ndim != 2:
-        mask_np = np.reshape(mask_np, (batch_size, tree.num_points))
-
-    use_numba = runtime.enable_numba and NUMBA_TRAVERSAL_AVAILABLE
-
-    if use_numba:
-        numba_start = time.perf_counter()
-        scope_indptr_np, scope_indices_np = build_scopes_numba(
-            mask_np,
-            parents_np,
-            next_cache_np,
-            top_levels_np,
-        )
-        numba_end = time.perf_counter()
-        semisort_seconds = numba_end - start
-        chain_seconds = numba_end - numba_start
-        nonzero_seconds = 0.0
-        sort_seconds = 0.0
-        assemble_seconds = 0.0
-    else:
-        unique_parents = {int(p) for p in parents_np if int(p) >= 0}
-        chain_update_start = time.perf_counter()
-        chain_map = {
-            parent: _collect_next_chain(tree, parent, next_cache=next_cache_np)
-            for parent in unique_parents
-        }
-        if chain_map:
-            for idx, parent in enumerate(parents_np):
-                if parent >= 0:
-                    chain = chain_map.get(int(parent))
-                    if chain:
-                        mask_np[idx, list(chain)] = True
-        chain_seconds = time.perf_counter() - chain_update_start
-
-        nonzero_start = time.perf_counter()
-        row_ids, col_ids = np.nonzero(mask_np)
-        nonzero_seconds = time.perf_counter() - nonzero_start
-
-        sort_start = time.perf_counter()
-        if row_ids.size:
-            level_vals = top_levels_np[col_ids]
-            order = np.lexsort((col_ids, -level_vals, row_ids))
-            row_sorted = row_ids[order]
-            col_sorted = col_ids[order]
-            counts = np.bincount(row_sorted, minlength=batch_size)
-            scope_indptr_np = np.concatenate(
-                ([0], np.cumsum(counts, dtype=np.int64))
-            )
-            scope_indices_np = col_sorted.astype(np.int64, copy=False)
-        else:
-            scope_indptr_np = np.zeros(batch_size + 1, dtype=np.int64)
-            scope_indices_np = np.zeros(0, dtype=np.int64)
-        sort_seconds = time.perf_counter() - sort_start
-
-        semisort_seconds = time.perf_counter() - start
-        assemble_seconds = 0.0
-
-    assemble_start = time.perf_counter()
-    conflict_scopes = tuple(
-        tuple(int(x) for x in scope_indices_np[scope_indptr_np[i] : scope_indptr_np[i + 1]])
-        for i in range(batch_size)
-    )
-    scope_indptr_arr = backend.asarray(scope_indptr_np, dtype=backend.default_int)
-    scope_indices_arr = backend.asarray(scope_indices_np, dtype=backend.default_int)
-    assemble_seconds = time.perf_counter() - assemble_start
-
-    assemble_start = time.perf_counter()
-    scope_indptr_arr = backend.asarray(scope_indptr_np, dtype=backend.default_int)
-    scope_indices_arr = backend.asarray(scope_indices_np, dtype=backend.default_int)
-    assemble_seconds += time.perf_counter() - assemble_start
-
-    LOGGER.debug(
-        "Traversal assigned parents %s at levels %s",
-        backend.to_numpy(parents),
-        backend.to_numpy(levels),
-    )
-
-    return TraversalResult(
-        parents=backend.device_put(parents),
-        levels=backend.device_put(levels),
-        conflict_scopes=conflict_scopes,
-        scope_indptr=scope_indptr_arr,
-        scope_indices=scope_indices_arr,
-        timings=TraversalTimings(
-            pairwise_seconds=pairwise_seconds,
-            mask_seconds=mask_seconds,
-            semisort_seconds=semisort_seconds,
-            chain_seconds=chain_seconds,
-            nonzero_seconds=nonzero_seconds,
-            sort_seconds=sort_seconds,
-            assemble_seconds=assemble_seconds,
-        ),
-    )
+    strategy = _select_traversal_strategy(runtime, backend)
+    return strategy.collect(tree, batch, backend=backend, runtime=runtime)

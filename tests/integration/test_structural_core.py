@@ -8,11 +8,11 @@ jax = pytest.importorskip("jax")
 jnp = pytest.importorskip("jax.numpy")
 
 from covertreex.algo import build_conflict_graph, traverse_collect_scopes
-from covertreex.core.tree import DEFAULT_BACKEND, PCCTree, TreeLogStats
+from covertreex.core.tree import PCCTree, TreeLogStats, get_runtime_backend
 
 
 def _structural_tree() -> PCCTree:
-    backend = DEFAULT_BACKEND
+    backend = get_runtime_backend()
     points = backend.asarray(
         [
             [0.0, 0.0],

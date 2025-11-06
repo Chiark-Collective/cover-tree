@@ -16,7 +16,7 @@ from numpy.random import default_rng
 from covertreex import config as cx_config
 from covertreex.algo import batch_insert
 from covertreex.algo.mis import NUMBA_AVAILABLE
-from covertreex.core.tree import DEFAULT_BACKEND, PCCTree
+from covertreex.core.tree import PCCTree, get_runtime_backend
 from covertreex.queries.knn import knn
 from covertreex.baseline import (
     BaselineCoverTree,
@@ -280,7 +280,7 @@ def _run_pcct_variant(
         notes = "Numba backend unavailable; falling back to JAX MIS."
 
     with _temporary_env(COVERTREEX_ENABLE_NUMBA=env_value):
-        backend = DEFAULT_BACKEND
+        backend = get_runtime_backend()
         tree = PCCTree.empty(dimension=int(points.shape[1]), backend=backend)
         batch_metrics: List[Dict[str, float]] = []
         batch_totals: List[float] = []
@@ -609,7 +609,8 @@ def main() -> None:
         run_seed = args.seed + run_idx
         run_results: List[ImplementationResult] = []
 
-        if not args.skip_jax and DEFAULT_BACKEND.name == "jax":
+        backend = get_runtime_backend()
+        if not args.skip_jax and backend.name == "jax":
             run_results.append(
                 _run_pcct_variant(
                     label="PCCT (JAX)",

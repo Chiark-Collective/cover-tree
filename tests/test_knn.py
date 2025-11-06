@@ -5,12 +5,12 @@ jax = pytest.importorskip("jax")
 jnp = pytest.importorskip("jax.numpy")
 
 from covertreex import config as cx_config
-from covertreex.core.tree import DEFAULT_BACKEND, PCCTree, TreeLogStats
+from covertreex.core.tree import PCCTree, TreeLogStats, get_runtime_backend
 from covertreex.queries import knn, nearest_neighbor
 
 
 def _build_tree():
-    backend = DEFAULT_BACKEND
+    backend = get_runtime_backend()
     points = backend.asarray(
         [
             [0.0, 0.0],
@@ -68,7 +68,7 @@ def test_nearest_neighbor_handles_single_query_vector():
 
 
 def test_knn_raises_for_empty_tree():
-    backend = DEFAULT_BACKEND
+    backend = get_runtime_backend()
     empty = PCCTree.empty(dimension=2, backend=backend)
 
     with pytest.raises(ValueError):

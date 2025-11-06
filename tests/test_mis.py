@@ -8,11 +8,11 @@ from covertreex import config as cx_config
 from covertreex.algo.conflict_graph import build_conflict_graph
 from covertreex.algo.mis import MISResult, batch_mis_seeds, run_mis
 from covertreex.algo.traverse import traverse_collect_scopes
-from covertreex.core.tree import DEFAULT_BACKEND, PCCTree, TreeLogStats
+from covertreex.core.tree import PCCTree, TreeLogStats, get_runtime_backend
 
 
 def _build_tree():
-    backend = DEFAULT_BACKEND
+    backend = get_runtime_backend()
     points = backend.asarray([[0.0, 0.0], [2.0, 2.0], [4.0, 4.0]], dtype=backend.default_float)
     top_levels = backend.asarray([2, 1, 0], dtype=backend.default_int)
     parents = backend.asarray([-1, 0, 1], dtype=backend.default_int)

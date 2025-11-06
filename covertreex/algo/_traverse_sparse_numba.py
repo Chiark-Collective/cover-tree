@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 import math
-from typing import List, Tuple
+from typing import List as PyList, Tuple
 
 import numpy as np
 
 try:  # pragma: no cover - optional dependency
     from numba import njit  # type: ignore
+    from numba.typed import List as TypedList  # type: ignore
 
     NUMBA_SPARSE_TRAVERSAL_AVAILABLE = True
 except Exception:  # pragma: no cover - when numba unavailable
     njit = None  # type: ignore
     NUMBA_SPARSE_TRAVERSAL_AVAILABLE = False
+    TypedList = None  # type: ignore
 
 from covertreex.queries._knn_numba import NumbaTreeView
 
@@ -172,6 +174,7 @@ if NUMBA_SPARSE_TRAVERSAL_AVAILABLE:
         num_nodes = points.shape[0]
         counts = np.zeros(batch_size, dtype=np.int64)
         buffer = np.empty(num_nodes, dtype=np.int64)
+        per_query = TypedList()
         chunk_segments = 0
         chunk_emitted = 0
         chunk_max_members = 0
@@ -181,8 +184,9 @@ if NUMBA_SPARSE_TRAVERSAL_AVAILABLE:
             radius = float(radii[idx])
             if parent < 0 or num_nodes == 0:
                 counts[idx] = 0
+                per_query.append(np.empty(0, dtype=np.int64))
             else:
-                counts[idx] = _collect_scope_single_into(
+                count_val = _collect_scope_single_into(
                     queries[idx],
                     parent,
                     radius,
@@ -195,6 +199,23 @@ if NUMBA_SPARSE_TRAVERSAL_AVAILABLE:
                     next_cache,
                     buffer,
                 )
+                counts[idx] = count_val
+                arr = np.empty(count_val, dtype=np.int64)
+                if count_val:
+                    arr[:count_val] = buffer[:count_val]
+                    if chunk_target > 0:
+                        pruned_count = 0
+                        for pos in range(count_val):
+                            node = arr[pos]
+                            dist_sq = _sqdist_row(queries[idx], points[node])
+                            if dist_sq <= radius * radius + _EPS:
+                                arr[pruned_count] = node
+                                pruned_count += 1
+                        count_val = pruned_count
+                        arr = arr[:count_val]
+                per_query.append(arr)
+                count_val = arr.shape[0]
+                counts[idx] = count_val
 
             count_val = counts[idx]
             if chunk_target > 0:
@@ -224,24 +245,9 @@ if NUMBA_SPARSE_TRAVERSAL_AVAILABLE:
                 count = int(counts[idx])
                 if count == 0:
                     continue
-                parent = int(parents[idx])
-                if parent < 0 or num_nodes == 0:
-                    continue
-                _ = _collect_scope_single_into(
-                    queries[idx],
-                    parent,
-                    float(radii[idx]),
-                    points,
-                    top_levels,
-                    si_cache,
-                    children_offsets,
-                    children_list,
-                    roots,
-                    next_cache,
-                    buffer,
-                )
                 start = int(indptr[idx])
-                indices[start : start + count] = buffer[:count]
+                query_scope = per_query[idx]
+                indices[start : start + count] = query_scope
 
         if chunk_target > 0 and chunk_max_members == 0 and total_scope > 0:
             chunk_max_members = int(np.max(counts))
@@ -265,11 +271,11 @@ def collect_sparse_scopes(
     queries: np.ndarray,
     parents: np.ndarray,
     radii: np.ndarray,
-) -> List[np.ndarray]:
+) -> PyList[np.ndarray]:
     if not NUMBA_SPARSE_TRAVERSAL_AVAILABLE:  # pragma: no cover - defensive
         raise RuntimeError("Sparse traversal requires numba to be installed.")
 
-    results: List[np.ndarray] = []
+    results: PyList[np.ndarray] = []
     for idx in range(queries.shape[0]):
         parent = int(parents[idx])
         radius = float(radii[idx])

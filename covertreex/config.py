@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass
-from functools import lru_cache
-from typing import Any, Dict, Tuple
+from dataclasses import dataclass, field
+from typing import Any, Dict, Optional, Tuple
 
 try:  # pragma: no cover - exercised indirectly via tests
     import jax  # type: ignore
@@ -40,9 +39,6 @@ def _configure_threading_defaults() -> None:
         os.environ["NUMBA_NUM_THREADS"] = str(count)
     if os.getenv("NUMBA_THREADING_LAYER") is None:
         os.environ["NUMBA_THREADING_LAYER"] = _DEFAULT_NUMBA_THREADING_LAYER
-
-
-_configure_threading_defaults()
 
 
 def _bool_from_env(value: str | None, *, default: bool) -> bool:
@@ -245,16 +241,72 @@ def _configure_logging(level: str) -> None:
         logger.addHandler(handler)
 
 
-@lru_cache(maxsize=None)
+@dataclass
+class RuntimeContext:
+    """Aggregate runtime configuration and lazily-resolved backend state."""
+
+    config: RuntimeConfig
+    _backend: Any = field(default=None, init=False, repr=False)
+    _activated: bool = field(default=False, init=False, repr=False)
+
+    def activate(self) -> None:
+        """Apply side effects (threading defaults, logging, JAX flags) once."""
+
+        if self._activated:
+            return
+        _configure_threading_defaults()
+        _apply_jax_runtime_flags(self.config)
+        _configure_logging(self.config.log_level)
+        self._activated = True
+
+    def get_backend(self) -> "TreeBackend":
+        """Return the active backend, instantiating it lazily."""
+
+        if self._backend is None:
+            from covertreex.core.tree import TreeBackend  # lazy import to avoid cycles
+
+            if self.config.backend == "jax":
+                backend = TreeBackend.jax(precision=self.config.precision)
+            elif self.config.backend == "numpy":
+                backend = TreeBackend.numpy(precision=self.config.precision)
+            else:
+                raise NotImplementedError(
+                    f"Backend '{self.config.backend}' is not supported yet."
+                )
+            self._backend = backend
+        return self._backend
+
+
+_CONTEXT_CACHE: Optional[RuntimeContext] = None
+
+
+def runtime_context() -> RuntimeContext:
+    """Return the cached runtime context, constructing it if necessary."""
+
+    global _CONTEXT_CACHE
+    if _CONTEXT_CACHE is None:
+        config = RuntimeConfig.from_env()
+        context = RuntimeContext(config=config)
+        context.activate()
+        _CONTEXT_CACHE = context
+    return _CONTEXT_CACHE
+
+
 def runtime_config() -> RuntimeConfig:
-    config = RuntimeConfig.from_env()
-    _apply_jax_runtime_flags(config)
-    _configure_logging(config.log_level)
-    return config
+    """Backwards-compatible accessor for the active runtime configuration."""
+
+    return runtime_context().config
 
 
 def reset_runtime_config_cache() -> None:
-    runtime_config.cache_clear()
+    reset_runtime_context()
+
+
+def reset_runtime_context() -> None:
+    """Clear the cached runtime context (used in tests)."""
+
+    global _CONTEXT_CACHE
+    _CONTEXT_CACHE = None
 
 
 def describe_runtime() -> Dict[str, Any]:

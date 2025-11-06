@@ -8,11 +8,11 @@ from covertreex.algo import (
     run_mis,
     traverse_collect_scopes,
 )
-from covertreex.core.tree import DEFAULT_BACKEND, PCCTree, TreeLogStats
+from covertreex.core.tree import PCCTree, TreeLogStats, get_runtime_backend
 
 
 def _sample_tree():
-    backend = DEFAULT_BACKEND
+    backend = get_runtime_backend()
     points = backend.asarray([[0.0, 0.0], [1.0, 1.0]], dtype=backend.default_float)
     top_levels = backend.asarray([1, 0], dtype=backend.default_int)
     parents = backend.asarray([-1, 0], dtype=backend.default_int)
