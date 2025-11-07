@@ -41,6 +41,16 @@ _*GPBoost remains Euclidean-only; the baseline numbers in the residual row are p
 
 The 32 768-point run currently logs PCCT and the GPBoost baseline; sequential/external baselines are still pending optimisations to keep runtime manageable at that scale.
 
+### Gold-standard residual benchmark (default path)
+
+The **56.09 s / 0.229 s (4 469 q/s)** residual result above is our canonical “gold standard” for PCCT on CPUs. It uses the default dense traversal (no scope chunking, diagnostics off) and the synthetic RBF cache configuration shipped in `benchmarks/queries.py`. To reproduce it exactly—and to ensure no environment overrides sneak in—run:
+
+```
+./benchmarks/run_residual_gold_standard.sh [optional_log_path]
+```
+
+By default the script writes `bench_residual.log` in the repo root and resets the environment (`COVERTREEX_SCOPE_CHUNK_TARGET=0`, sparse/Numba knobs unset) so the output stays comparable across machines. Treat this log as the reference artefact when auditing regressions or publishing updated numbers.
+
 _Command (8 192 row):_
 ```
 COVERTREEX_BACKEND=numpy \
