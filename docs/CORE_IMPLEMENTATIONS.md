@@ -34,8 +34,8 @@ _Set `COVERTREEX_ENABLE_DIAGNOSTICS=1` to collect the instrumentation counters (
 | Workload (tree pts / queries / k) | PCCT Build (s) | PCCT Query (s) | PCCT q/s | Sequential Build (s) | Sequential q/s | GPBoost Build (s) | GPBoost q/s | External Build (s) | External q/s |
 |-----------------------------------|----------------|----------------|----------|----------------------|----------------|-------------------|-------------|--------------------|---------------|
 | 8 192 / 1 024 / 16                | 4.03           | 0.934          | 1 096    | 33.65               | 5 327         | 0.569             | 306         | 14.14              | 122           |
-| 32 768 / 1 024 / 8 (Euclidean)    | 42.13          | 0.217          | 4 724    | —                   | —             | 2.55              | 95.2        | —                  | —             |
-| 32 768 / 1 024 / 8 (Residual)*    | 56.09          | 0.229          | 4 469    | —                   | —             | 2.51              | 91.6        | —                  | —             |
+| 32 768 / 1 024 / 8 (Euclidean)    | 44.22          | 0.284          | 3 611    | —                   | —             | 2.55              | 95.2        | —                  | —             |
+| 32 768 / 1 024 / 8 (Residual)*    | 70.26          | 0.275          | 3 723    | —                   | —             | 2.51              | 91.6        | —                  | —             |
 
 _*GPBoost remains Euclidean-only; the baseline numbers in the residual row are provided for throughput context only._
 
@@ -43,13 +43,29 @@ The 32 768-point run currently logs PCCT and the GPBoost baseline; sequential/
 
 ### Gold-standard residual benchmark (default path)
 
-The **56.09 s / 0.229 s (4 469 q/s)** residual result above is our canonical “gold standard” for PCCT on CPUs. It uses the default dense traversal (no scope chunking, diagnostics off) and the synthetic RBF cache configuration shipped in `benchmarks/queries.py`. To reproduce it exactly—and to ensure no environment overrides sneak in—run:
+Fresh artefacts: `benchmark_euclidean_clamped_20251107_fix_run2.jsonl` (with `benchmark_euclidean_clamped_20251107_fix.log`) and `benchmark_residual_clamped_20251107_fix_run2.jsonl` (with `benchmark_residual_clamped_20251107_fix.log`) capture the PCCT rows above with `COVERTREEX_ENABLE_NUMBA=1`, `COVERTREEX_SCOPE_CHUNK_TARGET=0`, and `COVERTREEX_SCOPE_CHUNK_MAX_SEGMENTS=256`.
+
+The legacy **56.09 s / 0.229 s (4 469 q/s)** residual result remains our canonical “gold standard” for dense traversal with chunking disabled. It uses the default dense traversal (no scope chunking, diagnostics off) and the synthetic RBF cache configuration shipped in `benchmarks/queries.py`. To reproduce it exactly—and to ensure no environment overrides sneak in—run:
 
 ```
 ./benchmarks/run_residual_gold_standard.sh [optional_log_path]
 ```
 
 By default the script writes `bench_residual.log` in the repo root and resets the environment (`COVERTREEX_SCOPE_CHUNK_TARGET=0`, sparse/Numba knobs unset) so the output stays comparable across machines. Treat this log as the reference artefact when auditing regressions or publishing updated numbers.
+
+To reproduce the clamped adjacency run captured on 2025‑11‑07 (matching `benchmark_residual_clamped_20251107_fix_run2.jsonl`), invoke:
+
+```
+COVERTREEX_ENABLE_NUMBA=1 \
+COVERTREEX_SCOPE_CHUNK_TARGET=0 \
+COVERTREEX_SCOPE_CHUNK_MAX_SEGMENTS=256 \
+UV_CACHE_DIR=$PWD/.uv-cache \
+uv run python -m benchmarks.queries \
+  --dimension 8 --tree-points 32768 \
+  --batch-size 512 --queries 1024 --k 8 \
+  --seed 42 --metric residual --baseline none \
+  --log-file benchmark_residual_clamped_20251107_fix_run2.jsonl
+```
 
 _Command (8 192 row):_
 ```
@@ -86,16 +102,16 @@ To capture warm-up versus steady-state timings for plotting, append `--csv-outpu
 
 ### Euclidean metric (NumPy backend)
 
-- Fresh 32 768-point benchmark (dimension 8, batch 512, 1 024 queries, k = 8, seed 42) lands at **42.13 s build / 0.217 s query (4 724 q/s)** for PCCT with NumPy+Numba, while the GPBoost baseline sits at **2.55 s build / 10.75 s query (95.2 q/s)**—a 49.6× throughput gap in favour of PCCT.
+- Fresh 32 768-point benchmark (dimension 8, batch 512, 1 024 queries, k = 8, seed 42, `COVERTREEX_SCOPE_CHUNK_MAX_SEGMENTS=256`, `COVERTREEX_SCOPE_CHUNK_TARGET=0`) now lands at **44.22 s build / 0.284 s query (3 611 q/s)** for PCCT with NumPy+Numba (`benchmark_euclidean_clamped_20251107_fix_run2.jsonl` / `.log`), while the GPBoost baseline remains at **2.55 s build / 10.75 s query (95.2 q/s)**—a 37.8× throughput gap in favour of PCCT.
 - Batch logs show `traversal_ms` hovering between 20–118 ms on dominated batches, whereas `conflict_graph_ms` stays in the 9–18 ms range and MIS remains sub-millisecond. The journal pipeline eliminated repeated array slices, so traversal/mask assembly is once again the limiting factor at 32 k.
 - Conflict-graph builders now live in `conflict_graph_builders.py`; dense vs segmented vs residual paths report distinct telemetry. Dense remains the default until scope chunk limits (see Next Steps) are dialled in.
 - GPBoost’s cover tree baseline is sequential and Euclidean-only (no conflict graphs, no MIS). We continue to keep comparisons on the CPU/NumPy backend so wall-clock deltas stay reproducible without JAX/GPU variability.
 
-### Residual-correlation metric (synthetic RBF caches, 2025-11-06)
+### Residual-correlation metric (synthetic RBF caches, 2025-11-07)
 
-- Synthetic run (same dataset as above, dimension 8, batch 512, 1 024 queries, k = 8, seed 42, `--metric residual`) now reports **56.09 s build / 0.229 s query (4 469 q/s)** for PCCT. The GPBoost baseline remains Euclidean-only but is included for throughput context at **2.51 s build / 11.18 s query (91.6 q/s)**.
+- Synthetic run (same dataset as above, dimension 8, batch 512, 1 024 queries, k = 8, seed 42, `--metric residual`, `COVERTREEX_SCOPE_CHUNK_MAX_SEGMENTS=256`, `COVERTREEX_SCOPE_CHUNK_TARGET=0`) now reports **70.26 s build / 0.275 s query (3 723 q/s)** for PCCT (`benchmark_residual_clamped_20251107_fix_run2.jsonl`). The GPBoost baseline remains Euclidean-only and is included for throughput context at **2.51 s build / 11.18 s query (91.6 q/s)**.
 - Per-batch logs show `traversal_ms` between 33–118 ms and `conflict_graph_ms` between 22–30 ms despite the journal/builder refactor, highlighting that residual scopes are still nearly dense (all 261 632 candidate edges survive). MIS continues to be negligible (<0.2 ms).
-- The residual adjacency filter currently recomputes pairwise kernels even when the dense `residual_pairwise` matrix is available from traversal. Reusing that matrix inside `_build_dense_adjacency`/`filter_csr_by_radii_from_pairwise` is the next low-hanging win.
+- The residual adjacency filter currently recomputes pairwise kernels even when the dense `residual_pairwise` matrix is available from traversal. Reusing that matrix inside `_build_dense_adjacency`/`filter_csr_by_radii_from_pairwise` is the next low-hanging win, especially now that steady-state `conflict_adj_scatter_ms` sits around 80 ms despite the clamp.
 - Scope chunking remains disabled by default; wiring `scope_chunk_target` through the new builder split (and exposing hit/miss telemetry) is the follow-up to keep RSS deltas in check and to pave the way for tighter residual radius guards.
 
 ## Residual-Correlation Metric Benchmark Status (2025-11-06)

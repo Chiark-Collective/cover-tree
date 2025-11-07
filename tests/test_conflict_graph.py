@@ -54,6 +54,32 @@ def test_chunk_range_builder_honours_max_segments():
     assert ranges_capped[1] == (3, 5)
 
 
+def test_chunk_range_builder_clamps_when_chunk_target_disabled():
+    indptr = np.array([0, 10, 20, 30, 40, 50], dtype=np.int64)
+
+    ranges = _chunk_ranges_from_indptr(indptr, chunk_target=0, max_segments=2)
+
+    assert len(ranges) == 2
+    assert ranges[0] == (0, 3)
+    assert ranges[1] == (3, 5)
+
+
+def test_chunk_range_builder_skips_zero_volume_segments_with_keep_mask():
+    indptr = np.array([0, 2, 4, 6, 8, 10], dtype=np.int64)
+    keep_mask = np.array([True, True, False, False, False], dtype=bool)
+
+    ranges_full = _chunk_ranges_from_indptr(indptr, chunk_target=2, max_segments=0)
+    ranges_kept = _chunk_ranges_from_indptr(
+        indptr,
+        chunk_target=2,
+        max_segments=0,
+        keep_mask=keep_mask,
+    )
+
+    assert len(ranges_full) == 5
+    assert ranges_kept == [(0, 1), (1, 2)]
+
+
 def test_conflict_graph_builds_edges_from_shared_scopes():
     cx_config.reset_runtime_config_cache()
     backend = get_runtime_backend()

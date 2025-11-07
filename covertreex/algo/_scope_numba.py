@@ -36,32 +36,54 @@ class ScopeAdjacencyResult:
     chunk_max_members: int = 0
 
 
+_TAIL_MERGE_DIVISOR = 4
+
+
 def _chunk_ranges_from_indptr(
     indptr: np.ndarray,
     chunk_target: int,
     max_segments: int = 0,
+    keep_mask: np.ndarray | None = None,
 ) -> list[tuple[int, int]]:
     """Return (start, end) node ranges bounded by the configured chunk target."""
 
     num_nodes = indptr.size - 1
     if num_nodes <= 0:
         return [(0, 0)]
-    if chunk_target <= 0:
+
+    node_weights = np.diff(indptr).astype(np.int64, copy=False)
+    if keep_mask is not None:
+        keep_arr = np.asarray(keep_mask, dtype=np.int64)
+        if keep_arr.shape[0] != num_nodes:
+            raise ValueError("keep_mask shape must match node count")
+        node_weights = node_weights * keep_arr
+
+    total_volume = int(node_weights.sum())
+    if total_volume <= 0:
         return [(0, num_nodes)]
 
-    total_volume = int(indptr[-1] - indptr[0]) if indptr.size else 0
-    effective_target = max(1, int(chunk_target))
-    if max_segments > 0 and total_volume > 0:
-        min_target = (total_volume + max_segments - 1) // max_segments
-        if min_target > effective_target:
-            effective_target = max(1, min_target)
+    if chunk_target <= 0 and max_segments <= 0:
+        return [(0, num_nodes)]
+
+    if chunk_target <= 0:
+        effective_target = max(1, (total_volume + max_segments - 1) // max(1, max_segments))
+    else:
+        effective_target = max(1, int(chunk_target))
+        if max_segments > 0:
+            min_target = (total_volume + max_segments - 1) // max_segments
+            if min_target > effective_target:
+                effective_target = max(1, min_target)
+
+    weights_prefix = np.empty(num_nodes + 1, dtype=np.int64)
+    weights_prefix[0] = 0
+    np.cumsum(node_weights, out=weights_prefix[1:])
 
     ranges: list[tuple[int, int]] = []
     start = 0
     accum = 0
     for node in range(num_nodes):
-        accum += int(indptr[node + 1] - indptr[node])
-        if accum >= effective_target:
+        accum += int(node_weights[node])
+        if accum >= effective_target and node + 1 > start:
             ranges.append((start, node + 1))
             start = node + 1
             accum = 0
@@ -69,7 +91,59 @@ def _chunk_ranges_from_indptr(
         ranges.append((start, num_nodes))
     if not ranges:
         ranges.append((0, num_nodes))
+
+    if len(ranges) > 1:
+        last_start, last_end = ranges[-1]
+        last_volume = int(weights_prefix[last_end] - weights_prefix[last_start])
+        if last_volume == 0:
+            ranges.pop()
+            if not ranges:
+                return [(0, num_nodes)]
+
+    if effective_target > 0 and len(ranges) > 1:
+        tail_threshold = max(1, (effective_target + _TAIL_MERGE_DIVISOR - 1) // _TAIL_MERGE_DIVISOR)
+        ranges = _merge_tail_ranges(
+            ranges,
+            weights_prefix,
+            effective_target,
+            tail_threshold,
+        )
+
     return ranges
+
+
+def _merge_tail_ranges(
+    ranges: list[tuple[int, int]],
+    weights_prefix: np.ndarray,
+    chunk_cap: int,
+    tail_threshold: int,
+) -> list[tuple[int, int]]:
+    if tail_threshold <= 0 or chunk_cap <= 0 or len(ranges) <= 1:
+        return ranges
+
+    merged = list(ranges)
+    idx = len(merged) - 1
+    while idx > 0:
+        start, end = merged[idx]
+        volume = int(weights_prefix[end] - weights_prefix[start])
+        if volume >= tail_threshold:
+            idx -= 1
+            continue
+        prev_start, prev_end = merged[idx - 1]
+        prev_volume = int(weights_prefix[prev_end] - weights_prefix[prev_start])
+        combined = volume + prev_volume
+        if combined == 0:
+            merged[idx - 1] = (prev_start, end)
+            merged.pop(idx)
+            idx -= 1
+            continue
+        if combined > chunk_cap:
+            idx -= 1
+            continue
+        merged[idx - 1] = (prev_start, end)
+        merged.pop(idx)
+        idx -= 1
+    return merged
 
 
 def _require_numba() -> None:
@@ -617,7 +691,8 @@ if NUMBA_SCOPE_AVAILABLE:
 
         directed_total_pairs = int(total_pairs * 2)
         candidate_pairs = directed_total_pairs
-        kept_nodes = np.nonzero(keep)[0].astype(I64)
+        keep_mask = keep.astype(np.bool_)
+        kept_nodes = np.nonzero(keep_mask)[0].astype(I64)
         if kept_nodes.size == 0:
             return ScopeAdjacencyResult(
                 sources=np.empty(0, dtype=I32),
@@ -638,6 +713,7 @@ if NUMBA_SCOPE_AVAILABLE:
             indptr_nodes,
             chunk_target,
             chunk_max_segments,
+            keep_mask,
         )
         chunk_count = len(chunk_ranges_list)
         if chunk_count:
@@ -713,7 +789,6 @@ if NUMBA_SCOPE_AVAILABLE:
                 chunk_max_members=full_volume,
             )
 
-        keep_mask = keep.astype(np.bool_)
         (
             global_indptr,
             global_indices,

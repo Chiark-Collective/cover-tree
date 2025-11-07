@@ -52,6 +52,12 @@ Deliver a reusable “parallel compressed cover tree” (PCCT) library that comb
 3. **Scope chunk limiter** (owner: Priya) — Wire `RuntimeConfig.scope_chunk_target` into `_scope_numba` so very wide scopes stream through fixed-size segments; fall back to current behaviour when the limit is zero. Adds backpressure for 32 k+ builds and prepares the ground for pooled scratch buffers. *Status:* design reviewed, implementation queued behind milestone 1.
 4. **Diagnostics + benchmarks refresh** (owner: Priya) — Once milestones 1–3 land, regenerate `runtime_breakdown_*` artefacts (NumPy + JAX paths) and update benchmark tables/docstrings so auditors can trace performance deltas. *Status:* blocked on earlier milestones; target date 2025-11-10.
 
+## Status Update — 2025-11-07
+
+- **Adjacency clamp is live.** `_chunk_ranges_from_indptr` now honours `scope_chunk_max_segments` even when `scope_chunk_target=0`, consumes the dedupe mask so only surviving scopes influence chunking, and merges underfilled tail shards. The dense Numba builder picks up the new ranges automatically, eliminating the 8 M-member mega-scopes that destabilised yesterday’s residual sweep. Coverage via `tests/test_conflict_graph.py::test_chunk_range_builder_*` locks the guard in place.
+- **Current benchmark snapshot (NumPy backend, diagnostics off).** With `COVERTREEX_ENABLE_NUMBA=1`, `COVERTREEX_SCOPE_CHUNK_TARGET=0`, and `COVERTREEX_SCOPE_CHUNK_MAX_SEGMENTS=256`, the Euclidean 32 k workload now logs **44.22 s build / 0.284 s query (3.61 k q/s)** (`benchmark_euclidean_clamped_20251107_fix_run2.jsonl/.log`) and the residual variant logs **70.26 s / 0.275 s (3.72 k q/s)** (`benchmark_residual_clamped_20251107_fix_run2.jsonl/.log`). These replace the pre-clamp artefacts referenced in docs/CORE_IMPLEMENTATIONS.md.
+- **Open investigations.** Residual dominated batches still collapse to a single surviving scope (`conflict_scope_chunk_segments=1`, steady `conflict_adj_scatter_ms≈80 ms`), so we need to trace whether dedupe is too aggressive or if we should shard before hashing. Chunked runs with `scope_chunk_target=8192` continue emitting ~1.9 k shards on the first dominated batch (≈364 ms scatter), which means the tail-merging heuristic must incorporate candidate counts—not just membership volume—before we can claim the regression is fixed. Once those two items settle, rerun the GPBoost baseline to refresh the published comparison rows.
+
 ## Configuration & Environment
 
 - **Env surface (`COVERTREEX_*`):** `BACKEND` (`jax`, `numpy`, future), `DEVICE` (e.g. `gpu:0,cpu:0`), `PRECISION` (`float64` default, `float32` alt), `ENABLE_NUMBA` (`0/1`), `LOG_LEVEL`.
@@ -334,17 +340,17 @@ Latest logs: `runtime_breakdown_output_2048_numba_baselines.txt`, `runtime_break
   - Added `--skip-sequential` / `--skip-external` toggles to `benchmarks.runtime_breakdown` so the heavy baselines can be disabled on large runs. With the latest in-kernel CSR compaction, the 32 k benchmark (skipping sequential/external, diagnostics off) lands at **build 42.5 s / query 0.459 s** (build CPU 51.1 s, util 1.20×; query CPU 10.9 s, util 23.8×) while keeping `conflict_adj_csr_ms` sub‑0.01 ms and peak RSS ≈ 3.32 GiB.
   - Directed scatter buffers stay inside the Numba kernel now, eliminating the per-batch 1 MiB Python copies; remaining allocations come from the kernel’s scratch arrays and are candidates for chunk pooling if we still want further trims.
 
-## Status Snapshot — 2025-11-05
+## Historical Snapshot — 2025-11-05
 
 - **Completed recently**
   - Conflict-graph CSR emission now fully resident in Numba; host CSR build is gone.
   - Benchmark harness supports skipping sequential/external baselines for heavyweight runs.
   - 32 k / 8 k diagnostics refreshed with the CSR improvements (see bullet above).
 
-- **Top TODOs**
-  1. Recycle / pool the temporary directed-edge scratch buffers inside `_scope_numba` to curb per-batch allocations on large inserts.
-  2. Revisit MIS timing at scale (Luby loop still serial) and prototype a parallel path once the conflict graph settles.
-  3. Re-measure the end-to-end pipeline with diagnostics enabled after buffer pooling to confirm no new hotspots emerge.
+- **Top TODOs (current)**
+  1. Diagnose why residual dominated batches still report `conflict_scope_chunk_segments=1` and ~80 ms scatter under the clamp; confirm whether dedupe needs to shard before hashing or if residual scope construction leaks parents.
+  2. Extend `_chunk_ranges_from_indptr`’s tail-merging heuristic to consider emitted candidate counts so `scope_chunk_target=8192` runs drop back into the 20–30 ms scatter band even as candidate lists shrink.
+  3. Refresh the Euclidean/residual GPBoost benchmarks (and associated docs/artefacts) once the two items above land, keeping JSONL + `.log` outputs in `docs/CORE_IMPLEMENTATIONS.md` for auditors.
 
 - **Working hypotheses**
   - Most of the remaining build gap vs GPBoost is MIS + traversal book-keeping; trimming scratch allocations should buy stability but not remove the gap entirely.
