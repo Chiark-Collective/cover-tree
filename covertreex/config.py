@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 try:  # pragma: no cover - exercised indirectly via tests
@@ -36,6 +37,13 @@ _DEFAULT_RESIDUAL_GATE1_RADIUS_CAP = 1.0
 _DEFAULT_RESIDUAL_RADIUS_FLOOR = 1e-3
 _DEFAULT_RESIDUAL_GATE1_PROFILE_BINS = 256
 _DEFAULT_RESIDUAL_GATE1_LOOKUP_MARGIN = 0.02
+_DEFAULT_RESIDUAL_SCOPE_CAP_DEFAULT = 0.0
+_DEFAULT_RESIDUAL_PREFILTER_MARGIN = 0.02
+_DEFAULT_RESIDUAL_PREFILTER_RADIUS_CAP = 10.0
+_DEFAULT_RESIDUAL_PREFILTER_LOOKUP = str(
+    (Path(__file__).resolve().parents[1] / "docs" / "data" / "residual_gate_profile_diag0.json")
+)
+_DEFAULT_RESIDUAL_PREFILTER_AUDIT = False
 
 
 def _ensure_env(var: str, value: str) -> None:
@@ -222,6 +230,13 @@ class RuntimeConfig:
     residual_gate1_profile_bins: int
     residual_gate1_lookup_path: str | None
     residual_gate1_lookup_margin: float
+    residual_scope_cap_path: str | None
+    residual_scope_cap_default: float
+    residual_prefilter_enabled: bool
+    residual_prefilter_lookup_path: str | None
+    residual_prefilter_margin: float
+    residual_prefilter_radius_cap: float
+    residual_prefilter_audit: bool
 
     @property
     def jax_enable_x64(self) -> bool:
@@ -343,6 +358,40 @@ class RuntimeConfig:
             os.getenv("COVERTREEX_RESIDUAL_GATE1_LOOKUP_MARGIN"),
             default=_DEFAULT_RESIDUAL_GATE1_LOOKUP_MARGIN,
         )
+        residual_scope_cap_path = os.getenv("COVERTREEX_RESIDUAL_SCOPE_CAPS_PATH")
+        residual_scope_cap_default = _parse_optional_float(
+            os.getenv("COVERTREEX_RESIDUAL_SCOPE_CAP_DEFAULT"),
+            default=_DEFAULT_RESIDUAL_SCOPE_CAP_DEFAULT,
+        )
+        residual_prefilter_enabled = _bool_from_env(
+            os.getenv("COVERTREEX_RESIDUAL_PREFILTER"),
+            default=False,
+        )
+        residual_prefilter_lookup_path = os.getenv("COVERTREEX_RESIDUAL_PREFILTER_LOOKUP_PATH")
+        residual_prefilter_margin = _parse_optional_float(
+            os.getenv("COVERTREEX_RESIDUAL_PREFILTER_MARGIN"),
+            default=_DEFAULT_RESIDUAL_PREFILTER_MARGIN,
+        )
+        residual_prefilter_radius_cap = _parse_optional_float(
+            os.getenv("COVERTREEX_RESIDUAL_PREFILTER_RADIUS_CAP"),
+            default=_DEFAULT_RESIDUAL_PREFILTER_RADIUS_CAP,
+        )
+        residual_prefilter_audit = _bool_from_env(
+            os.getenv("COVERTREEX_RESIDUAL_PREFILTER_AUDIT"),
+            default=_DEFAULT_RESIDUAL_PREFILTER_AUDIT,
+        )
+        if residual_prefilter_enabled:
+            residual_gate1_enabled = True
+            if residual_gate1_lookup_path is None:
+                residual_gate1_lookup_path = (
+                    residual_prefilter_lookup_path or _DEFAULT_RESIDUAL_PREFILTER_LOOKUP
+                )
+            if os.getenv("COVERTREEX_RESIDUAL_GATE1_LOOKUP_MARGIN") is None:
+                residual_gate1_lookup_margin = residual_prefilter_margin
+            if os.getenv("COVERTREEX_RESIDUAL_GATE1_RADIUS_CAP") is None:
+                residual_gate1_radius_cap = residual_prefilter_radius_cap
+            if os.getenv("COVERTREEX_RESIDUAL_GATE1_AUDIT") is None:
+                residual_gate1_audit = residual_prefilter_audit
         return cls(
             backend=backend,
             precision=precision,
@@ -376,6 +425,13 @@ class RuntimeConfig:
             residual_gate1_profile_bins=residual_gate1_profile_bins,
             residual_gate1_lookup_path=residual_gate1_lookup_path,
             residual_gate1_lookup_margin=residual_gate1_lookup_margin,
+            residual_scope_cap_path=residual_scope_cap_path,
+            residual_scope_cap_default=residual_scope_cap_default,
+            residual_prefilter_enabled=residual_prefilter_enabled,
+            residual_prefilter_lookup_path=residual_prefilter_lookup_path,
+            residual_prefilter_margin=residual_prefilter_margin,
+            residual_prefilter_radius_cap=residual_prefilter_radius_cap,
+            residual_prefilter_audit=residual_prefilter_audit,
         )
 
 
@@ -515,4 +571,6 @@ def describe_runtime() -> Dict[str, Any]:
         "residual_gate1_profile_bins": config.residual_gate1_profile_bins,
         "residual_gate1_lookup_path": config.residual_gate1_lookup_path,
         "residual_gate1_lookup_margin": config.residual_gate1_lookup_margin,
+        "residual_scope_cap_path": config.residual_scope_cap_path,
+        "residual_scope_cap_default": config.residual_scope_cap_default,
     }
