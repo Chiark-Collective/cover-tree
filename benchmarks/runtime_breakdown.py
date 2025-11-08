@@ -26,6 +26,14 @@ from covertreex.baseline import (
     has_external_cover_tree,
     has_gpboost_cover_tree,
 )
+from covertreex.telemetry import (
+    RUNTIME_BREAKDOWN_CHUNK_FIELDS,
+    RUNTIME_BREAKDOWN_SCHEMA_ID,
+    generate_run_id,
+    resolve_artifact_path,
+    runtime_breakdown_fieldnames,
+    timestamped_artifact,
+)
 
 
 try:  # pragma: no cover - plotting exercised in manual workflows
@@ -561,6 +569,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--k", type=int, default=8, help="Number of neighbours for k-NN.")
     parser.add_argument("--seed", type=int, default=42, help="Random seed used across runs.")
     parser.add_argument(
+        "--run-id",
+        type=str,
+        default=None,
+        help="Optional run identifier embedded in telemetry outputs.",
+    )
+    parser.add_argument(
         "--output",
         type=str,
         default="runtime_breakdown.png",
@@ -617,6 +631,11 @@ def _parse_args() -> argparse.Namespace:
         help="Optional path to write warm-up vs steady-state metrics as CSV.",
     )
     parser.add_argument(
+        "--no-csv-output",
+        action="store_true",
+        help="Disable CSV telemetry emission (enabled by default).",
+    )
+    parser.add_argument(
         "--runs",
         type=int,
         default=1,
@@ -647,7 +666,22 @@ def main() -> None:
     args = _parse_args()
     if args.metric == "residual":
         raise ValueError("runtime_breakdown currently supports only the euclidean metric.")
+    run_id = args.run_id or generate_run_id(prefix="runtime")
     runtime_from_args(args).activate()
+    print(f"[runtime_breakdown] run_id={run_id}")
+    plot_output = str(resolve_artifact_path(args.output, category="benchmarks")) if args.output else None
+    if args.no_csv_output:
+        csv_output = None
+    elif args.csv_output:
+        csv_output = str(resolve_artifact_path(args.csv_output, category="benchmarks"))
+    else:
+        csv_output = str(
+            timestamped_artifact(
+                category="benchmarks",
+                prefix=f"runtime_breakdown_{run_id}",
+                suffix=".csv",
+            )
+        )
 
     points_np, queries_np = _generate_dataset(
         dimension=args.dimension,
@@ -746,47 +780,20 @@ def main() -> None:
     # Use the last run for plotting to keep behaviour predictable
     results = all_results[-1] if all_results else []
 
-    output_path = args.output or None
-    _plot_results(results, output=output_path, show=args.show)
+    _plot_results(results, output=plot_output, show=args.show)
 
-    if args.csv_output:
-        chunk_fieldnames = [
-            "traversal_chunk_segments_warmup",
-            "traversal_chunk_segments_steady",
-            "traversal_chunk_emitted_warmup",
-            "traversal_chunk_emitted_steady",
-            "traversal_chunk_max_members_warmup",
-            "traversal_chunk_max_members_steady",
-            "conflict_chunk_segments_warmup",
-            "conflict_chunk_segments_steady",
-            "conflict_chunk_emitted_warmup",
-            "conflict_chunk_emitted_steady",
-            "conflict_chunk_max_members_warmup",
-            "conflict_chunk_max_members_steady",
-        ]
-        fieldnames = [
-            "run",
-            "label",
-            "build_warmup_seconds",
-            "build_steady_seconds",
-            "build_total_seconds",
-            "query_warmup_seconds",
-            "query_steady_seconds",
-            "build_cpu_seconds",
-            "build_cpu_utilisation",
-            "build_rss_delta_bytes",
-            "build_max_rss_bytes",
-            "query_cpu_seconds",
-            "query_cpu_utilisation",
-            "query_rss_delta_bytes",
-            "query_max_rss_bytes",
-        ] + chunk_fieldnames
-        with open(args.csv_output, "w", newline="") as csv_file:
+    if csv_output:
+        print(f"[runtime_breakdown] writing CSV metrics to {csv_output}")
+        chunk_fieldnames = list(RUNTIME_BREAKDOWN_CHUNK_FIELDS)
+        fieldnames = list(runtime_breakdown_fieldnames())
+        with open(csv_output, "w", newline="") as csv_file:
             writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
             writer.writeheader()
             for run_idx, run in enumerate(all_results, start=1):
                 for res in run:
                     row = {
+                        "schema_id": RUNTIME_BREAKDOWN_SCHEMA_ID,
+                        "run_id": run_id,
                         "run": run_idx,
                         "label": res.label,
                         "build_warmup_seconds": res.build_warmup_seconds,

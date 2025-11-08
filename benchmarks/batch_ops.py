@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import json
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
-from typing import Literal, Tuple
+from typing import Any, Literal, Tuple
 
 import jax
 import jax.numpy as jnp
@@ -13,6 +15,12 @@ import numpy as np
 from benchmarks.runtime_cli import runtime_from_args
 from covertreex.algo import batch_delete, batch_insert
 from covertreex.core.tree import PCCTree, get_runtime_backend
+from covertreex.telemetry import (
+    BATCH_OPS_RESULT_SCHEMA_ID,
+    generate_run_id,
+    resolve_artifact_path,
+    timestamped_artifact,
+)
 
 
 @dataclass(frozen=True)
@@ -23,6 +31,34 @@ class BenchmarkResult:
     batch_size: int
     points_processed: int
     throughput_points_per_sec: float
+
+
+def _write_result_artifact(
+    path: Path,
+    *,
+    run_id: str,
+    runtime_snapshot: dict[str, Any],
+    args: argparse.Namespace,
+    result: BenchmarkResult,
+) -> None:
+    payload = {
+        "schema_id": BATCH_OPS_RESULT_SCHEMA_ID,
+        "run_id": run_id,
+        "timestamp": time.time(),
+        "mode": result.mode,
+        "batches": result.batches,
+        "batch_size": result.batch_size,
+        "points_processed": result.points_processed,
+        "elapsed_seconds": result.elapsed_seconds,
+        "throughput_points_per_sec": result.throughput_points_per_sec,
+        "parameters": {
+            "dimension": args.dimension,
+            "seed": args.seed,
+            "bootstrap_batches": args.bootstrap_batches,
+        },
+        "runtime": runtime_snapshot,
+    }
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def _generate_batch(key: jax.Array, batch_size: int, dimension: int) -> jnp.ndarray:
@@ -122,23 +158,53 @@ def _parse_args() -> argparse.Namespace:
         help="Random seed for data generation.",
     )
     parser.add_argument(
+        "--run-id",
+        type=str,
+        default=None,
+        help="Optional run identifier embedded in telemetry outputs.",
+    )
+    parser.add_argument(
         "--bootstrap-batches",
         type=int,
         default=20,
         help="Initial insert batches used to populate the tree before delete benchmarks.",
+    )
+    parser.add_argument(
+        "--log-json",
+        type=str,
+        default="",
+        help="Optional path to write a JSON summary for the run (defaults to artifacts/benchmarks).",
+    )
+    parser.add_argument(
+        "--no-log-json",
+        action="store_true",
+        help="Disable JSON summary emission.",
     )
     return parser.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
-    runtime_from_args(
+    cli_runtime = runtime_from_args(
         SimpleNamespace(
             metric="euclidean",
             backend="jax",
             precision="float64",
         )
-    ).activate()
+    )
+    runtime_snapshot = cli_runtime.describe()
+    cli_runtime.activate()
+    run_id = args.run_id or generate_run_id(prefix="batchops")
+    if args.no_log_json:
+        log_path = None
+    elif args.log_json:
+        log_path = resolve_artifact_path(args.log_json, category="benchmarks")
+    else:
+        log_path = timestamped_artifact(
+            category="benchmarks",
+            prefix=f"batch_ops_{run_id}",
+            suffix=".json",
+        )
     mode: Literal["insert", "delete"] = args.mode  # type: ignore[assignment]
 
     if mode == "insert":
@@ -169,6 +235,15 @@ def main() -> None:
         f"time={result.elapsed_seconds:.4f}s "
         f"throughput={result.throughput_points_per_sec:,.1f} pts/s"
     )
+    if log_path:
+        _write_result_artifact(
+            log_path,
+            run_id=run_id,
+            runtime_snapshot=runtime_snapshot,
+            args=args,
+            result=result,
+        )
+        print(f"[batch_ops] wrote summary to {log_path} (run_id={run_id})")
 
 
 if __name__ == "__main__":

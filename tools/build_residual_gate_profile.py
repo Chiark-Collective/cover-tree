@@ -14,6 +14,7 @@ from covertreex.metrics.residual import (
     compute_residual_distances_from_kernel,
 )
 from benchmarks.queries import _build_residual_backend, _generate_points_numpy
+from covertreex.telemetry import generate_run_id, resolve_artifact_path
 
 
 def _parse_args() -> argparse.Namespace:
@@ -29,6 +30,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--residual-lengthscale", type=float, default=1.0, help="RBF kernel lengthscale (matches benchmarks).")
     parser.add_argument("--residual-variance", type=float, default=1.0, help="RBF kernel variance (matches benchmarks).")
     parser.add_argument("--inducing", type=int, default=512, help="Number of inducing points for the residual backend.")
+    parser.add_argument("--run-id", type=str, default=None, help="Optional run identifier to embed in the profile metadata.")
     return parser.parse_args()
 
 
@@ -83,8 +85,8 @@ def _record_pairs(backend, profile: ResidualGateProfile, pair_chunk: int) -> Non
 
 def main() -> None:
     args = _parse_args()
-    output = args.output.expanduser()
-    output.parent.mkdir(parents=True, exist_ok=True)
+    run_id = args.run_id or generate_run_id(prefix="residual-profile")
+    output = resolve_artifact_path(args.output, category="profiles")
     os.environ.setdefault("COVERTREEX_ENABLE_DIAGNOSTICS", "0")
     os.environ.setdefault("COVERTREEX_RESIDUAL_GATE1", "1")
     cx_config.reset_runtime_config_cache()
@@ -95,10 +97,21 @@ def main() -> None:
         path=str(output),
         radius_eps=cx_config.runtime_config().residual_radius_floor,
     )
+    profile.annotate_metadata(
+        run_id=run_id,
+        tree_points=args.tree_points,
+        dimension=args.dimension,
+        seed=args.seed,
+        bins=int(args.bins),
+        pair_chunk=int(args.pair_chunk),
+        residual_lengthscale=args.residual_lengthscale,
+        residual_variance=args.residual_variance,
+        inducing=args.inducing,
+    )
     _record_pairs(backend, profile, pair_chunk=int(args.pair_chunk))
     profile.dump(str(output), force=True)
     print(
-        f"wrote {output} | samples={profile.samples_total} false_negatives={profile.false_negative_samples}"
+        f"wrote {output} | run_id={run_id} samples={profile.samples_total} false_negatives={profile.false_negative_samples}"
     )
     reset_residual_metric()
 

@@ -4,7 +4,7 @@ import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Tuple
+from typing import Any, Dict, Tuple
 
 import numpy as np
 
@@ -44,6 +44,7 @@ class ResidualGateProfile:
     radius_eps: float = RESIDUAL_EPS
     path: Path | None = None
     dirty: bool = False
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def create(
@@ -106,6 +107,13 @@ class ResidualGateProfile:
         )
         self.false_negative_samples += int(np.count_nonzero(inclusion_mask))
 
+    def annotate_metadata(self, **metadata: Any) -> None:
+        for key, value in metadata.items():
+            if value is None:
+                continue
+            self.metadata[str(key)] = value
+        self.dirty = True
+
     def _cumulative_whitened(self) -> np.ndarray:
         return np.maximum.accumulate(self.max_whitened)
 
@@ -122,6 +130,7 @@ class ResidualGateProfile:
             "samples_total": int(self.samples_total),
             "false_negative_samples": int(self.false_negative_samples),
             "radius_eps": float(self.radius_eps),
+            "metadata": dict(self.metadata),
         }
         return payload
 

@@ -1,17 +1,9 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import time
-from collections import defaultdict
-from pathlib import Path
 from typing import Any, Dict, List, Tuple
-
-try:  # pragma: no cover - platform specific fallback
-    import resource
-except ImportError:  # pragma: no cover - Windows fallback
-    resource = None  # type: ignore
 
 os.environ.setdefault("JAX_PLATFORM_NAME", "cpu")
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
@@ -26,6 +18,13 @@ from covertreex.algo import batch_insert, batch_insert_prefix_doubling
 from covertreex.core.tree import PCCTree, TreeBackend
 from covertreex.metrics import ResidualCorrHostData, configure_residual_correlation
 from covertreex.queries.knn import knn
+from covertreex.telemetry import (
+    BenchmarkLogWriter,
+    ResidualScopeCapRecorder,
+    generate_run_id,
+    resolve_artifact_path,
+    timestamped_artifact,
+)
 from benchmarks.runtime_cli import runtime_from_args
 from covertreex.baseline import (
     BaselineCoverTree,
@@ -34,300 +33,6 @@ from covertreex.baseline import (
     has_external_cover_tree,
     has_gpboost_cover_tree,
 )
-
-
-def _read_rss_bytes() -> int | None:
-    try:
-        with open("/proc/self/statm", "r", encoding="utf-8") as handle:
-            contents = handle.readline().strip().split()
-        if len(contents) >= 2:
-            rss_pages = int(contents[1])
-            page_size = os.sysconf("SC_PAGE_SIZE")
-            return int(rss_pages * page_size)
-    except (OSError, ValueError, AttributeError):
-        pass
-    if resource is None:  # pragma: no cover - Windows fallback
-        return None
-    usage = resource.getrusage(resource.RUSAGE_SELF)
-    if getattr(usage, "ru_maxrss", 0):
-        return int(usage.ru_maxrss * 1024)
-    return None
-
-
-def _ms(value: float) -> float:
-    return float(value) * 1e3
-
-
-def _summarise_metric(record: Dict[str, Any], prefix: str, values: np.ndarray) -> None:
-    if values.size == 0:
-        return
-    finite = values[np.isfinite(values)]
-    if finite.size == 0:
-        return
-    record[f"{prefix}_samples"] = int(finite.size)
-    record[f"{prefix}_min"] = float(np.min(finite))
-    record[f"{prefix}_max"] = float(np.max(finite))
-    record[f"{prefix}_mean"] = float(np.mean(finite))
-    for pct in (50, 90, 95, 99):
-        record[f"{prefix}_p{pct}"] = float(np.percentile(finite, pct))
-
-
-def _metric_summary(values: np.ndarray) -> Dict[str, float]:
-    arr = np.asarray(values, dtype=np.float64)
-    finite = arr[np.isfinite(arr)]
-    if finite.size == 0:
-        return {}
-    summary: Dict[str, float] = {
-        "samples": float(finite.size),
-        "min": float(np.min(finite)),
-        "max": float(np.max(finite)),
-        "mean": float(np.mean(finite)),
-    }
-    for pct in (50, 90, 95, 99):
-        summary[f"p{pct}"] = float(np.percentile(finite, pct))
-    return summary
-
-
-def _augment_residual_scope_metrics(record: Dict[str, Any], residual_cache: Any) -> None:
-    scope_radii = getattr(residual_cache, "scope_radii", None)
-    if scope_radii is not None:
-        _summarise_metric(
-            record,
-            "traversal_scope_radius_obs",
-            np.asarray(scope_radii, dtype=np.float64),
-        )
-    initial = getattr(residual_cache, "scope_radius_initial", None)
-    if initial is not None:
-        _summarise_metric(
-            record,
-            "traversal_scope_radius_initial",
-            np.asarray(initial, dtype=np.float64),
-        )
-    limits = getattr(residual_cache, "scope_radius_limits", None)
-    if limits is not None:
-        _summarise_metric(
-            record,
-            "traversal_scope_radius_limit",
-            np.asarray(limits, dtype=np.float64),
-        )
-    caps = getattr(residual_cache, "scope_radius_caps", None)
-    if caps is not None:
-        _summarise_metric(
-            record,
-            "traversal_scope_radius_cap_values",
-            np.asarray(caps, dtype=np.float64),
-        )
-    if initial is not None and limits is not None:
-        init_np = np.asarray(initial, dtype=np.float64)
-        limit_np = np.asarray(limits, dtype=np.float64)
-        clamp_mask = np.isfinite(init_np) & np.isfinite(limit_np) & (init_np > limit_np + 1e-12)
-        if clamp_mask.size:
-            record["traversal_scope_radius_cap_hits"] = int(np.count_nonzero(clamp_mask))
-            if np.any(clamp_mask):
-                delta = init_np[clamp_mask] - limit_np[clamp_mask]
-                record["traversal_scope_radius_cap_delta_mean"] = float(np.mean(delta))
-                record["traversal_scope_radius_cap_delta_max"] = float(np.max(delta))
-
-
-class BenchmarkLogWriter:
-    def __init__(self, path: str):
-        self._path = Path(path).expanduser()
-        if self._path.parent:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._handle = self._path.open("a", encoding="utf-8")
-        self._previous_rss = _read_rss_bytes()
-
-    def close(self) -> None:
-        if self._handle and not self._handle.closed:
-            self._handle.close()
-
-    def record_batch(
-        self,
-        *,
-        batch_index: int,
-        batch_size: int,
-        plan: Any,
-        extra: Dict[str, Any] | None = None,
-    ) -> None:
-        traversal_timings = plan.traversal.timings
-        conflict_timings = plan.conflict_graph.timings
-        rss_now = _read_rss_bytes()
-        rss_delta = None
-        if rss_now is not None and self._previous_rss is not None:
-            rss_delta = rss_now - self._previous_rss
-        self._previous_rss = rss_now
-
-        record = {
-            "timestamp": time.time(),
-            "batch_index": int(batch_index),
-            "batch_size": int(batch_size),
-            "candidates": int(plan.traversal.parents.shape[0]),
-            "selected": int(plan.selected_indices.size),
-            "dominated": int(plan.dominated_indices.size),
-            "mis_iterations": int(getattr(plan.mis_result, "iterations", 0)),
-            "traversal_ms": _ms(plan.timings.traversal_seconds),
-            "conflict_graph_ms": _ms(plan.timings.conflict_graph_seconds),
-            "mis_ms": _ms(plan.timings.mis_seconds),
-            "traversal_pairwise_ms": _ms(traversal_timings.pairwise_seconds),
-            "traversal_mask_ms": _ms(traversal_timings.mask_seconds),
-            "traversal_semisort_ms": _ms(traversal_timings.semisort_seconds),
-            "traversal_tile_ms": _ms(traversal_timings.tile_seconds),
-            "conflict_pairwise_ms": _ms(conflict_timings.pairwise_seconds),
-            "conflict_scope_group_ms": _ms(conflict_timings.scope_group_seconds),
-            "conflict_adjacency_ms": _ms(conflict_timings.adjacency_seconds),
-            "conflict_annulus_ms": _ms(conflict_timings.annulus_seconds),
-            "conflict_adj_scatter_ms": _ms(conflict_timings.adjacency_scatter_seconds),
-            "conflict_adj_filter_ms": _ms(conflict_timings.adjacency_filter_seconds),
-            "conflict_adj_pairs": int(conflict_timings.adjacency_total_pairs),
-            "conflict_adj_candidates": int(conflict_timings.adjacency_candidate_pairs),
-            "traversal_scope_chunk_segments": int(traversal_timings.scope_chunk_segments),
-            "traversal_scope_chunk_emitted": int(traversal_timings.scope_chunk_emitted),
-            "traversal_scope_chunk_max_members": int(traversal_timings.scope_chunk_max_members),
-            "traversal_scope_chunk_scans": int(traversal_timings.scope_chunk_scans),
-            "traversal_scope_chunk_points": int(traversal_timings.scope_chunk_points),
-            "traversal_scope_chunk_dedupe": int(traversal_timings.scope_chunk_dedupe),
-            "traversal_scope_chunk_saturated": int(traversal_timings.scope_chunk_saturated),
-            "conflict_scope_chunk_segments": int(conflict_timings.scope_chunk_segments),
-            "conflict_scope_chunk_emitted": int(conflict_timings.scope_chunk_emitted),
-            "conflict_scope_chunk_max_members": int(conflict_timings.scope_chunk_max_members),
-            "conflict_scope_chunk_pair_cap": int(conflict_timings.scope_chunk_pair_cap),
-            "conflict_scope_chunk_pairs_before": int(conflict_timings.scope_chunk_pairs_before),
-            "conflict_scope_chunk_pairs_after": int(conflict_timings.scope_chunk_pairs_after),
-            "conflict_scope_domination_ratio": float(conflict_timings.scope_domination_ratio),
-            "traversal_gate1_candidates": int(traversal_timings.gate1_candidates),
-            "traversal_gate1_kept": int(traversal_timings.gate1_kept),
-            "traversal_gate1_pruned": int(traversal_timings.gate1_pruned),
-            "traversal_gate1_ms": _ms(traversal_timings.gate1_seconds),
-            "batch_order_strategy": plan.batch_order_strategy,
-            "conflict_grid_cells": int(plan.conflict_graph.grid_cells),
-            "conflict_grid_leaders_raw": int(plan.conflict_graph.grid_leaders_raw),
-            "conflict_grid_leaders_after": int(plan.conflict_graph.grid_leaders_after),
-            "conflict_grid_local_edges": int(plan.conflict_graph.grid_local_edges),
-        }
-        if plan.batch_permutation is not None:
-            record["batch_order_permutation_size"] = int(len(plan.batch_permutation))
-        for key, value in plan.batch_order_metrics.items():
-            record[f"batch_order_{key}"] = float(value)
-        if traversal_timings.gate1_candidates:
-            ratio = (
-                traversal_timings.gate1_pruned
-                / traversal_timings.gate1_candidates
-            )
-            record["traversal_gate1_pruned_ratio"] = float(ratio)
-        residual_cache = getattr(plan.traversal, "residual_cache", None)
-        if residual_cache is not None:
-            _augment_residual_scope_metrics(record, residual_cache)
-        if extra:
-            for key, value in extra.items():
-                if isinstance(value, (int, float)):
-                    record[key] = value
-                elif value is not None:
-                    record[key] = value
-        if rss_now is not None:
-            record["rss_bytes"] = int(rss_now)
-        if rss_delta is not None:
-            record["rss_delta_bytes"] = int(rss_delta)
-
-        self._handle.write(json.dumps(record, sort_keys=True))
-        self._handle.write("\n")
-        self._handle.flush()
-
-    def __enter__(self) -> "BenchmarkLogWriter":
-        return self
-
-    def __exit__(self, exc_type, exc, tb) -> None:
-        self.close()
-
-
-class ResidualScopeCapRecorder:
-    def __init__(self, *, output: str, percentile: float, margin: float, radius_floor: float):
-        self._path = Path(output).expanduser()
-        self._percentile = max(0.0, min(1.0, float(percentile)))
-        self._margin = float(margin)
-        self._radius_floor = float(radius_floor)
-        self._levels: Dict[int, Dict[str, List[np.ndarray]]] = defaultdict(lambda: {"obs": [], "limit": [], "cap": []})
-        self._metadata: Dict[str, Any] = {}
-
-    def annotate(self, **metadata: Any) -> None:
-        for key, value in metadata.items():
-            if value is None:
-                continue
-            self._metadata[str(key)] = value
-
-    def capture(self, plan: Any) -> None:
-        cache = getattr(plan.traversal, "residual_cache", None)
-        if cache is None or cache.scope_radii is None:
-            return
-        obs = np.asarray(cache.scope_radii, dtype=np.float64)
-        limits = (
-            np.asarray(cache.scope_radius_limits, dtype=np.float64)
-            if cache.scope_radius_limits is not None
-            else None
-        )
-        caps = (
-            np.asarray(cache.scope_radius_caps, dtype=np.float64)
-            if cache.scope_radius_caps is not None
-            else None
-        )
-        for summary in getattr(plan, "level_summaries", ()):  # defensive for legacy plans
-            candidate_idx = np.asarray(summary.candidates, dtype=np.int64)
-            if candidate_idx.size == 0:
-                continue
-            level_entry = self._levels[int(summary.level)]
-            level_entry["obs"].append(obs[candidate_idx])
-            if limits is not None:
-                level_entry["limit"].append(limits[candidate_idx])
-            if caps is not None:
-                level_entry["cap"].append(caps[candidate_idx])
-
-    def dump(self) -> None:
-        if not self._levels:
-            return
-        payload: Dict[str, Any] = {
-            "schema": 1,
-            "generated_at": float(time.time()),
-            "percentile": self._percentile,
-            "margin": self._margin,
-            "radius_floor": self._radius_floor,
-            "metadata": self._metadata,
-            "levels": {},
-        }
-        combined_samples: List[np.ndarray] = []
-        percentile_pct = self._percentile * 100.0
-        for level, data in sorted(self._levels.items()):
-            obs_chunks = data.get("obs", [])
-            if not obs_chunks:
-                continue
-            obs_values = np.concatenate(obs_chunks)
-            obs_summary = _metric_summary(obs_values)
-            if not obs_summary:
-                continue
-            combined_samples.append(obs_values)
-            percentile_value = float(np.percentile(obs_values, percentile_pct))
-            suggested_cap = max(percentile_value + self._margin, self._radius_floor)
-            level_payload: Dict[str, Any] = {
-                "cap": suggested_cap,
-                "obs": obs_summary,
-            }
-            limit_chunks = data.get("limit", [])
-            if limit_chunks:
-                level_payload["limit"] = _metric_summary(np.concatenate(limit_chunks))
-            cap_chunks = data.get("cap", [])
-            if cap_chunks:
-                level_payload["applied_caps"] = _metric_summary(np.concatenate(cap_chunks))
-            payload["levels"][str(level)] = level_payload
-        if combined_samples:
-            combined = np.concatenate(combined_samples)
-            payload["overview"] = _metric_summary(combined)
-            payload["default"] = max(
-                float(np.percentile(combined, percentile_pct)) + self._margin,
-                self._radius_floor,
-            )
-        else:
-            payload["overview"] = {}
-            payload["default"] = None
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
 @dataclass(frozen=True)
@@ -378,6 +83,12 @@ def _rbf_kernel(
     diff = x[:, None, :] - y[None, :, :]
     sq_dist = np.sum(diff * diff, axis=2)
     return variance * np.exp(-0.5 * sq_dist / (lengthscale * lengthscale))
+
+
+def _resolve_artifact_arg(path: str | None) -> str | None:
+    if not path:
+        return None
+    return str(resolve_artifact_path(path, category="benchmarks"))
 
 
 def _build_residual_backend(
@@ -652,6 +363,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--k", type=int, default=8, help="Number of neighbours to request.")
     parser.add_argument("--seed", type=int, default=0, help="Random seed.")
     parser.add_argument(
+        "--run-id",
+        type=str,
+        default=None,
+        help="Optional run identifier propagated to telemetry artifacts (default: auto-generated).",
+    )
+    parser.add_argument(
         "--metric",
         choices=("euclidean", "residual"),
         default="euclidean",
@@ -696,6 +413,11 @@ def _parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         help="Write per-batch telemetry as JSON lines to the specified path.",
+    )
+    parser.add_argument(
+        "--no-log-file",
+        action="store_true",
+        help="Disable JSONL batch telemetry output (enabled by default).",
     )
     parser.add_argument(
         "--batch-order",
@@ -863,23 +585,58 @@ def main() -> None:
     if args.residual_gate and args.metric != "residual":
         raise ValueError("--residual-gate presets are only supported when --metric residual is selected.")
     cli_runtime = runtime_from_args(args)
+    runtime_snapshot = cli_runtime.describe()
     cli_runtime.activate()
+    run_id = args.run_id or generate_run_id()
+    log_metadata = {
+        "benchmark": "benchmarks.queries",
+        "dimension": args.dimension,
+        "tree_points": args.tree_points,
+        "batch_size": args.batch_size,
+        "queries": args.queries,
+        "k": args.k,
+        "metric": args.metric,
+        "build_mode": args.build_mode,
+        "baseline": args.baseline,
+    }
     log_writer: BenchmarkLogWriter | None = None
     scope_cap_recorder: ResidualScopeCapRecorder | None = None
 
     try:
-        if args.log_file:
-            log_writer = BenchmarkLogWriter(args.log_file)
+        log_path: str | None
+        if args.no_log_file:
+            log_path = None
+        elif args.log_file:
+            log_path = _resolve_artifact_arg(args.log_file)
+        else:
+            log_path = str(
+                timestamped_artifact(
+                    category="benchmarks",
+                    prefix=f"queries_{run_id}",
+                    suffix=".jsonl",
+                )
+            )
+        if log_path:
+            print(f"[queries] writing batch telemetry to {log_path}")
+            log_writer = BenchmarkLogWriter(
+                log_path,
+                run_id=run_id,
+                runtime=runtime_snapshot,
+                metadata=log_metadata,
+            )
 
-        if args.metric == "residual" and args.residual_scope_cap_output:
+        scope_cap_output = _resolve_artifact_arg(args.residual_scope_cap_output)
+        if args.metric == "residual" and scope_cap_output:
             runtime_config = cx_config.runtime_config()
             scope_cap_recorder = ResidualScopeCapRecorder(
-                output=args.residual_scope_cap_output,
+                output=scope_cap_output,
                 percentile=args.residual_scope_cap_percentile,
                 margin=args.residual_scope_cap_margin,
                 radius_floor=runtime_config.residual_radius_floor,
             )
             scope_cap_recorder.annotate(
+                run_id=run_id,
+                log_file=log_path,
                 tree_points=args.tree_points,
                 batch_size=args.batch_size,
                 scope_chunk_target=runtime_config.scope_chunk_target,

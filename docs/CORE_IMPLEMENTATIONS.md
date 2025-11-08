@@ -29,6 +29,16 @@ uv run python -m benchmarks.queries \
 
 _Set `COVERTREEX_ENABLE_DIAGNOSTICS=1` to collect the instrumentation counters (adds ~7 ms to the build in this configuration)._
 
+### Telemetry artefacts (default output paths)
+
+All benchmark entrypoints now stamp a unique `run_id` and write structured telemetry under `artifacts/` unless you explicitly opt out:
+
+- `benchmarks.queries` creates `artifacts/benchmarks/queries_<run_id>.jsonl` automatically. Use `--log-file custom.jsonl` to override the location or `--no-log-file` to suppress JSONL output altogether.
+- `benchmarks.runtime_breakdown` writes CSV summaries to `artifacts/benchmarks/runtime_breakdown_<run_id>.csv` unless you pass `--no-csv-output`. Override with `--csv-output /path/to/file.csv` if you need a fixed path.
+- `benchmarks.batch_ops` emits a JSON summary (`artifacts/benchmarks/batch_ops_<run_id>.json`) by default. Pass `--log-json custom.json` to change the destination or `--no-log-json` to skip it.
+
+These files include the runtime configuration snapshot (`runtime_*` keys) so you can correlate logs back to the exact backend/precision/strategy selections that were active for that run.
+
 ### Scaling Snapshot — CPU builds (diagnostics on)
 
 | Workload (tree pts / queries / k) | PCCT Build (s) | PCCT Query (s) | PCCT q/s | Sequential Build (s) | Sequential q/s | GPBoost Build (s) | GPBoost q/s | External Build (s) | External q/s |
@@ -63,9 +73,10 @@ UV_CACHE_DIR=$PWD/.uv-cache \
 uv run python -m benchmarks.queries \
   --dimension 8 --tree-points 32768 \
   --batch-size 512 --queries 1024 --k 8 \
-  --seed 42 --metric residual --baseline none \
-  --log-file benchmark_residual_clamped_20251107_fix_run2.jsonl
+  --seed 42 --metric residual --baseline none
 ```
+
+The JSONL log now lands in `artifacts/benchmarks/queries_<run_id>.jsonl` automatically; pass `--log-file benchmark_residual_clamped_20251107_fix_run2.jsonl` if you need to mirror the historical file layout.
 
 > **Baseline note:** The `_diag0` artefacts from 2025‑11‑07 (`benchmark_residual_clamped_20251107_diag0.jsonl`, `benchmark_residual_chunked_20251107_diag0.jsonl`) are the preferred reference logs whenever you need to compare against GPBoost or older “*_fix_run2” runs. They disable diagnostics to match the baseline settings but still include the new `gate1_*` and `traversal_scope_chunk_{scans,points,dedupe,saturated}` counters, so keep using them for apples-to-apples regressions going forward.
 

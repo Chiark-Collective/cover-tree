@@ -212,10 +212,12 @@ def test_residual_gate_profile_records_samples(tmp_path):
         whitened_distances=whitened,
         inclusion_mask=mask,
     )
+    profile.annotate_metadata(run_id="test-profile", tree_points=8)
     profile.dump()
     payload = json.loads(profile_path.read_text())
     assert payload["samples_total"] == 2
     assert max(payload["max_whitened"]) >= 0.08
+    assert payload["metadata"]["run_id"] == "test-profile"
 
 
 def test_residual_gate_lookup_thresholds_monotonic(tmp_path):

@@ -1,3 +1,4 @@
+import csv
 import json
 import numpy as np
 import sys
@@ -6,17 +7,18 @@ from types import SimpleNamespace
 
 jax = pytest.importorskip("jax")
 
-from benchmarks.batch_ops import benchmark_delete, benchmark_insert
-from benchmarks.queries import (
-    BenchmarkLogWriter,
-    _build_tree,
-    benchmark_knn_latency,
-    run_baseline_comparisons,
-)
+from benchmarks.batch_ops import BenchmarkResult, benchmark_delete, benchmark_insert, _write_result_artifact
+from benchmarks.queries import _build_tree, benchmark_knn_latency, run_baseline_comparisons
 from benchmarks.runtime_cli import runtime_from_args as _runtime_from_args
 from benchmarks import runtime_breakdown
 from covertreex import config as cx_config
 from covertreex.baseline import has_gpboost_cover_tree
+from covertreex.telemetry import (
+    BENCHMARK_BATCH_SCHEMA_ID,
+    BenchmarkLogWriter,
+    RUNTIME_BREAKDOWN_SCHEMA_ID,
+    runtime_breakdown_fieldnames,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -121,41 +123,24 @@ def test_runtime_breakdown_csv_output(tmp_path, monkeypatch):
     cx_config.reset_runtime_context()
     assert csv_path.exists()
     contents = csv_path.read_text().strip().splitlines()
-    chunk_tail = ",".join(
-        [
-            "traversal_chunk_segments_warmup",
-            "traversal_chunk_segments_steady",
-            "traversal_chunk_emitted_warmup",
-            "traversal_chunk_emitted_steady",
-            "traversal_chunk_max_members_warmup",
-            "traversal_chunk_max_members_steady",
-            "conflict_chunk_segments_warmup",
-            "conflict_chunk_segments_steady",
-            "conflict_chunk_emitted_warmup",
-            "conflict_chunk_emitted_steady",
-            "conflict_chunk_max_members_warmup",
-            "conflict_chunk_max_members_steady",
-        ]
-    )
-    expected_tail = (
-        "label,build_warmup_seconds,build_steady_seconds,build_total_seconds," "query_warmup_seconds,"
-        "query_steady_seconds,build_cpu_seconds,build_cpu_utilisation," "build_rss_delta_bytes,"
-        "build_max_rss_bytes,query_cpu_seconds,query_cpu_utilisation," "query_rss_delta_bytes,"
-        "query_max_rss_bytes," + chunk_tail
-    )
-    header = contents[0]
-    if header.startswith("run,"):
-        assert header == f"run,{expected_tail}"
-        data_rows = [row.split(",", 1)[1] for row in contents[1:] if "," in row]
-    else:
-        assert header == expected_tail
-        data_rows = contents[1:]
-    assert any(row.startswith("PCCT") for row in data_rows)
+    expected = ",".join(runtime_breakdown_fieldnames())
+    assert contents[0] == expected
+    reader = csv.DictReader(contents)
+    rows = list(reader)
+    assert rows
+    assert any(row["label"].startswith("PCCT") for row in rows)
+    assert all(row["schema_id"] == RUNTIME_BREAKDOWN_SCHEMA_ID for row in rows)
+    assert all(row["run_id"] for row in rows)
 
 
 def test_benchmark_log_writer_emits_json(tmp_path):
     log_path = tmp_path / "batches.jsonl"
-    writer = BenchmarkLogWriter(str(log_path))
+    writer = BenchmarkLogWriter(
+        str(log_path),
+        run_id="test-run",
+        runtime={"backend": "numpy"},
+        metadata={"benchmark": "unit-test"},
+    )
     try:
         _build_tree(
             dimension=2,
@@ -171,8 +156,39 @@ def test_benchmark_log_writer_emits_json(tmp_path):
     assert contents
     first_entry = json.loads(contents[0])
     assert first_entry["batch_index"] == 0
+    assert first_entry["batch_event_index"] == 0
+    assert first_entry["schema_id"] == BENCHMARK_BATCH_SCHEMA_ID
+    assert first_entry["run_id"] == "test-run"
+    assert first_entry["runtime_backend"] == "numpy"
     assert "traversal_ms" in first_entry
     assert "rss_bytes" in first_entry or "rss_delta_bytes" in first_entry
+
+
+def test_batch_ops_result_artifact(tmp_path):
+    path = tmp_path / "summary.json"
+    result = BenchmarkResult(
+        mode="insert",
+        elapsed_seconds=1.23,
+        batches=4,
+        batch_size=8,
+        points_processed=32,
+        throughput_points_per_sec=26.0,
+    )
+    args = SimpleNamespace(dimension=3, seed=0, bootstrap_batches=2)
+    runtime_snapshot = {"backend": "jax"}
+    _write_result_artifact(
+        path,
+        run_id="batch-run",
+        runtime_snapshot=runtime_snapshot,
+        args=args,
+        result=result,
+    )
+    payload = json.loads(path.read_text())
+    assert payload["schema_id"].endswith("batch_ops_summary.v1")
+    assert payload["run_id"] == "batch-run"
+    assert payload["runtime"]["backend"] == "jax"
+    assert payload["mode"] == "insert"
+    assert payload["batches"] == 4
 
 
 def _cli_args(**overrides):
