@@ -31,18 +31,24 @@ We introduced `ResidualCorrHostData` in `covertreex/metrics/residual.py`. It pac
 - Radii are derived the same way as the Euclidean path: \( \max(2^{\ell_i+1}, S_i) \).
 - While streaming we now record the **observed maximum residual distance** per query into `TraversalResult.residual_cache.scope_radii`. These measurements form the “residual radius ladder” used during conflict-graph construction: when the metric is residual-correlation, `build_conflict_graph` swaps the Euclidean fallback \( \max(2^{\ell_i+1}, S_i) \) for the observed value (bounded below by `COVERTREEX_RESIDUAL_RADIUS_FLOOR`, default `1e-3`). This keeps newly inserted nodes from inheriting `radius≈2` regardless of depth and feeds Gate‑1 with radii that reflect the actual residual distances seen during streaming.
 - `_collect_residual_scopes_streaming` now tracks chunk-level telemetry (chunks scanned, points touched, dedupe hits, saturation flags). These counters flow into `TraversalTimings` (`traversal_scope_chunk_{scans,points,dedupe,saturated}`) and the JSONL writer so profiling the 16 384-cap hit is straightforward.
+- When `COVERTREEX_SCOPE_CHUNK_TARGET>0`, the same value now caps **both** the scope size and the number of tree points we are willing to scan per query. Once the scan budget is exhausted we mark the scope as saturated, stop requesting new kernel tiles, and rely on the telemetry above to highlight the truncation.
+- Practical impact: the 32 768-point Hilbert run with `COVERTREEX_SCOPE_CHUNK_TARGET=8192` (`benchmark_residual_scopecap_20251108.jsonl`) now finishes in **687.29 s build / 0.027 s query (37.6 k q/s)** with the scan budget tripping on 48 of 64 dominated batches (`traversal_scope_chunk_points` per batch ≈4.19 M = 512 queries × 8 192 cap, `traversal_scope_chunk_saturated=48`). The earlier cap-only replay (no scan guard) took 900.2 s, so this reuse alone saves ~24 % wall time without touching the conflict graph.
+- Residual batches emit `traversal_scope_radius_{obs,initial,limit,cap_values}_*` summaries plus `traversal_scope_radius_cap_hits` and `*_delta_{mean,max}` in every JSONL record. Those stats let you inspect how aggressive the ladder currently is (observed maxima) versus the limits you feed into traversal.
+- Optional per-scope caps can rein in traversal radii before the gate runs. Provide a JSON table via `COVERTREEX_RESIDUAL_SCOPE_CAPS_PATH=/path/to/caps.json` (schema `{"schema": 1, "default": <optional>, "levels": {"0": 0.5, "1": 0.75}}`) and/or a global fallback with `COVERTREEX_RESIDUAL_SCOPE_CAP_DEFAULT`. The caps clamp the runtime radius but still honour `COVERTREEX_RESIDUAL_RADIUS_FLOOR`; cap hits show up in the JSON logs so you can confirm how often each level is being throttled.
+- `docs/data/residual_scope_caps_scope8192.json` captured the legacy flat 1.25 cap, while `docs/data/residual_scope_caps_32768.json` now records the per-level medians (+0.05 margin) from the November 8 32 768-point replay. Derive fresh tables without hand-editing JSON by adding `--residual-scope-cap-output /path/to/out.json` (plus optional `--residual-scope-cap-percentile` / `--residual-scope-cap-margin`) to `benchmarks.queries`; the new `ResidualScopeCapRecorder` streams per-level ladder samples directly from each batch insert and emits summaries at shutdown.
 
 ## Conflict Graph Pipeline
 
 ### Pairwise Matrix
 
-- Inside `build_conflict_graph`, when residual mode is active we decode dataset ids for the batch and materialise the full \( n \times n \) matrix by streaming kernel tiles through `compute_residual_distances_from_kernel`. This preserves compatibility with both dense and segmented builders.
+- Inside `build_conflict_graph`, when residual mode is active we decode dataset ids for the batch and materialise the full \( n \times n \) matrix once per batch. That matrix now feeds every downstream stage (dense, segmented, and filter) when available; we fall back to on-demand kernel streaming only when the cache is absent.
 
 ### Adjacency Filter
 
 - The dense adjacency builder (`_build_dense_adjacency`) now accepts an optional `residual_pairwise` matrix. When provided, the Numba helper receives the residual distances directly.
-- The post-build radius filter no longer touches Euclidean norms. Instead, it groups outgoing edges by source, streams the kernel rows, and calls `compute_residual_distances_from_kernel` to prune edges one chunk at a time.
+- When the cached matrix is available we also reuse it during the post-build radius filter, so pruning simply indexes into that \(n\times n\) buffer. Only when the cache is missing (e.g., legacy dense traversal) do we stream kernel tiles through `compute_residual_distances_from_kernel`.
 - The segmented builder piggybacks on the same residual matrix (used when `COVERTREEX_CONFLICT_GRAPH_IMPL=segmented`).
+- Chunk telemetry now records pair-wise saturation as well: JSONL batches expose `conflict_scope_chunk_pair_cap`, `conflict_scope_chunk_pairs_before`, and `conflict_scope_chunk_pairs_after`, making it obvious when `_chunk_ranges_from_indptr` fuses tails because the estimated pair budget is tiny even if membership volume looks large.
 
 ## Chunk Kernel (Numba)
 
@@ -89,12 +95,12 @@ It emits both distances and a mask indicating which entries fall below a caller-
 
 - Gate‑1 still defaults to off globally—we only flip it on in telemetry or experimental runs until we finish the sparse traversal rollout and confirm the lookup holds for larger corpora. When you opt in, make sure `COVERTREEX_ENABLE_SPARSE_TRAVERSAL=1` is set; otherwise the dense traversal path bypasses the streaming helper and the gate never engages.
 
-- `docs/data/residual_gate_profile_scope8192.json` captures a larger synthetic workload (8 192 points, 33 550 336 samples, same 512 bins) for comparison. Relative to the diag0 artefact the median threshold is +9.66, the 90th percentile delta is +19.93, the maximum absolute delta is ≈61.9, and 387/512 bins have higher maxima.
+- `docs/data/residual_gate_profile_scope8192.json` captures a larger synthetic workload (8 192 points, 33 550 336 samples, same 512 bins) for comparison. Relative to the diag0 artefact the median threshold is +9.66, the 90th percentile delta is +19.93, the maximum absolute delta is ≈61.9, and 387/512 bins have higher maxima. `docs/data/residual_gate_profile_32768_caps.json` replaces those synthetic probes with the full 32 768-point capture (caps enabled, audit on) from 2025‑11‑08 so gate experiments can finally reference a workload that matches the production corpus.
 
 - Fresh 32 k runs with the lookup-enabled gate:
   - `benchmark_residual_gate_lookup_32768_default_cap10.jsonl` (clamped/default build) reports build ≈269.8 s. `traversal_gate1_*` counters stay at zero because the per-level radii continue to exceed the lookup cap.
   - `benchmark_residual_gate_lookup_32768_chunked_cap10.jsonl` (chunk target 16 384) lands at ≈270.8 s with the same gate stats (0 candidates/kept/pruned).
-  - Conclusion: the lookup and CLI preset are in place, but the gate still does not fire on 32 k workloads until we feed traversal with the observed residual radii (or raise the cap dramatically).
+  - `benchmark_residual_lookup_32768_final_run2.jsonl` (Hilbert batches + new per-level caps + chunked traversal) builds in 900.2 s and sustains 37.7 k q/s (1 024 queries, k=8) with audit enabled. Gate‑1 still rejects nothing (`traversal_gate1_pruned=0`) because the medians now sit near 1.05; the lookup remains a no-op until we either raise the caps again or derive a tighter radius floor.
 
 ## Tests
 
