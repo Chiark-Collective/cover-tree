@@ -5,7 +5,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Any, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 try:  # pragma: no cover - platform specific fallback
     import resource
@@ -21,7 +21,7 @@ from numpy.random import Generator, default_rng
 
 from covertreex import reset_residual_metric
 from covertreex import config as cx_config
-from covertreex.algo import batch_insert
+from covertreex.algo import batch_insert, batch_insert_prefix_doubling
 from covertreex.core.tree import PCCTree, TreeBackend
 from covertreex.metrics import ResidualCorrHostData, configure_residual_correlation
 from covertreex.queries.knn import knn
@@ -32,6 +32,37 @@ from covertreex.baseline import (
     has_external_cover_tree,
     has_gpboost_cover_tree,
 )
+
+
+_RESIDUAL_GATE_ENV_VARS = (
+    "COVERTREEX_ENABLE_SPARSE_TRAVERSAL",
+    "COVERTREEX_RESIDUAL_GATE1",
+    "COVERTREEX_RESIDUAL_GATE1_LOOKUP_PATH",
+    "COVERTREEX_RESIDUAL_GATE1_LOOKUP_MARGIN",
+    "COVERTREEX_RESIDUAL_GATE1_RADIUS_CAP",
+    "COVERTREEX_RESIDUAL_GATE1_AUDIT",
+)
+
+
+def _apply_residual_gate_preset(args: argparse.Namespace) -> None:
+    if args.residual_gate is None:
+        return
+    if args.residual_gate == "off":
+        os.environ["COVERTREEX_RESIDUAL_GATE1"] = "0"
+        return
+    if args.residual_gate != "lookup":
+        return
+    os.environ["COVERTREEX_ENABLE_SPARSE_TRAVERSAL"] = "1"
+    os.environ["COVERTREEX_RESIDUAL_GATE1"] = "1"
+    if args.residual_gate_lookup_path:
+        os.environ["COVERTREEX_RESIDUAL_GATE1_LOOKUP_PATH"] = args.residual_gate_lookup_path
+    margin = args.residual_gate_margin
+    if margin is not None:
+        os.environ["COVERTREEX_RESIDUAL_GATE1_LOOKUP_MARGIN"] = str(margin)
+    cap = args.residual_gate_cap
+    if cap and cap > 0:
+        os.environ["COVERTREEX_RESIDUAL_GATE1_RADIUS_CAP"] = str(cap)
+    os.environ.setdefault("COVERTREEX_RESIDUAL_GATE1_AUDIT", "1")
 
 
 def _read_rss_bytes() -> int | None:
@@ -68,7 +99,14 @@ class BenchmarkLogWriter:
         if self._handle and not self._handle.closed:
             self._handle.close()
 
-    def record_batch(self, *, batch_index: int, batch_size: int, plan: Any) -> None:
+    def record_batch(
+        self,
+        *,
+        batch_index: int,
+        batch_size: int,
+        plan: Any,
+        extra: Dict[str, Any] | None = None,
+    ) -> None:
         traversal_timings = plan.traversal.timings
         conflict_timings = plan.conflict_graph.timings
         rss_now = _read_rss_bytes()
@@ -103,10 +141,40 @@ class BenchmarkLogWriter:
             "traversal_scope_chunk_segments": int(traversal_timings.scope_chunk_segments),
             "traversal_scope_chunk_emitted": int(traversal_timings.scope_chunk_emitted),
             "traversal_scope_chunk_max_members": int(traversal_timings.scope_chunk_max_members),
+            "traversal_scope_chunk_scans": int(traversal_timings.scope_chunk_scans),
+            "traversal_scope_chunk_points": int(traversal_timings.scope_chunk_points),
+            "traversal_scope_chunk_dedupe": int(traversal_timings.scope_chunk_dedupe),
+            "traversal_scope_chunk_saturated": int(traversal_timings.scope_chunk_saturated),
             "conflict_scope_chunk_segments": int(conflict_timings.scope_chunk_segments),
             "conflict_scope_chunk_emitted": int(conflict_timings.scope_chunk_emitted),
             "conflict_scope_chunk_max_members": int(conflict_timings.scope_chunk_max_members),
+            "conflict_scope_domination_ratio": float(conflict_timings.scope_domination_ratio),
+            "traversal_gate1_candidates": int(traversal_timings.gate1_candidates),
+            "traversal_gate1_kept": int(traversal_timings.gate1_kept),
+            "traversal_gate1_pruned": int(traversal_timings.gate1_pruned),
+            "traversal_gate1_ms": _ms(traversal_timings.gate1_seconds),
+            "batch_order_strategy": plan.batch_order_strategy,
+            "conflict_grid_cells": int(plan.conflict_graph.grid_cells),
+            "conflict_grid_leaders_raw": int(plan.conflict_graph.grid_leaders_raw),
+            "conflict_grid_leaders_after": int(plan.conflict_graph.grid_leaders_after),
+            "conflict_grid_local_edges": int(plan.conflict_graph.grid_local_edges),
         }
+        if plan.batch_permutation is not None:
+            record["batch_order_permutation_size"] = int(len(plan.batch_permutation))
+        for key, value in plan.batch_order_metrics.items():
+            record[f"batch_order_{key}"] = float(value)
+        if traversal_timings.gate1_candidates:
+            ratio = (
+                traversal_timings.gate1_pruned
+                / traversal_timings.gate1_candidates
+            )
+            record["traversal_gate1_pruned_ratio"] = float(ratio)
+        if extra:
+            for key, value in extra.items():
+                if isinstance(value, (int, float)):
+                    record[key] = value
+                elif value is not None:
+                    record[key] = value
         if rss_now is not None:
             record["rss_bytes"] = int(rss_now)
         if rss_delta is not None:
@@ -260,9 +328,50 @@ def _build_tree(
     seed: int,
     prebuilt_points: np.ndarray | None = None,
     log_writer: BenchmarkLogWriter | None = None,
+    build_mode: str = "batch",
 ) -> Tuple[PCCTree, np.ndarray, float]:
     backend = _resolve_backend()
     tree = PCCTree.empty(dimension=dimension, backend=backend)
+
+    if build_mode == "prefix":
+        if prebuilt_points is not None:
+            points_np = np.asarray(prebuilt_points, dtype=np.float64, copy=False)
+        else:
+            rng = default_rng(seed)
+            points_np = _generate_points_numpy(rng, tree_points, dimension)
+        batch = backend.asarray(points_np, dtype=backend.default_float)
+        start = time.perf_counter()
+        tree, prefix_result = batch_insert_prefix_doubling(
+            tree,
+            batch,
+            backend=backend,
+            mis_seed=seed,
+            shuffle_seed=seed,
+        )
+        build_seconds = time.perf_counter() - start
+        if log_writer is not None:
+            runtime = cx_config.runtime_config()
+            schedule = runtime.prefix_schedule
+            for group_index, group in enumerate(prefix_result.groups):
+                plan = group.plan
+                if hasattr(plan.traversal, "parents"):
+                    group_size = int(plan.traversal.parents.shape[0])
+                else:
+                    group_size = int(plan.traversal.levels.shape[0])
+                extra = {
+                    "prefix_group_index": group_index,
+                    "prefix_factor": float(group.prefix_factor or 0.0),
+                    "prefix_domination_ratio": float(group.domination_ratio or 0.0),
+                    "prefix_schedule": schedule,
+                }
+                log_writer.record_batch(
+                    batch_index=group_index,
+                    batch_size=group_size,
+                    plan=plan,
+                    extra=extra,
+                )
+        return tree, points_np, build_seconds
+
     start = time.perf_counter()
     buffers: List[np.ndarray] = []
     idx = 0
@@ -322,6 +431,7 @@ def benchmark_knn_latency(
     prebuilt_queries: np.ndarray | None = None,
     build_seconds: float | None = None,
     log_writer: BenchmarkLogWriter | None = None,
+    build_mode: str = "batch",
 ) -> Tuple[PCCTree, QueryBenchmarkResult]:
     tree_build_seconds: float | None = None
     if prebuilt_tree is None:
@@ -332,6 +442,7 @@ def benchmark_knn_latency(
             seed=seed,
             prebuilt_points=prebuilt_points,
             log_writer=log_writer,
+            build_mode=build_mode,
         )
     else:
         tree = prebuilt_tree
@@ -431,6 +542,54 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Write per-batch telemetry as JSON lines to the specified path.",
     )
+    parser.add_argument(
+        "--batch-order",
+        choices=("natural", "random", "hilbert"),
+        default=None,
+        help="Override COVERTREEX_BATCH_ORDER for this run.",
+    )
+    parser.add_argument(
+        "--batch-order-seed",
+        type=int,
+        default=None,
+        help="Override COVERTREEX_BATCH_ORDER_SEED for this run.",
+    )
+    parser.add_argument(
+        "--prefix-schedule",
+        choices=("doubling", "adaptive"),
+        default=None,
+        help="Override COVERTREEX_PREFIX_SCHEDULE for this run.",
+    )
+    parser.add_argument(
+        "--build-mode",
+        choices=("batch", "prefix"),
+        default="batch",
+        help="Choose the tree construction strategy (standard batch inserts or prefix doubling).",
+    )
+    parser.add_argument(
+        "--residual-gate",
+        choices=("off", "lookup"),
+        default=None,
+        help="Residual-only: automatically configure Gate-1 (e.g. 'lookup' wires sparse traversal + lookup table).",
+    )
+    parser.add_argument(
+        "--residual-gate-lookup-path",
+        type=str,
+        default="docs/data/residual_gate_profile_diag0.json",
+        help="Lookup JSON used when --residual-gate=lookup (default: diag0 profile).",
+    )
+    parser.add_argument(
+        "--residual-gate-margin",
+        type=float,
+        default=0.02,
+        help="Safety margin added to lookup thresholds when --residual-gate=lookup.",
+    )
+    parser.add_argument(
+        "--residual-gate-cap",
+        type=float,
+        default=0.0,
+        help="Optional radius cap passed to the lookup preset (0 keeps existing env/default).",
+    )
     return parser.parse_args()
 
 
@@ -516,8 +675,14 @@ def run_baseline_comparisons(
 
 def main() -> None:
     args = _parse_args()
+    if args.residual_gate and args.metric != "residual":
+        raise ValueError("--residual-gate presets are only supported when --metric residual is selected.")
     previous_metric = os.environ.get("COVERTREEX_METRIC")
     previous_backend = os.environ.get("COVERTREEX_BACKEND")
+    previous_batch_order = os.environ.get("COVERTREEX_BATCH_ORDER")
+    previous_batch_order_seed = os.environ.get("COVERTREEX_BATCH_ORDER_SEED")
+    previous_prefix_schedule = os.environ.get("COVERTREEX_PREFIX_SCHEDULE")
+    previous_gate_env = {var: os.environ.get(var) for var in _RESIDUAL_GATE_ENV_VARS}
     log_writer: BenchmarkLogWriter | None = None
 
     try:
@@ -528,6 +693,14 @@ def main() -> None:
             os.environ["COVERTREEX_BACKEND"] = "numpy"
         else:
             os.environ["COVERTREEX_METRIC"] = "euclidean"
+        if args.batch_order:
+            os.environ["COVERTREEX_BATCH_ORDER"] = args.batch_order
+        if args.batch_order_seed is not None:
+            os.environ["COVERTREEX_BATCH_ORDER_SEED"] = str(args.batch_order_seed)
+        if args.prefix_schedule:
+            os.environ["COVERTREEX_PREFIX_SCHEDULE"] = args.prefix_schedule
+        if args.metric == "residual":
+            _apply_residual_gate_preset(args)
         cx_config.reset_runtime_config_cache()
 
         point_rng = default_rng(args.seed)
@@ -555,6 +728,7 @@ def main() -> None:
             prebuilt_points=points_np,
             prebuilt_queries=queries_np,
             log_writer=log_writer,
+            build_mode=args.build_mode,
         )
 
         print(
@@ -594,6 +768,23 @@ def main() -> None:
             os.environ["COVERTREEX_BACKEND"] = previous_backend
         else:
             os.environ.pop("COVERTREEX_BACKEND", None)
+        if previous_batch_order is not None:
+            os.environ["COVERTREEX_BATCH_ORDER"] = previous_batch_order
+        else:
+            os.environ.pop("COVERTREEX_BATCH_ORDER", None)
+        if previous_batch_order_seed is not None:
+            os.environ["COVERTREEX_BATCH_ORDER_SEED"] = previous_batch_order_seed
+        else:
+            os.environ.pop("COVERTREEX_BATCH_ORDER_SEED", None)
+        if previous_prefix_schedule is not None:
+            os.environ["COVERTREEX_PREFIX_SCHEDULE"] = previous_prefix_schedule
+        else:
+            os.environ.pop("COVERTREEX_PREFIX_SCHEDULE", None)
+        for var, value in previous_gate_env.items():
+            if value is None:
+                os.environ.pop(var, None)
+            else:
+                os.environ[var] = value
         cx_config.reset_runtime_config_cache()
         if log_writer is not None:
             log_writer.close()

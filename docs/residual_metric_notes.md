@@ -80,12 +80,21 @@ It emits both distances and a mask indicating which entries fall below a caller-
   export COVERTREEX_RESIDUAL_GATE1=1
   export COVERTREEX_RESIDUAL_GATE1_LOOKUP_PATH=docs/data/residual_gate_profile_diag0.json
   export COVERTREEX_RESIDUAL_GATE1_LOOKUP_MARGIN=0.02   # optional safety buffer
-  export COVERTREEX_RESIDUAL_GATE1_RADIUS_CAP=2.0       # cap radii for the lookup, optional
+  export COVERTREEX_RESIDUAL_GATE1_RADIUS_CAP=10.0      # optional cap for huge radii
   ```
 
   (You can omit the cap to let the lookup see larger radii; we cap it when we want deterministic thresholds even if the residual ladder spikes.) The lookup supplies per-radius thresholds directly, so `residual_gate1_alpha` becomes a fallback rather than the primary tuning knob.
 
+- The CLI now takes care of those flags for you: `python -m benchmarks.queries --metric residual --residual-gate lookup ...` wires sparse traversal, enables the gate, and points at `docs/data/residual_gate_profile_diag0.json`. Override the path (`--residual-gate-lookup-path`), margin (`--residual-gate-margin`), or radius cap (`--residual-gate-cap`) as needed. Use `--residual-gate off` to explicitly keep the gate disabled during experiments.
+
 - Gate‑1 still defaults to off globally—we only flip it on in telemetry or experimental runs until we finish the sparse traversal rollout and confirm the lookup holds for larger corpora. When you opt in, make sure `COVERTREEX_ENABLE_SPARSE_TRAVERSAL=1` is set; otherwise the dense traversal path bypasses the streaming helper and the gate never engages.
+
+- `docs/data/residual_gate_profile_scope8192.json` captures a larger synthetic workload (8 192 points, 33 550 336 samples, same 512 bins) for comparison. Relative to the diag0 artefact the median threshold is +9.66, the 90th percentile delta is +19.93, the maximum absolute delta is ≈61.9, and 387/512 bins have higher maxima.
+
+- Fresh 32 k runs with the lookup-enabled gate:
+  - `benchmark_residual_gate_lookup_32768_default_cap10.jsonl` (clamped/default build) reports build ≈269.8 s. `traversal_gate1_*` counters stay at zero because the per-level radii continue to exceed the lookup cap.
+  - `benchmark_residual_gate_lookup_32768_chunked_cap10.jsonl` (chunk target 16 384) lands at ≈270.8 s with the same gate stats (0 candidates/kept/pruned).
+  - Conclusion: the lookup and CLI preset are in place, but the gate still does not fire on 32 k workloads until we feed traversal with the observed residual radii (or raise the cap dramatically).
 
 ## Tests
 
