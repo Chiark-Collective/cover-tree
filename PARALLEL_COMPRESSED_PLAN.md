@@ -11,8 +11,8 @@ regressing query latency or existing diagnostics.
 
 | Workload                             | PCCT Build | Query | Notes / Artefacts |
 |-------------------------------------|-----------:|------:|-------------------|
-| 8 192 × 1 024 × k=16 (grid)         | 5.20 s     | 0.085 s | `run_grid_8192.txt` (natural order), `run_grid_8192_hilbert.txt` (Hilbert/adaptive) |
-| 32 768 × 1 024 × k=8 (grid)         | 37.73 s    | 0.262 s | `benchmark_grid_32768_default_run2.jsonl`, `run_grid_32768_default_run2.txt` |
+| 8 192 × 1 024 × k=16 (grid)         | 4.15 s     | 0.018 s | `bench_euclidean_grid_8192_20251108.log`, `benchmark_grid_8192_baseline_20251108.jsonl` |
+| 32 768 × 1 024 × k=8 (grid)         | 16.75 s    | 0.039 s | `bench_euclidean_grid_32768_20251108*.log`, `benchmark_grid_32768_baseline_20251108{,_run2}.jsonl` |
 | 32 768 × 1 024 × k=8 (Euclid. legacy) | 44.22 s  | 0.284 s | `benchmark_euclidean_clamped_20251107_fix*.jsonl` |
 | 32 768 × 1 024 × k=8 (Residual)     | 66.25 s    | 0.305 s | `benchmark_residual_32768_default.jsonl`, `run_residual_32768_default.txt` |
 | Residual “gold standard” (dense)    | 71.75 s    | 0.272 s | `benchmarks/run_residual_gold_standard.sh`, `bench_residual.log` |

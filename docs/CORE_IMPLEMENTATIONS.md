@@ -33,8 +33,8 @@ _Set `COVERTREEX_ENABLE_DIAGNOSTICS=1` to collect the instrumentation counters (
 
 | Workload (tree pts / queries / k) | PCCT Build (s) | PCCT Query (s) | PCCT q/s | Sequential Build (s) | Sequential q/s | GPBoost Build (s) | GPBoost q/s | External Build (s) | External q/s |
 |-----------------------------------|----------------|----------------|----------|----------------------|----------------|-------------------|-------------|--------------------|---------------|
-| 8 192 / 1 024 / 16                | 4.03           | 0.934          | 1 096    | 33.65               | 5 327         | 0.569             | 306         | 14.14              | 122           |
-| 32 768 / 1 024 / 8 (Euclidean)    | 37.73          | 0.262          | 3 914    | —                   | —             | 2.55              | 95.2        | —                  | —             |
+| 8 192 / 1 024 / 16                | 4.15           | 0.018          | 57 660   | 33.65               | 5 327         | 0.75              | 285         | 14.14              | 122           |
+| 32 768 / 1 024 / 8 (Euclidean)    | 16.75          | 0.039          | 25 973   | —                   | —             | 3.10              | 65.1        | —                  | —             |
 | 32 768 / 1 024 / 8 (Residual)*    | 66.25          | 0.305          | 3 358    | —                   | —             | 2.51              | 91.6        | —                  | —             |
 
 _*GPBoost remains Euclidean-only; the baseline numbers in the residual row are provided for throughput context only._
@@ -43,7 +43,7 @@ The 32 768-point run currently logs PCCT and the GPBoost baseline; sequential/
 
 ### Gold-standard residual benchmark (default path)
 
-Fresh artefacts: `benchmark_grid_32768_default_run2.jsonl` (with `run_grid_32768_default_run2.txt`) and `benchmark_residual_32768_default.jsonl` (with `run_residual_32768_default.txt`) capture the PCCT rows above using the new defaults (`COVERTREEX_BATCH_ORDER=hilbert`, `COVERTREEX_PREFIX_SCHEDULE=adaptive`, `COVERTREEX_ENABLE_NUMBA=1`, `COVERTREEX_SCOPE_CHUNK_TARGET=0`, `COVERTREEX_SCOPE_CHUNK_MAX_SEGMENTS=256`).
+Fresh artefacts: `benchmark_grid_32768_baseline_20251108.jsonl` + `_run2.jsonl` (paired with `bench_euclidean_grid_32768_20251108*.log`) and `benchmark_residual_32768_default.jsonl` (with `run_residual_32768_default.txt`) capture the PCCT rows above using the new defaults (`COVERTREEX_BATCH_ORDER=hilbert`, `COVERTREEX_PREFIX_SCHEDULE=adaptive`, `COVERTREEX_ENABLE_NUMBA=1`, `COVERTREEX_SCOPE_CHUNK_TARGET=0`, `COVERTREEX_SCOPE_CHUNK_MAX_SEGMENTS=256`, `COVERTREEX_CONFLICT_GRAPH_IMPL=grid`).
 
 The historical **56.09 s / 0.229 s (4 469 q/s)** residual run (captured 2025‑11‑06) predates the grid/batch-order refresh but remains our “gold standard” regression target. The maintained harness now pins the closest available configuration—Numba enabled, natural batch order, doubling prefix schedule, diagnostics off, and no scope chunking—and currently measures **≈71.8 s build / 0.272 s query (3 762 q/s)**. To regenerate the artefact (and keep the environment consistent) run:
 
@@ -74,19 +74,29 @@ _Command (8 192 row):_
 COVERTREEX_BACKEND=numpy \
 COVERTREEX_ENABLE_NUMBA=1 \
 COVERTREEX_ENABLE_DIAGNOSTICS=1 \
-UV_CACHE_DIR=$PWD/.uv-cache \
-uv run python -m benchmarks.queries \
+COVERTREEX_CONFLICT_GRAPH_IMPL=grid \
+COVERTREEX_BATCH_ORDER=hilbert \
+COVERTREEX_PREFIX_SCHEDULE=adaptive \
+COVERTREEX_SCOPE_CHUNK_MAX_SEGMENTS=256 \
+python -m benchmarks.queries \
   --dimension 8 --tree-points 8192 \
   --batch-size 256 --queries 1024 --k 16 \
-  --seed 12345 --baseline gpboost
+  --seed 12345 --baseline gpboost \
+  --log-file benchmark_grid_8192_baseline_20251108.jsonl
 
 # 32k Euclidean vs GPBoost
 COVERTREEX_BACKEND=numpy \
 COVERTREEX_ENABLE_NUMBA=1 \
+COVERTREEX_ENABLE_DIAGNOSTICS=1 \
+COVERTREEX_CONFLICT_GRAPH_IMPL=grid \
+COVERTREEX_BATCH_ORDER=hilbert \
+COVERTREEX_PREFIX_SCHEDULE=adaptive \
+COVERTREEX_SCOPE_CHUNK_MAX_SEGMENTS=256 \
 python -m benchmarks.queries \
   --dimension 8 --tree-points 32768 \
   --batch-size 512 --queries 1024 --k 8 \
-  --seed 42 --baseline gpboost
+  --seed 42 --baseline gpboost \
+  --log-file benchmark_grid_32768_baseline_20251108.jsonl
 
 # 32k residual vs GPBoost (baseline remains Euclidean-only)
 COVERTREEX_BACKEND=numpy \
@@ -104,10 +114,13 @@ To capture warm-up versus steady-state timings for plotting, append `--csv-outpu
 
 ### Euclidean metric (NumPy backend)
 
-- Fresh 32 768-point benchmark (dimension 8, batch 512, 1 024 queries, k = 8, seed 42, Hilbert ordering + grid conflict builder) now lands at **37.73 s build / 0.262 s query (3 914 q/s)** for PCCT with NumPy+Numba (`benchmark_grid_32768_default_run2.jsonl` / `run_grid_32768_default_run2.txt`), while the GPBoost baseline remains at **2.55 s build / 10.75 s query (95.2 q/s)**—a 41× throughput gap in favour of PCCT.
-- Batch logs show `traversal_ms` hovering between 20–118 ms on dominated batches, whereas `conflict_graph_ms` stays in the 9–18 ms range and MIS remains sub-millisecond. The journal pipeline eliminated repeated array slices, so traversal/mask assembly is once again the limiting factor at 32 k.
+- Fresh 32 768-point Hilbert+grid reruns (dimension 8, batch 512, 1 024 queries, k = 8, seed 42) now land at **16.75 s build / 0.039 s query (~26 k q/s)** for PCCT with NumPy+Numba (`bench_euclidean_grid_32768_20251108*.log` + `benchmark_grid_32768_baseline_20251108{,_run2}.jsonl`). The paired GPBoost baseline clocks in at **≈3.10 s build / 15.72 s query (65 q/s)**, so PCCT sustains ~400× higher steady-state throughput in this configuration.
+- The 8 192-point suite (`--batch-size 256`, `k=16`, seed 12345) records **4.15 s build / 0.018 s query (57.7 k q/s)** for PCCT versus GPBoost’s **0.75 s / 3.59 s (285 q/s)**, captured in `bench_euclidean_grid_8192_20251108.log` + `benchmark_grid_8192_baseline_20251108.jsonl`.
+- Batch logs show `traversal_ms` clustering between ≈0.25–0.49 s on dominated 32 k batches while `conflict_graph_ms` remains within 7–19 ms and MIS stays sub-0.2 ms. With the journal pipeline eliminating repeated array slices, traversal/mask assembly is once again the limiting phase at scale even under the grid builder.
 - Conflict-graph builders now live in `conflict_graph_builders.py`; dense vs segmented vs residual paths report distinct telemetry. Dense remains the default until scope chunk limits (see Next Steps) are dialled in.
 - GPBoost’s cover tree baseline is sequential and Euclidean-only (no conflict graphs, no MIS). We continue to keep comparisons on the CPU/NumPy backend so wall-clock deltas stay reproducible without JAX/GPU variability.
+
+These November 8 artefacts supersede the 37.7 s / 0.262 s Hilbert+grid numbers from earlier in the week; treat them as the current Euclidean “gold standard” for PCCT until another build drops below ~15 s while keeping telemetry comparable.
 
 ### Residual-correlation metric (synthetic RBF caches, 2025-11-07)
 
