@@ -257,6 +257,39 @@ def warmup_scope_builder() -> None:
 
 
 if NUMBA_SCOPE_AVAILABLE:
+    @nb.njit(cache=True, parallel=True)
+    def build_scope_csr_from_pairs(
+        owners: np.ndarray,
+        members: np.ndarray,
+        num_nodes: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        indptr = np.zeros(num_nodes + 1, dtype=I64)
+        if owners.size == 0 or num_nodes <= 0:
+            return indptr, np.empty(0, dtype=I32)
+
+        counts = np.zeros(num_nodes, dtype=I64)
+        for i in nb.prange(owners.size):
+            node = int(owners[i])
+            if 0 <= node < num_nodes:
+                counts[node] += 1
+
+        for idx in range(num_nodes):
+            indptr[idx + 1] = indptr[idx] + counts[idx]
+
+        total = int(indptr[-1])
+        indices = np.empty(total, dtype=I32)
+        cursors = indptr[:-1].copy()
+        for i in nb.prange(owners.size):
+            node = int(owners[i])
+            if node < 0 or node >= num_nodes:
+                continue
+            pos = cursors[node]
+            if pos >= indptr[node + 1]:
+                continue
+            indices[pos] = members[i]
+            cursors[node] = pos + 1
+
+        return indptr, indices
 
     @nb.njit(cache=True)
     def _membership_point_ids_from_indptr(indptr: np.ndarray, total: int) -> np.ndarray:
@@ -940,6 +973,13 @@ if NUMBA_SCOPE_AVAILABLE:
 
 else:  # pragma: no cover - executed when numba missing
 
+    def build_scope_csr_from_pairs(
+        owners: np.ndarray,
+        members: np.ndarray,
+        num_nodes: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        raise RuntimeError("build_scope_csr_from_pairs requires numba to be installed.")
+
     def build_conflict_graph_numba_dense(
         scope_indptr: np.ndarray,
         scope_indices: np.ndarray,
@@ -970,6 +1010,7 @@ if NUMBA_SCOPE_AVAILABLE:
 
 __all__ = [
     "NUMBA_SCOPE_AVAILABLE",
+    "build_scope_csr_from_pairs",
     "build_conflict_graph_numba_dense",
     "filter_csr_by_radii_from_pairwise",
     "warmup_scope_builder",

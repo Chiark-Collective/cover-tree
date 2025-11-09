@@ -149,6 +149,8 @@ Until those traversal improvements ship, keep the residual grid in place for det
 
 **Goal.** Re-enable the float32 Gate‑1 (lookup-backed) and confirm whether it can prune enough dominated candidates to lower traversal time without violating correctness. Runs used the same 32 768‑point benchmark as above.
 
+> **Implementation note (2025‑11‑09):** `_collect_residual_scopes_streaming()` now streams scope memberships through the same bucketed CSR builder (`build_scope_csr_from_pairs`) that the conflict graph uses. This gets rid of the quadratic Python `list.extend` + `tuple` churn and guarantees the CSR output matches the deterministic tuple-of-tuples representation the Euclidean paths already emit. The change doesn’t fix the long “semisort” timings by itself—those counters still include the actual residual distance scans—but it removes a source of Python overhead and makes the sparse diagnostics comparable to the dense path.
+
 | Config | Key env knobs | Outcome |
 | --- | --- | --- |
 | `residual_gate_lookup_sparse_scale1p00_20251109191729.jsonl` | `COVERTREEX_ENABLE_SPARSE_TRAVERSAL=1`, `COVERTREEX_RESIDUAL_GATE1=1`, lookup margin 0.02, audit on | Gate tripped audit in the second batch (`RuntimeError: Residual gate pruned a candidate that lies within the requested radius`). Only the first batch logged, `traversal_gate1_*` counters stayed at 0 because the failure happened during the audit replay. |

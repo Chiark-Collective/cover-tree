@@ -18,6 +18,7 @@ from covertreex.metrics.residual import (
     get_residual_backend,
 )
 from covertreex.metrics.residual.scope_caps import get_scope_cap_table
+from .._scope_numba import build_scope_csr_from_pairs
 from .._traverse_numba import NUMBA_TRAVERSAL_AVAILABLE, build_scopes_numba
 from .._traverse_sparse_numba import (
     NUMBA_SPARSE_TRAVERSAL_AVAILABLE,
@@ -320,8 +321,10 @@ def _collect_residual_scopes_streaming(
     top_levels_np = np.asarray(tree.top_levels, dtype=np.int64)
     tree_id_to_pos = {int(tree_indices[i]): int(i) for i in range(total_points)}
 
-    scopes: list[np.ndarray] = []
-    scope_indptr = np.zeros(batch_size + 1, dtype=np.int64)
+    conflict_scopes: list[Tuple[int, ...]] = []
+    scope_owner_acc: list[int] = []
+    scope_member_acc: list[int] = []
+    scope_lengths = np.zeros(batch_size, dtype=np.int64)
     chunk = int(host_backend.chunk_size or 512)
     trimmed_scopes = 0
     max_scope_members = 0
@@ -346,8 +349,8 @@ def _collect_residual_scopes_streaming(
     for qi in range(batch_size):
         parent_pos = int(parent_positions[qi])
         if parent_pos < 0:
-            scopes.append(np.empty(0, dtype=np.int64))
-            scope_indptr[qi + 1] = scope_indptr[qi]
+            conflict_scopes.append(())
+            scope_lengths[qi] = 0
             continue
 
         parent_level = int(top_levels_np[parent_pos]) if 0 <= parent_pos < top_levels_np.shape[0] else -1
@@ -464,9 +467,7 @@ def _collect_residual_scopes_streaming(
 
         if collected_positions:
             scope_vec = np.asarray(collected_positions, dtype=np.int64)
-            scope_vec.sort()
-            order = np.lexsort((scope_vec, -top_levels_np[scope_vec]))
-            scope_vec = scope_vec[order]
+            scope_vec = _order_scope_positions_by_level(scope_vec, top_levels_np)
         else:
             scope_vec = np.empty(0, dtype=np.int64)
 
@@ -494,8 +495,12 @@ def _collect_residual_scopes_streaming(
 
         max_scope_after = max(max_scope_after, scope_vec.size)
 
-        scopes.append(scope_vec)
-        scope_indptr[qi + 1] = scope_indptr[qi] + scope_vec.size
+        scope_lengths[qi] = scope_vec.size
+        if scope_vec.size:
+            scope_owner_acc.extend([qi] * scope_vec.size)
+            scope_member_acc.extend(scope_vec.tolist())
+        scope_tuple = tuple(int(x) for x in scope_vec.tolist())
+        conflict_scopes.append(scope_tuple)
 
         if parent_level >= 0 and scope_vec.size:
             cache_slice = scope_vec[: min(cache_limit, scope_vec.size)].copy()
@@ -505,18 +510,21 @@ def _collect_residual_scopes_streaming(
             if 0 <= pos < total_points:
                 collected_flags[pos] = 0
 
+    if scope_member_acc:
+        owners_arr = np.asarray(scope_owner_acc, dtype=np.int64)
+        members_arr = np.asarray(scope_member_acc, dtype=np.int64)
+        scope_indptr, scope_indices_i32 = build_scope_csr_from_pairs(
+            owners_arr,
+            members_arr,
+            batch_size,
+        )
+        scope_indices = scope_indices_i32.astype(np.int64, copy=False)
+    else:
+        scope_indptr = np.zeros(batch_size + 1, dtype=np.int64)
+        scope_indices = np.empty(0, dtype=np.int64)
     total_scope = int(scope_indptr[-1])
-    scope_indices = np.empty(total_scope, dtype=np.int64)
-    cursor = 0
-    conflict_scopes: list[Tuple[int, ...]] = []
-    for scope_vec in scopes:
-        if scope_vec.size:
-            scope_indices[cursor : cursor + scope_vec.size] = scope_vec
-            conflict_scopes.append(tuple(int(x) for x in scope_vec.tolist()))
-            cursor += scope_vec.size
-        else:
-            conflict_scopes.append(())
 
+    conflict_scopes_tuple = tuple(conflict_scopes)
     gate_delta = host_backend.gate_stats.delta(gate_snapshot)
     return (
         scope_indptr,
@@ -551,6 +559,34 @@ def _trim_residual_scope_vector(
     if trimmed.size > scope_limit:
         trimmed = trimmed[:scope_limit]
     return trimmed
+
+
+def _order_scope_positions_by_level(
+    scope_vec: np.ndarray,
+    top_levels_np: np.ndarray,
+) -> np.ndarray:
+    if scope_vec.size <= 1:
+        return scope_vec
+    levels = top_levels_np[scope_vec]
+    max_level = int(np.max(levels))
+    min_level = int(np.min(levels))
+    bucket_count = max_level - min_level + 1
+    counts = np.zeros(bucket_count, dtype=np.int64)
+    for lvl in levels:
+        bucket = max_level - int(lvl)
+        counts[bucket] += 1
+    offsets = np.empty(bucket_count + 1, dtype=np.int64)
+    offsets[0] = 0
+    np.cumsum(counts, out=offsets[1:])
+    cursors = np.zeros(bucket_count, dtype=np.int64)
+    ordered = np.empty_like(scope_vec)
+    for idx in range(scope_vec.size):
+        lvl = int(levels[idx])
+        bucket = max_level - lvl
+        pos = offsets[bucket] + cursors[bucket]
+        ordered[pos] = scope_vec[idx]
+        cursors[bucket] += 1
+    return ordered
 
 
 def _collect_euclidean_sparse(
