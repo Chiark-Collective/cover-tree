@@ -12,6 +12,7 @@ from .policy import (
     get_residual_policy,
 )
 from .scope_caps import *  # noqa: F401,F403
+from .host_backend import build_residual_backend
 
 __all__ = (
     list(getattr(_core, "__all__", []))
@@ -24,4 +25,5 @@ __all__ = (
         "get_residual_policy",
     ]
     + list(getattr(_scope_caps, "__all__", []))
+    + ["build_residual_backend"]
 )

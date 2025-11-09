@@ -2,19 +2,20 @@
 from __future__ import annotations
 
 import argparse
-import os
 from pathlib import Path
 
 import numpy as np
 
 from covertreex import config as cx_config
+from covertreex.api import Residual as ApiResidual, Runtime as ApiRuntime
 from covertreex.core.metrics import reset_residual_metric
+from covertreex.metrics import build_residual_backend
 from covertreex.metrics.residual import (
     ResidualGateProfile,
     compute_residual_distances_from_kernel,
 )
-from benchmarks.queries import _build_residual_backend, _generate_points_numpy
 from covertreex.telemetry import generate_run_id, resolve_artifact_path
+from tests.utils.datasets import gaussian_points
 
 
 def _parse_args() -> argparse.Namespace:
@@ -36,8 +37,8 @@ def _parse_args() -> argparse.Namespace:
 
 def _build_backend(args: argparse.Namespace):
     rng = np.random.default_rng(args.seed)
-    points = _generate_points_numpy(rng, args.tree_points, args.dimension)
-    backend = _build_residual_backend(
+    points = gaussian_points(rng, args.tree_points, args.dimension, dtype=np.float64)
+    backend = build_residual_backend(
         points,
         seed=args.seed,
         inducing_count=args.inducing,
@@ -87,9 +88,12 @@ def main() -> None:
     args = _parse_args()
     run_id = args.run_id or generate_run_id(prefix="residual-profile")
     output = resolve_artifact_path(args.output, category="profiles")
-    os.environ.setdefault("COVERTREEX_ENABLE_DIAGNOSTICS", "0")
-    os.environ.setdefault("COVERTREEX_RESIDUAL_GATE1", "1")
-    cx_config.reset_runtime_config_cache()
+    ApiRuntime(
+        metric="residual",
+        backend="numpy",
+        diagnostics=False,
+        residual=ApiResidual(gate1_enabled=True),
+    ).activate()
     backend = _build_backend(args)
     profile = ResidualGateProfile.create(
         bins=int(args.bins),

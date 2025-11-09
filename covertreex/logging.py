@@ -1,18 +1,9 @@
-"""Project-wide logging utilities that honour `RuntimeConfig`."""
+"""
+Compatibility shim for :mod:`covertreex.runtime.logging`.
+"""
 
-from __future__ import annotations
+from covertreex.runtime.logging import *  # noqa: F401,F403
 
-import logging
-from typing import Optional
+from covertreex.runtime import logging as _logging
 
-from . import config as cx_config
-
-
-def get_logger(name: Optional[str] = None) -> logging.Logger:
-    """Return a logger configured according to the runtime configuration."""
-
-    logger_name = "covertreex" if name is None else f"covertreex.{name}"
-    runtime = cx_config.runtime_config()
-    logger = logging.getLogger(logger_name)
-    logger.setLevel(runtime.log_level)
-    return logger
+__all__ = getattr(_logging, "__all__", [])

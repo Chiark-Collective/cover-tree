@@ -21,7 +21,7 @@ COVERTREEX_BACKEND=numpy \
 COVERTREEX_ENABLE_NUMBA=1 \
 COVERTREEX_ENABLE_DIAGNOSTICS=0 \
 UV_CACHE_DIR=$PWD/.uv-cache \
-uv run python -m benchmarks.queries \
+uv run python -m cli.queries \
   --dimension 8 --tree-points 2048 \
   --batch-size 128 --queries 512 --k 8 \
   --seed 42 --baseline gpboost
@@ -33,8 +33,8 @@ _Set `COVERTREEX_ENABLE_DIAGNOSTICS=1` to collect the instrumentation counters (
 
 All benchmark entrypoints now stamp a unique `run_id` and write structured telemetry under `artifacts/` unless you explicitly opt out:
 
-- `benchmarks.queries` creates `artifacts/benchmarks/queries_<run_id>.jsonl` automatically. Use `--log-file custom.jsonl` to override the location or `--no-log-file` to suppress JSONL output altogether.
-- `benchmarks.runtime_breakdown` writes CSV summaries to `artifacts/benchmarks/runtime_breakdown_<run_id>.csv` unless you pass `--no-csv-output`. Override with `--csv-output /path/to/file.csv` if you need a fixed path.
+- `cli.queries` creates `artifacts/benchmarks/queries_<run_id>.jsonl` automatically. Use `--log-file custom.jsonl` to override the location or `--no-log-file` to suppress JSONL output altogether.
+- `cli.runtime_breakdown` writes CSV summaries to `artifacts/benchmarks/runtime_breakdown_<run_id>.csv` unless you pass `--no-csv-output`. Override with `--csv-output /path/to/file.csv` if you need a fixed path (the `cli.runtime_breakdown` shim remains for backwards compatibility).
 - `benchmarks.batch_ops` emits a JSON summary (`artifacts/benchmarks/batch_ops_<run_id>.json`) by default. Pass `--log-json custom.json` to change the destination or `--no-log-json` to skip it.
 
 These files include the runtime configuration snapshot (`runtime_*` keys) so you can correlate logs back to the exact backend/precision/strategy selections that were active for that run.
@@ -70,7 +70,7 @@ COVERTREEX_ENABLE_NUMBA=1 \
 COVERTREEX_SCOPE_CHUNK_TARGET=0 \
 COVERTREEX_SCOPE_CHUNK_MAX_SEGMENTS=256 \
 UV_CACHE_DIR=$PWD/.uv-cache \
-uv run python -m benchmarks.queries \
+uv run python -m cli.queries \
   --dimension 8 --tree-points 32768 \
   --batch-size 512 --queries 1024 --k 8 \
   --seed 42 --metric residual --baseline none
@@ -89,7 +89,7 @@ COVERTREEX_CONFLICT_GRAPH_IMPL=grid \
 COVERTREEX_BATCH_ORDER=hilbert \
 COVERTREEX_PREFIX_SCHEDULE=adaptive \
 COVERTREEX_SCOPE_CHUNK_MAX_SEGMENTS=256 \
-python -m benchmarks.queries \
+python -m cli.queries \
   --dimension 8 --tree-points 8192 \
   --batch-size 256 --queries 1024 --k 16 \
   --seed 12345 --baseline gpboost \
@@ -103,7 +103,7 @@ COVERTREEX_CONFLICT_GRAPH_IMPL=grid \
 COVERTREEX_BATCH_ORDER=hilbert \
 COVERTREEX_PREFIX_SCHEDULE=adaptive \
 COVERTREEX_SCOPE_CHUNK_MAX_SEGMENTS=256 \
-python -m benchmarks.queries \
+python -m cli.queries \
   --dimension 8 --tree-points 32768 \
   --batch-size 512 --queries 1024 --k 8 \
   --seed 42 --baseline gpboost \
@@ -112,14 +112,14 @@ python -m benchmarks.queries \
 # 32k residual vs GPBoost (baseline remains Euclidean-only)
 COVERTREEX_BACKEND=numpy \
 COVERTREEX_ENABLE_NUMBA=1 \
-python -m benchmarks.queries \
+python -m cli.queries \
   --dimension 8 --tree-points 32768 \
   --batch-size 512 --queries 1024 --k 8 \
   --seed 42 --baseline gpboost \
   --metric residual
 ```
 
-To capture warm-up versus steady-state timings for plotting, append `--csv-output runtime_breakdown_metrics.csv` when running `benchmarks.runtime_breakdown`.
+To capture warm-up versus steady-state timings for plotting, append `--csv-output runtime_breakdown_metrics.csv` when running `cli.runtime_breakdown`.
 
 ## Current Observations & Hypotheses
 
@@ -156,7 +156,7 @@ COVERTREEX_BACKEND=numpy \
 COVERTREEX_ENABLE_NUMBA=1 \
 COVERTREEX_METRIC=residual_correlation \
 UV_CACHE_DIR=$PWD/.uv-cache \
-python -m benchmarks.queries \
+python -m cli.queries \
   --metric residual \
   --dimension 8 --tree-points 32768 \
   --batch-size 512 --queries 1024 --k 8 \
@@ -165,7 +165,7 @@ python -m benchmarks.queries \
   --residual-lengthscale 1.0 --residual-variance 1.0
 ```
 
-The Euclidean-visible telemetry table from earlier runs is intentionally omitted until we re-run `benchmarks.runtime_breakdown` with the residual metric enabled; the new builder split exposes `scope_chunk_segments`, `scope_chunk_emitted`, and `scope_chunk_max_members`, so refreshing that CSV after the scope-chunk work will give us defensible per-phase averages again.
+The Euclidean-visible telemetry table from earlier runs is intentionally omitted until we re-run `cli.runtime_breakdown` with the residual metric enabled; the new builder split exposes `scope_chunk_segments`, `scope_chunk_emitted`, and `scope_chunk_max_members`, so refreshing that CSV after the scope-chunk work will give us defensible per-phase averages again.
 
 ### Residual-correlation machinery — key source excerpts
 
@@ -329,14 +329,14 @@ Environment knobs
 - With `COVERTREEX_BACKEND=numpy` and `COVERTREEX_ENABLE_NUMBA=1`, batch inserts now route through a Numba “journal” kernel that clones the parent/child/next arrays once per batch and applies updates in a single sweep. When the flag is disabled or a non-NumPy backend is selected, the legacy SliceUpdate path is used automatically.
 - The journal path is metric-agnostic: it operates on the structural arrays only, so custom metrics (e.g. residual correlation) remain supported without additional guards.
 - Scratch buffers for head/next chains are pooled across batches, eliminating the small-but-frequent NumPy allocations that previously showed up as RSS spikes in large builds. Enable diagnostics to monitor pool growth via the existing logging hooks.
-- Rerun `benchmarks.runtime_breakdown` before/after enabling the journal to record wall-clock deltas for auditors; the 32 768-point configuration is the most illustrative workload.
+- Rerun `cli.runtime_breakdown` before/after enabling the journal to record wall-clock deltas for auditors; the 32 768-point configuration is the most illustrative workload.
 
 ### Warm-up & JIT compilation
 
 - The first PCCT build in any fresh Python session pays the full Numba compilation cost plus the actual 32 k build (≈40 s in the latest 8-dim profile). Subsequent builds reuse the cached kernels and drop to the steady-state numbers shown above (sub-second per batch).
 - To hide the one-time hit in production pipelines, kick off a tiny “warm-up” batch during process start-up—for example, build a 64-point tree with the same runtime flags before ingesting real data. This compiles all hot kernels without noticeably touching RSS or wall time.
-- To quantify the difference in practice, run `benchmarks.runtime_breakdown` with `--runs 5` (or similar). The CSV now includes a `run` column, letting you compare the first-build warm-up against subsequent steady-state runs directly.
-- Quick sanity runs still default to `COVERTREEX_METRIC=euclidean`. Use `benchmarks.queries --metric residual` (which auto-builds synthetic caches) when you need the residual path; the script now forces JAX onto the CPU so the MIS helper cannot grab GPU memory.
+- To quantify the difference in practice, run `cli.runtime_breakdown` with `--runs 5` (or similar). The CSV now includes a `run` column, letting you compare the first-build warm-up against subsequent steady-state runs directly.
+- Quick sanity runs still default to `COVERTREEX_METRIC=euclidean`. Use `cli.queries --metric residual` (which auto-builds synthetic caches) when you need the residual path; the script now forces JAX onto the CPU so the MIS helper cannot grab GPU memory.
 
 ### Threading defaults
 
@@ -352,9 +352,9 @@ Environment knobs
 - Batch-order controls ship as both env vars and CLI overrides in `benchmarks/queries.py`:
   - `COVERTREEX_BATCH_ORDER={natural|random|hilbert}` or `--batch-order …` sets the per-batch permutation; `hilbert` compacts domination-friendly prefixes and logs spread via `batch_order_hilbert_code_spread`.
   - `COVERTREEX_PREFIX_SCHEDULE={doubling|adaptive}` / `--prefix-schedule …` toggles density-aware prefix growth (see `COVERTREEX_PREFIX_DENSITY_*` + `COVERTREEX_PREFIX_GROWTH_*` envs for thresholds).
-  - Example CLI: `uv run python -m benchmarks.queries … --batch-order hilbert --prefix-schedule adaptive` (Hilbert run above yielded the same 5.20 s build with steadier per-batch scatter and domination ratios logged inline).
+  - Example CLI: `uv run python -m cli.queries … --batch-order hilbert --prefix-schedule adaptive` (Hilbert run above yielded the same 5.20 s build with steadier per-batch scatter and domination ratios logged inline).
 - **Hilbert becomes the default batch order (2025‑11‑07).** Fresh 32 768-point logs (`benchmark_grid_32768_natural.jsonl`, `benchmark_grid_32768_default_run2.jsonl`) show the first dominated batch’s scatter dropping from **3 951 ms → 6.6 ms**, average scatter falling **62 ms → 0.55 ms**, and `conflict_graph_ms` shrinking **83.7 ms → 22.4 ms** when Hilbert ordering is enabled alongside the grid builder. Because the domination ratio and leader counts stay unchanged (≈0.984 and ≈202 leaders/batch), we now default `COVERTREEX_BATCH_ORDER=hilbert` and updated the scaling table above (Euclidean build **37.7 s**, query **0.262 s**, `~3.9 k q/s`).
-- **Adaptive prefix growth defaults tuned + exposed via `--build-mode prefix`.** Use `python -m benchmarks.queries … --build-mode prefix` to route construction through `batch_insert_prefix_doubling` and emit per-prefix telemetry (`prefix_factor`, `prefix_domination_ratio`, `prefix_schedule`) into the JSONL log. The 32 k Hilbert+grid run in this mode (`benchmark_grid_32768_prefix.jsonl`) produced **16 385 adaptive groups** with scatter averaging **0.047 ms** (median 0.043 ms, max 12.2 ms) and domination ratio ≈1.0 while keeping the prefix-factor blend at 1.25/2.25. These numbers justify the new `_DEFAULT_PREFIX_*` constants and give auditors a structured artefact when analysing prefix shaping; the residual variant still needs follow-up because the clamped run exceeds 20 minutes under this schedule (see plan §2).
+- **Adaptive prefix growth defaults tuned + exposed via `--build-mode prefix`.** Use `python -m cli.queries … --build-mode prefix` to route construction through `batch_insert_prefix_doubling` and emit per-prefix telemetry (`prefix_factor`, `prefix_domination_ratio`, `prefix_schedule`) into the JSONL log. The 32 k Hilbert+grid run in this mode (`benchmark_grid_32768_prefix.jsonl`) produced **16 385 adaptive groups** with scatter averaging **0.047 ms** (median 0.043 ms, max 12.2 ms) and domination ratio ≈1.0 while keeping the prefix-factor blend at 1.25/2.25. These numbers justify the new `_DEFAULT_PREFIX_*` constants and give auditors a structured artefact when analysing prefix shaping; the residual variant still needs follow-up because the clamped run exceeds 20 minutes under this schedule (see plan §2).
 
 ## Parallel Compressed Cover Tree — Conflict Graph Builder (dense + segmented)
 

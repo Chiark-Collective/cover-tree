@@ -460,3 +460,21 @@ class Residual:
 * The **grid** conflict builder belongs as a distinct strategy with its own counters; you’ve prepped timings and counters—moving to strategies will also make the MIS experiments cleaner.
 
 If you want, I can draft the exact `covertreex/api/pcct.py` and `api/runtime.py` files and a compatibility shim mapping old imports to new modules so your test suite continues to pass while you migrate incrementally.
+
+---
+
+## Status snapshot (2025-11-09)
+
+**Shipped**
+
+* `cli/` hosts the benchmark entrypoints (`cli/queries.py`, `cli/runtime_breakdown.py`, `cli/runtime.py`), with `benchmarks/*.py` kept as thin shims. Shared dataset helpers now live in `tests/utils/datasets.py`, so both CLIs and tests consume the same Gaussian generators without mutating `os.environ`.
+* Runtime concerns sit under `covertreex/runtime/`: `config.py` no longer writes to the environment, logging/diagnostics moved into the package, and the CLI/tooling sweep now configures behaviour purely through `covertreex.api.Runtime`. `tools/build_residual_gate_profile.py` follows the same pattern.
+* Traversal/conflict selection uses registries so backends can register new strategies. `_TRAVERSAL_REGISTRY` and `_CONFLICT_REGISTRY` expose `register_*` helpers, and the runtime wiring gained a GPU backend placeholder (`TreeBackend.gpu`, `backend=gpu`) to log clear errors until the implementation lands.
+* Property-based coverage landed for batch ordering/MIS (`tests/test_property_strategies.py`) and existing benchmark tests now import the shared dataset helpers, eliminating bespoke RNG code. Hypothesis is part of the dev extra, and `py.typed` ships with the package.
+* Tooling/docs polish: `pyproject.toml` now carries Ruff + mypy settings, `py.typed`, and a `.pre-commit-config.yaml`; README and docs reference `cli.queries`/`cli.runtime_breakdown`; telemetry metadata uses the new `cli.*` names.
+
+**Still pending**
+
+*None for this refactor milestone.* Use this ledger to log new follow-up items as they surface.
+
+Use this section as the running ledger—update it whenever a milestone lands so the audit doubles as a changelog for the refactor plan.

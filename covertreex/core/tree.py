@@ -77,6 +77,14 @@ class TreeBackend:
             default_int=np.int32,
         )
 
+    @classmethod
+    def gpu(cls, *, precision: str = "float32") -> "TreeBackend":
+        """Placeholder for the future GPU backend."""
+
+        raise NotImplementedError(
+            "GPU backend is not available yet; set backend='jax' or backend='numpy'."
+        )
+
     def array(self, value: ArrayLike, *, dtype: Any | None = None) -> ArrayLike:
         """Return a backend array placed on the intended device."""
 

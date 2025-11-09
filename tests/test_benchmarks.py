@@ -19,6 +19,7 @@ from covertreex.telemetry import (
     RUNTIME_BREAKDOWN_SCHEMA_ID,
     runtime_breakdown_fieldnames,
 )
+from tests.utils.datasets import gaussian_points
 
 
 @pytest.fixture(autouse=True)
@@ -67,8 +68,9 @@ def test_benchmark_knn_latency_smoke():
 
 
 def test_run_baseline_comparisons_sequential():
-    points = np.random.default_rng(0).normal(size=(16, 3))
-    queries = np.random.default_rng(1).normal(size=(4, 3))
+    rng = np.random.default_rng(0)
+    points = gaussian_points(rng, 16, 3)
+    queries = gaussian_points(rng, 4, 3)
     results = run_baseline_comparisons(points, queries, k=2, mode="sequential")
     assert len(results) == 1
     baseline = results[0]
@@ -79,8 +81,9 @@ def test_run_baseline_comparisons_sequential():
 def test_run_baseline_comparisons_gpboost():
     if not has_gpboost_cover_tree():
         pytest.skip("GPBoost baseline requires numba")
-    points = np.random.default_rng(0).normal(size=(16, 3))
-    queries = np.random.default_rng(1).normal(size=(4, 3))
+    rng = np.random.default_rng(1)
+    points = gaussian_points(rng, 16, 3)
+    queries = gaussian_points(rng, 4, 3)
     results = run_baseline_comparisons(points, queries, k=2, mode="gpboost")
     assert len(results) == 1
     baseline = results[0]

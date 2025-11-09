@@ -12,7 +12,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from benchmarks.runtime_cli import runtime_from_args
+from cli.runtime import runtime_from_args
 from covertreex.algo import batch_delete, batch_insert
 from covertreex.core.tree import PCCTree, get_runtime_backend
 from covertreex.telemetry import (

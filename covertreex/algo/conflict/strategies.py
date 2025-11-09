@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Callable
 
 from .base import ConflictGraphContext, ConflictGraphStrategy
 from .builders import (
@@ -60,17 +61,63 @@ class _ResidualConflictStrategy(ConflictGraphStrategy):
         )
 
 
+@dataclass(frozen=True)
+class _ConflictStrategySpec:
+    name: str
+    predicate: Callable[[Any, bool, bool], bool]
+    factory: Callable[[], ConflictGraphStrategy]
+
+
+_CONFLICT_REGISTRY: list[_ConflictStrategySpec] = []
+
+
+def register_conflict_strategy(
+    name: str,
+    *,
+    predicate: Callable[[Any, bool, bool], bool],
+    factory: Callable[[], ConflictGraphStrategy],
+) -> None:
+    global _CONFLICT_REGISTRY
+    _CONFLICT_REGISTRY = [spec for spec in _CONFLICT_REGISTRY if spec.name != name]
+    _CONFLICT_REGISTRY.append(_ConflictStrategySpec(name=name, predicate=predicate, factory=factory))
+
+
+def registered_conflict_strategies() -> tuple[str, ...]:
+    return tuple(spec.name for spec in _CONFLICT_REGISTRY)
+
+
+register_conflict_strategy(
+    "residual",
+    predicate=lambda runtime, residual_mode, has_residual: residual_mode and has_residual,
+    factory=_ResidualConflictStrategy,
+)
+
+register_conflict_strategy(
+    "segmented",
+    predicate=lambda runtime, *_: getattr(runtime, "conflict_graph_impl", "") == "segmented",
+    factory=_SegmentedConflictStrategy,
+)
+
+register_conflict_strategy(
+    "grid",
+    predicate=lambda runtime, *_: getattr(runtime, "conflict_graph_impl", "") == "grid",
+    factory=_GridConflictStrategy,
+)
+
+register_conflict_strategy(
+    "dense",
+    predicate=lambda *_: True,
+    factory=_DenseConflictStrategy,
+)
+
+
 def select_conflict_strategy(
     runtime: Any,
     *,
     residual_mode: bool,
     has_residual_distances: bool,
 ) -> ConflictGraphStrategy:
-    if residual_mode and has_residual_distances:
-        return _ResidualConflictStrategy()
-    impl = runtime.conflict_graph_impl
-    if impl == "segmented":
-        return _SegmentedConflictStrategy()
-    if impl == "grid":
-        return _GridConflictStrategy()
-    return _DenseConflictStrategy()
+    for spec in _CONFLICT_REGISTRY:
+        if spec.predicate(runtime, residual_mode, has_residual_distances):
+            return spec.factory()
+    raise RuntimeError("No conflict strategy registered for the current runtime.")

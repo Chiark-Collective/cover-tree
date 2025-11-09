@@ -26,7 +26,11 @@ numba = ["numba>=0.59.0"]
 dev = [
   "pytest>=8.2",
   "pytest-benchmark>=4.0.0",
-  "rich>=13.7"
+  "rich>=13.7",
+  "hypothesis>=6.100",
+  "ruff>=0.6.4",
+  "mypy>=1.11",
+  "pre-commit>=3.8",
 ]
 baseline = [
   "covertree>=1.0.0",
@@ -46,3 +50,28 @@ package-dir = {"" = "."}
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["covertreex*"]
+
+[tool.setuptools.package-data]
+"covertreex" = ["py.typed"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["covertreex", "cli", "tests", "tools"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E203"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.12"
+strict_optional = true
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_return_any = true
+show_error_codes = true
+packages = ["covertreex"]

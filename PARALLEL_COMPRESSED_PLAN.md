@@ -35,7 +35,7 @@ Targets after this sprint:
   - Priority rule (64-bit mix of point id, level, shift) and per-cell leader pick.
   - Optional neighbor-cell micro-MIS using existing Luby kernel on the tiny induced graph.
   - Telemetry counters: `grid_cells`, `leaders_raw`, `leaders_after_mis`, `grid_local_edges`.
-- CLI/runtime flag (`COVERTREEX_CONFLICT_GRAPH_IMPL=grid` + `benchmarks.queries --conflict-impl grid`).
+- CLI/runtime flag (`COVERTREEX_CONFLICT_GRAPH_IMPL=grid` + `cli.queries --conflict-impl grid`).
 - Tier-B integration coverage validating per-level separation and maximality vs brute force for both dense and sparse batches.
 
 **Breakdown / Status**

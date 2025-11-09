@@ -64,13 +64,14 @@ The k-NN benchmark supports baseline comparisons against both the in-repo sequen
 # Optional extras for the external baseline
 pip install -e '.[baseline]'
 
-UV_CACHE_DIR=$PWD/.uv-cache uv run python -m benchmarks.queries \
+UV_CACHE_DIR=$PWD/.uv-cache uv run python -m cli.queries \
   --dimension 8 --tree-points 2048 --queries 512 --k 8 --baseline both
 ```
 
-Baseline outputs list build/query timings, throughput, and slowdown ratios alongside the PCCT measurements so you can quantify gains from the compressed parallel design.
+Baseline outputs list build/query timings, throughput, and slowdown ratios alongside the PCCT measurements so you can quantify gains from the compressed parallel design. The legacy `python -m benchmarks.queries` shim still works, but the supported entrypoint now lives under `cli/` so scripts share one runtime configuration layer.
 
 ## Reference Material
 
 - `PARALLEL_COMPRESSED_PLAN.md` &mdash; architecture, milestones, and testing ladder.
+- `docs/API.md` &mdash; public runtime/PCCT façade usage and CLI entrypoints.
 - `notes/` &mdash; upstream context and domain-specific constraints gathered during planning.

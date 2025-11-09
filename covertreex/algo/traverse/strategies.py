@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Tuple
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, Tuple
 
 import time
 import numpy as np
@@ -40,6 +41,33 @@ from .base import (
 LOGGER = get_logger("algo.traverse")
 _RESIDUAL_SCOPE_EPS = 1e-9
 _RESIDUAL_SCOPE_DEFAULT_LIMIT = 16_384
+
+
+@dataclass(frozen=True)
+class _TraversalStrategySpec:
+    name: str
+    predicate: Callable[[Any, TreeBackend], bool]
+    factory: Callable[[], TraversalStrategy]
+
+
+_TRAVERSAL_REGISTRY: list[_TraversalStrategySpec] = []
+
+
+def register_traversal_strategy(
+    name: str,
+    *,
+    predicate: Callable[[Any, TreeBackend], bool],
+    factory: Callable[[], TraversalStrategy],
+) -> None:
+    """Register or replace a traversal strategy selection rule."""
+
+    global _TRAVERSAL_REGISTRY
+    _TRAVERSAL_REGISTRY = [spec for spec in _TRAVERSAL_REGISTRY if spec.name != name]
+    _TRAVERSAL_REGISTRY.append(_TraversalStrategySpec(name=name, predicate=predicate, factory=factory))
+
+
+def registered_traversal_strategies() -> Tuple[str, ...]:
+    return tuple(spec.name for spec in _TRAVERSAL_REGISTRY)
 
 
 class _EuclideanDenseTraversal(TraversalStrategy):
@@ -822,20 +850,43 @@ def _collect_residual(
         ),
     )
 
-def select_traversal_strategy(runtime: Any, backend: TreeBackend) -> TraversalStrategy:
-    if (
+
+register_traversal_strategy(
+    "residual_sparse",
+    predicate=lambda runtime, backend: (
         runtime.metric == "residual_correlation"
         and runtime.enable_sparse_traversal
         and runtime.enable_numba
         and backend.name == "numpy"
-    ):
-        return _ResidualTraversal()
-    if (
+    ),
+    factory=_ResidualTraversal,
+)
+
+register_traversal_strategy(
+    "euclidean_sparse_numba",
+    predicate=lambda runtime, backend: (
         runtime.enable_sparse_traversal
         and runtime.enable_numba
         and runtime.metric == "euclidean"
         and NUMBA_SPARSE_TRAVERSAL_AVAILABLE
         and backend.name == "numpy"
-    ):
-        return _EuclideanSparseTraversal()
-    return _EuclideanDenseTraversal()
+    ),
+    factory=_EuclideanSparseTraversal,
+)
+
+register_traversal_strategy(
+    "euclidean_dense",
+    predicate=lambda runtime, backend: True,
+    factory=_EuclideanDenseTraversal,
+)
+
+
+def select_traversal_strategy(runtime: Any, backend: TreeBackend) -> TraversalStrategy:
+    for spec in _TRAVERSAL_REGISTRY:
+        try:
+            if spec.predicate(runtime, backend):
+                return spec.factory()
+        except Exception:
+            LOGGER.exception("Traversal strategy '%s' predicate failed.", spec.name)
+            continue
+    raise RuntimeError("No traversal strategy registered for the current runtime/backend.")
