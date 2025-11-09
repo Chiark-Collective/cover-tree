@@ -133,14 +133,58 @@ To capture warm-up versus steady-state timings for plotting, append `--csv-outpu
 
 These November 8 artefacts supersede the 37.7 s / 0.262 s Hilbert+grid numbers from earlier in the week; treat them as the current Euclidean “gold standard” for PCCT until another build drops below ~15 s while keeping telemetry comparable.
 
-### Residual-correlation metric (synthetic RBF caches, 2025-11-07)
+### Residual-correlation metric (synthetic RBF caches, 2025-11-09)
 
-- Synthetic run (same dataset as above, dimension 8, batch 512, 1 024 queries, k = 8, seed 42, `--metric residual`, Hilbert ordering + grid builder) now reports **66.25 s build / 0.305 s query (3 358 q/s)** for PCCT (`benchmark_residual_32768_default.jsonl` / `run_residual_32768_default.txt`). The GPBoost baseline remains Euclidean-only and is included for throughput context at **2.51 s build / 11.18 s query (91.6 q/s)**.
-- Adding the scan cap (`COVERTREEX_SCOPE_CHUNK_TARGET=8192`), per-level scope cache, and lookup-driven prefilter (`COVERTREEX_RESIDUAL_PREFILTER=1`, lookup=`docs/data/residual_gate_profile_32768_caps.json`) brings the same workload to **700.71 s build / 0.027 s query (37.6 k q/s)** (`benchmark_residual_cache_prefilter_20251108.jsonl` / `bench_residual_cache_prefilter_20251108.log`). 48/64 dominated batches saturate the scan budget, `traversal_scope_cache_prefetch≈2.1 M`, and `traversal_scope_chunk_points≈4.19 M` (512 queries × 8 192 cap) captures how much of the tree we still need to touch.
-- A scan-capped replay (`COVERTREEX_SCOPE_CHUNK_TARGET=8192`, sparse traversal on, same workload) lands at **687.29 s build / 0.027 s query (37.6 k q/s)** with GPBoost unchanged at 92.8 q/s. The corresponding artefacts (`benchmark_residual_scopecap_20251108.jsonl`, `bench_residual_scopecap_20251108.log`) show 48/64 dominated batches saturating the scan cap (4.19 M candidate points touched per batch) while `conflict_graph_ms` stays ≈37 ms.
-- Per-batch logs show `traversal_ms` between 33–118 ms and `conflict_graph_ms` between 22–30 ms despite the journal/builder refactor, highlighting that residual scopes are still nearly dense (all 261 632 candidate edges survive). MIS continues to be negligible (<0.2 ms).
-- The residual adjacency filter currently recomputes pairwise kernels even when the dense `residual_pairwise` matrix is available from traversal. Reusing that matrix inside `_build_dense_adjacency`/`filter_csr_by_radii_from_pairwise` is the next low-hanging win, especially now that steady-state `conflict_adj_scatter_ms` sits around 80 ms despite the clamp.
-- Scope chunking remains disabled by default; wiring `scope_chunk_target` through the new builder split (and exposing hit/miss telemetry) is the follow-up to keep RSS deltas in check and to pave the way for tighter residual radius guards.
+- **Current best (clamped, scope chunking off).** Re-running the 32 768×1 024×k=8 workload with Hilbert ordering, the grid conflict builder, diagnostics on, and no scope chunking now lands at **57.80 s build / 0.028 s query (36.2 k q/s)** for PCCT while the GPBoost baseline remains at **≈2.68 s build / 10.50 s query (97.5 q/s)**. Artefacts: `benchmark_residual_clamped_20251109.log` and `artifacts/benchmarks/benchmark_residual_clamped_20251109.jsonl`.
+- **Chunked traversal (scope cap 8 192).** Enabling sparse traversal with `COVERTREEX_SCOPE_CHUNK_TARGET=8192` keeps query time identical (0.028 s) but increases build time to **727.44 s** because each dominated batch now scans ≈4.19 M points in 512 chunks before conflict filtering; adjacency scatter drops to ≈18 ms. Logs: `benchmark_residual_scope8192_20251109.log` + `artifacts/benchmarks/benchmark_residual_scope8192_20251109.jsonl`.
+- The historical unclamped Hilbert run from 2025‑11‑07 (`benchmark_residual_32768_default.jsonl` / `run_residual_32768_default.txt`) is still useful for regression tracking (66.25 s build / 0.305 s query). Likewise, the earlier chunked-with-prefilter sweeps (`benchmark_residual_cache_prefilter_20251108.jsonl`, `benchmark_residual_scopecap_20251108.jsonl`) describe how lookup-driven prefilters impact traversal telemetry.
+- Per-batch telemetry for the new clamped run shows dominated batches averaging **~0.76 s traversal / 93 ms conflict graph / 70 ms adjacency scatter** while leaving Gate‑1 counters at zero; conflict scopes regularly swell past 16 M members because chunking is disabled. The chunked run trades build time for tighter memory bounds (max scope shard 8 192 members, 512 segments per dominated batch) and keeps adjacency scatter bounded.
+- The residual adjacency filter still recomputes pairwise kernels even when `residual_pairwise` is cached from traversal; linking those surfaces remains the most obvious follow-up before we attempt to rely on Gate‑1 lookups.
+
+**Commands to reproduce**
+
+Current best (clamped, diagnostics on, `scope_chunk_target=0`):
+
+```
+COVERTREEX_BACKEND=numpy \
+COVERTREEX_ENABLE_NUMBA=1 \
+COVERTREEX_ENABLE_DIAGNOSTICS=1 \
+COVERTREEX_CONFLICT_GRAPH_IMPL=grid \
+COVERTREEX_BATCH_ORDER=hilbert \
+COVERTREEX_PREFIX_SCHEDULE=adaptive \
+COVERTREEX_SCOPE_CHUNK_TARGET=0 \
+COVERTREEX_SCOPE_CHUNK_MAX_SEGMENTS=256 \
+UV_CACHE_DIR=$PWD/.uv-cache \
+python -m cli.queries \
+  --metric residual \
+  --dimension 8 --tree-points 32768 \
+  --batch-size 512 --queries 1024 --k 8 \
+  --seed 42 --baseline gpboost \
+  --log-file benchmark_residual_clamped_20251109.jsonl
+```
+
+Chunked traversal (sparse traversal + scan cap):
+
+```
+COVERTREEX_BACKEND=numpy \
+COVERTREEX_ENABLE_NUMBA=1 \
+COVERTREEX_ENABLE_SPARSE_TRAVERSAL=1 \
+COVERTREEX_ENABLE_DIAGNOSTICS=1 \
+COVERTREEX_CONFLICT_GRAPH_IMPL=grid \
+COVERTREEX_BATCH_ORDER=hilbert \
+COVERTREEX_PREFIX_SCHEDULE=adaptive \
+COVERTREEX_SCOPE_CHUNK_TARGET=8192 \
+COVERTREEX_SCOPE_CHUNK_MAX_SEGMENTS=256 \
+UV_CACHE_DIR=$PWD/.uv-cache \
+python -m cli.queries \
+  --metric residual \
+  --dimension 8 --tree-points 32768 \
+  --batch-size 512 --queries 1024 --k 8 \
+  --seed 42 --baseline gpboost \
+  --log-file benchmark_residual_scope8192_20251109.jsonl
+```
+
+These commands emit the same JSONL telemetry referenced above (see `artifacts/benchmarks/`) and print the console summaries captured in the paired `.log` files.
 
 ## Residual-Correlation Metric Benchmark Status (2025-11-06)
 
