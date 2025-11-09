@@ -96,6 +96,7 @@ It emits both distances and a mask indicating which entries fall below a caller-
 - The CLI now takes care of those flags for you: `python -m cli.queries --metric residual --residual-gate lookup ...` wires sparse traversal, enables the gate, and points at `docs/data/residual_gate_profile_diag0.json`. Override the path (`--residual-gate-lookup-path`), margin (`--residual-gate-margin`), or radius cap (`--residual-gate-cap`) as needed. Use `--residual-gate off` to explicitly keep the gate disabled during experiments.
 
 - Gate‑1 still defaults to off globally—we only flip it on in telemetry or experimental runs until we finish the sparse traversal rollout and confirm the lookup holds for larger corpora. When you opt in, make sure `COVERTREEX_ENABLE_SPARSE_TRAVERSAL=1` is set; otherwise the dense traversal path bypasses the streaming helper and the gate never engages.
+- Regardless of whether Gate‑1 is enabled, residual batches now materialise the whitened cache so the grid builder can operate in the same space as the Euclidean runs. If the default cell width feels too loose/tight, set `COVERTREEX_RESIDUAL_GRID_WHITEN_SCALE` (>1 tightens the cells, <1 loosens them; default `1.0`) to dial in `grid_*` telemetry before capturing regression artefacts.
 
 - `docs/data/residual_gate_profile_scope8192.json` captures a larger synthetic workload (8 192 points, 33 550 336 samples, same 512 bins) for comparison. Relative to the diag0 artefact the median threshold is +9.66, the 90th percentile delta is +19.93, the maximum absolute delta is ≈61.9, and 387/512 bins have higher maxima. `docs/data/residual_gate_profile_32768_caps.json` replaces those synthetic probes with the full 32 768-point capture (caps enabled, audit on) from 2025‑11‑08 so gate experiments can finally reference a workload that matches the production corpus.
 
@@ -110,6 +111,38 @@ It emits both distances and a mask indicating which entries fall below a caller-
 - `tests/test_metrics.py` exercises the chunk kernel (distance + radius masks) and validates that residual distances computed via kernel reuse match the dense path.
 - `tests/test_traverse.py` now includes a residual sparse traversal regression (dense vs. streamed scopes) to ensure parents/levels/scopes remain consistent.
 - `tests/test_conflict_graph.py` gained a residual parity check to confirm dense Euclidean and residual-aware models produce identical CSR structures.
+
+## Residual Grid Scale Sweep (2025‑11‑09)
+
+**Objective.** Measure whether the new `COVERTREEX_RESIDUAL_GRID_WHITEN_SCALE` knob changes the dominated residual workload enough to impact build time, and capture telemetry deltas that auditors can compare against future runs.
+
+**Setup.** `python -m cli.queries --dimension 8 --tree-points 32768 --batch-size 512 --queries 1024 --k 8 --metric residual --baseline gpboost --seed 42 --log-file <artifact>` with
+
+- `COVERTREEX_BACKEND=numpy`, `COVERTREEX_ENABLE_NUMBA=1`
+- `COVERTREEX_CONFLICT_GRAPH_IMPL=grid`, `COVERTREEX_PREFIX_SCHEDULE=doubling`
+- diagnostics on, dense traversal (`COVERTREEX_SCOPE_CHUNK_TARGET=0` from default gold-standard harness)
+- swept `COVERTREEX_RESIDUAL_GRID_WHITEN_SCALE` ∈ {0.75, 1.50}
+
+Artifacts live under `artifacts/benchmarks/artifacts/benchmarks/` and share the run IDs below.
+
+| Scale | Log file | Run ID | PCCT Build (s) | Throughput (q/s) | Grid leaders (mean) | Grid local edges (mean) | Traversal ms (p50) | Conflict ms (p50) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 0.75 | `residual_grid_scale0p75_20251109180103.jsonl` | `pcct-20251109-170103-ce1129` | 56.10 | 28 802 | 510.17 | 130 115 | 737 ms | 69.6 ms |
+| 1.50 | `residual_grid_scale1p50_20251109180226.jsonl` | `pcct-20251109-170226-df7a7f` | 55.73 | 28 698 | 511.70 | 130 713 | 711 ms | 69.9 ms |
+
+**Observations.**
+
+- The grid stays fully saturated (domination ratio ≈0.984) regardless of scale: every batch emits ~1.5 k cells, ~510 leaders, and zero conflict edges, so MIS time remains negligible.
+- Tightening the scale increases local grid edges by <0.5 % and shaves ~25 ms off the traversal median, but the overall build time is bounded by traversal (0.7–1.4 s per dominated batch) rather than grid work.
+- RSS peaks around 1.53–1.60 GB in both runs; memory pressure doesn’t change with the scale adjustments.
+
+**Traversal-focused follow-ups.** Grid tuning alone cannot deliver material build wins while traversal dominates:
+
+1. **Gate‑1 rollout.** The sweep still shows `traversal_gate1_* = 0`; enabling the lookup-backed gate (with `COVERTREEX_RESIDUAL_GATE1=1` plus the diag0 profile) should prune candidates before `_distance_chunk` and directly attack the 0.7–1.4 s dominated batches.
+2. **Scope trimming / cache hits.** Saturated batches hit zero cache hits at the start and only ~344/512 by the tail. Investing in per-level cache prefetch heuristics (or raising `residual_scope_cap_default`) should reduce the number of fully scanned scopes.
+3. **Sparse traversal gating.** Re-enabling the sparse traversal path once the bucketed CSR builder lands (see AUDIT.B) will remove the O(n log n) semisort tail (`traversal_semisort_ms` still >20 ms median) and keep dominated scopes bounded without relying on scope chunk caps.
+
+Until those traversal improvements ship, keep the residual grid in place for determinism (leader telemetry + MIS seeds) but don’t expect the whiten scale alone to replicate the Euclidean build-time gains.
 
 ## Operational Notes
 

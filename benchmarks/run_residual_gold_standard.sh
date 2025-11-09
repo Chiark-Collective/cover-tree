@@ -8,6 +8,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOG_PATH="${1:-$ROOT_DIR/bench_residual.log}"
+GRID_WHITEN_SCALE="${GRID_WHITEN_SCALE:-}"
 
 # Ensure we run with the default dense traversal / no chunking knobs, since
 # the reference result was captured before the sparse/Numba paths were enabled.
@@ -17,6 +18,11 @@ export COVERTREEX_ENABLE_NUMBA=1
 export COVERTREEX_BATCH_ORDER=natural
 export COVERTREEX_PREFIX_SCHEDULE=doubling
 export COVERTREEX_ENABLE_DIAGNOSTICS=0
+
+if [[ -n "$GRID_WHITEN_SCALE" ]]; then
+  export COVERTREEX_RESIDUAL_GRID_WHITEN_SCALE="$GRID_WHITEN_SCALE"
+  echo "[run_residual_gold_standard] using COVERTREEX_RESIDUAL_GRID_WHITEN_SCALE=$GRID_WHITEN_SCALE"
+fi
 
 python "$ROOT_DIR/benchmarks/queries.py" \
   --dimension 8 \
