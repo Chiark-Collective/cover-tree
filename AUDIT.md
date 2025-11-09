@@ -1,285 +1,293 @@
-You’ve already squeezed a lot of juice out of the obvious places (scopes → adjacency → MIS, CSR on‑device, Numba everywhere, chunk clamps, caching). If the goal is to *meaningfully* pull 32k builds down (without sacrificing the very fast queries), I think you need a couple of fresh moves that change the work you do—not just how fast you do it.
-
-Below are **twelve new angles** ordered roughly by *impact vs. effort* for your codebase as it stands. Each comes with (a) why it should help *given your telemetry*, (b) how to drop it into your current modules/flags, and (c) what to watch for in tests.
+You’ve already done the hard part—queries are blazing. Your logs make it pretty clear where the build time is going and what to change. Below I’ll (1) pinpoint the bottlenecks you’re seeing, (2) give *switch‑only* fixes you can try immediately, and (3) propose small, targeted code changes that remove the dominant costs without touching query speed or correctness.
 
 ---
 
-## A. Replace (part of) MIS with *leader election* that doesn’t need the full conflict graph
+## 1) What the logs say (tl;dr)
 
-### 1) Hash‑grid leader election (unit‑disk MIS surrogate)
+* **Traversal dominates build.**
+  In the unclamped residual run (no scope chunking), dominated batches spend **~60–145 ms** in `traversal_ms` with tiny `conflict_graph_ms` and negligible `mis_ms`. In the “sparse traversal + scan cap” run, `traversal_semisort_ms` explodes to **1.4 s → 5.8 s per dominated batch**, with `traversal_scope_chunk_scans` ramping up **512 → 2 048** and `traversal_scope_chunk_points` **262 144 → 1 048 576**. That’s your 727 s build.
 
-**Why:** Your dominated levels are near‑cliques; building & solving an MIS there wastes time. For Euclidean metrics, a **shifted hash‑grid** with cell width (2^{\ell}) (or ((1-\epsilon)2^{\ell})) elects one “leader” per cell via a deterministic priority (e.g., 64‑bit hash of point id). This is a classic surrogate for MIS on unit‑disk graphs; run a few random *shifts* (2–4) to kill boundary artifacts, take the union, then do a tiny local MIS only among adjacent cells to restore maximality.
+* **Conflict graph isn’t your problem (right now).**
+  `conflict_pairwise_ms` is ~12–15 ms and `mis_ms` ~0.14–0.33 ms in the unclamped run. In the chunked run you *also* re‑compute pairwise inside the conflict builder even though traversal already computed/cached it.
 
-**How (drop‑in):**
+* **Residual grid path is effectively off.**
+  `runtime_conflict_graph=grid` is set, but `conflict_grid_*` counters are all zero in residual logs, so you aren’t getting the “forced leaders” skip that removed MIS edges in Euclidean.
 
-* `algo/conflict_graph.py`: add `impl="grid"` (behind `COVERTREEX_CONFLICT_GRAPH_IMPL=grid`) that **skips adjacency**:
-
-  1. Bin batch points by (\lfloor x / 2^{\ell}\rfloor) (int grid coords; support multiple random shifts).
-  2. For each occupied cell, pick the min‑priority point (priority = 64‑bit mix of (point_id, level, seed)).
-  3. Optionally check immediate neighbors’ leaders (3×3 Moore) and run a **tiny** Luby MIS just on that induced graph (≪1% of the full density).
-* `algo/mis.py`: reuse existing Luby for the micro‑graph.
-* `algo/traverse.py`: nothing to change.
-* Telemetry: emit `grid_cells`, `leaders_before_local_mis`, `local_mis_nodes/edges`, `coverage_ratio`.
-
-**Tests:** Verify separation (= cover radius) and maximality at level ( \ell ) by brute‑force within 1–2 rings of each leader cell. Your Tier‑B test that asserts per‑level separation should pass; add one asserting that local MIS restores maximality.
-
-**Expected win:** On dominated batches the heavy scope→CSR→MIS block collapses to O(batch) binning + tiny MIS. In practice this has been a 5–20× build reduction on dense annuli.
+* **Domination is extreme.**
+  `conflict_scope_domination_ratio ≈ 0.002` and `selected=1` (511 dominated) across batches. This is the regime where (a) leader pre‑selection pays off massively, and (b) expensive scope “semisort” is pure overhead.
 
 ---
 
-### 2) Two‑phase MIS: **coarse leaders** then **correct locally**
+## 2) Fast wins you can try **now** (no code changes)
 
-**Why:** Same spirit as (1) but geometry‑agnostic. Phase A picks a sparse set via a cheap rule; Phase B runs MIS *only* where Phase A leaves conflicts.
+These do not change results; they just avoid paths that your telemetry shows as pathological.
 
-**How:**
+1. **Turn OFF sparse traversal & chunking for residual until we fix semisort.**
+   Your own run shows `COVERTREEX_ENABLE_SPARSE_TRAVERSAL=1` + chunking multiplies build time (~727 s). Keep the residual build on the dense path for now:
 
-* Phase A: assign a random priority vector and accept any node that beats all neighbors *within a bounded neighborhood you can fetch without CSR*, e.g., via `scope_indices` + **counting‑sort per parent id**, not full adjacency. (You already have segment hashing and per‑parent semisort—reuse it.)
-* Phase B: build CSR **only** for rejected cells/clusters (expect ≪ total).
+   ```bash
+   COVERTREEX_ENABLE_SPARSE_TRAVERSAL=0
+   COVERTREEX_SCOPE_CHUNK_TARGET=0
+   ```
 
-**Expected win:** Keeps your correctness story while avoiding global CSR on dense levels.
+   *Expected:* build stays in the ~58–72 s band (your unclamped numbers) instead of minutes.
 
----
+2. **Enable Gate‑1 for residual *during traversal*.**
+   Gate‑1 counters are zero in your logs, so the float32 whitened gate is disabled. Turn it on and keep audit on while you tune:
 
-## B. Change the *batch* you present to the builder
+   ```bash
+   COVERTREEX_RESIDUAL_GATE1=1
+   COVERTREEX_RESIDUAL_GATE1_AUDIT=1   # temporarily, to prove safety
+   ```
 
-### 3) **Hilbert sort** new points before prefix‑doubling
+   If you’ve generated a lookup profile (you mentioned `tools/build_residual_gate_profile.py`), use it:
 
-**Why:** Your “domination ratio ≈ 0 → mega‑scopes” is a symptom of mixing far‑apart points in one prefix. Sorting the incoming batch by a space‑filling curve (Hilbert/Morton in dim=8) makes annuli sparser and scopes smaller.
+   ```bash
+   COVERTREEX_RESIDUAL_GATE1_LOOKUP_PATH=docs/data/residual_gate_profile_diag0.json
+   ```
 
-**How:**
+   *Expected:* `traversal_pairwise_ms` and `traversal_ms` drop, with `traversal_gate1_*` counters showing large “pruned”.
 
-* `benchmarks.batch_ops` / your build job: before scheduling the prefix, sort `insert_batch` by a Hilbert index (int64) computed from scaled coordinates.
-* Keep a feature flag: `COVERTREEX_BATCH_ORDER={random|hilbert}`.
+3. **Warm up Numba kernels once** before your real build.
+   You already document this; just make sure your CI/runner actually does it so the “first build” doesn’t contaminate your measurements.
 
-**Expected win:** Often halves clique densities; combined with leader‑election, it compounds.
+4. **Prefer `doubling` over `adaptive` for residual until chunking is fixed.**
+   Adaptive is great for Euclidean, but your own note says the residual variant “exceeds 20 minutes under this schedule.” Try:
 
----
+   ```bash
+   COVERTREEX_PREFIX_SCHEDULE=doubling
+   ```
 
-### 4) **Adaptive prefix growth** driven by live domination ratio
+   *Expected:* fewer giant super‑scopes showing up during dominated prefixes.
 
-**Why:** Your prefix‑doubling is blind to density. Let the **per‑level domination ratio** and `conflict_adj_pairs` decide the next prefix size. If density is high, grow slower (avoid flooding one dominated batch); if low, grow faster.
-
-**How:**
-
-* `algo/batch_insert.py`: compute `rho = dominated / batch_size` after traversal; if `rho > τ_hi`, set `next_prefix = curr + α_small * curr`; else `α_large`.
-* Telemetry: write `prefix_factor`, `rho` per batch to the JSONL you already have.
-
-**Expected win:** Smooths the “first dominated batch spike” that currently produces 1.9k shards and 300+ ms scatter.
-
----
-
-## C. Avoid building a *global* conflict graph
-
-### 5) **Parent‑centric local MIS** only
-
-**Why:** With compressed cover semantics, conflicts that matter are mostly **siblings under nearby parents** at (\ell). You already have per‑parent semisort buffers; you can run MIS **per parent** (plus 1‑ring neighbors) and stitch the results. This caps clique size by local tree degree, not by batch size.
-
-**How:**
-
-* During traversal, let `scope_indices` retain the “owning parent id” for each membership entry.
-* Group memberships by parent id (you already have `_group_by_key_counting`).
-* For each parent group (and optionally immediate neighbor parents; 1‑ring via `Next`), run the Numba MIS or the grid leader‑election shortcut; no global CSR.
-* Keep a rare **spill** path: if a group exceeds `group_cap` after dedupe, fall back to your existing dense builder *for that group only*.
-
-**Expected win:** Turns O(b²) worst‑case into sum of small MIS instances; big win where your logs show `conflict_scope_groups_unique=1` (a single massive scope).
+> If you only do (1) + (2), you should already see a meaningful drop versus the 57–72 s steady‑state residual build.
 
 ---
 
-## D. Change “what distance we evaluate” in residual mode
+## 3) Small code changes that remove the worst costs
 
-### 6) Residual **two‑gate**: cheap bound first, exact only near boundary
+All changes below are narrow and localized; they don’t alter algorithmic results.
 
-**Why:** You already have an early‑exit residual kernel. Make it a formal **cascade**:
+### A) **Stop recomputing pairwise distances in the conflict builder**
 
-1. **Whitened Euclidean gate** (cheap): pre‑whiten `v_matrix` columns once so (|v_i - v_j|_2) becomes a **Lipschitz upper bound** on your residual distance. Reject obviously‑far pairs here using float32.
-2. Only for survivors compute the tight residual with the numba kernel.
+You already compute residual pairwise rows in traversal; the dense builder still spends ~12–15 ms per dominated batch in `conflict_pairwise_ms`. Thread the traversal cache through `conflict_graph.py`.
 
-**How:**
-
-* `metrics/residual.py`: at `configure_residual_correlation`, compute a Cholesky/diagonal rescale for `v_matrix` offline (host once). Cache `v32` and `norms32`.
-* `compute_residual_distances_with_radius`: do **gate‑1** on tiles (float32) with a safety margin; then call existing `_distance_chunk` only on survivors.
-
-**Expected win:** On your residual 32k runs the annulus is near‑dense; a 2–3× reduction in pair evaluations is realistic, and it composes with grid/MIS changes.
-
----
-
-### 7) Residual **landmark lower bounds** (triangle inequality on correlation)
-
-**Why:** Precompute dot‑products to 8–16 landmarks; use them to bound the attainable correlation via Hölder/Cauchy–Schwarz and reject before the heavy loop.
-
-**How:**
-
-* Precompute `L×N` dot table in float32; keep per‑point norms.
-* In `_distance_chunk` start with **max possible correlation** bound from landmarks; if it’s already below threshold, skip.
-
-**Expected win:** Similar to (6); often cheaper than whitening if you can afford the small L×N memory.
-
----
-
-## E. Make traversal **sparser by construction**
-
-### 8) **Skip Next‑chain expansion** with a cap + deferral
-
-**Why:** Your logs show Next‑chain expansion is already cheap, but on dominated levels it still inflates scopes. Instead, **cap expansion length** per query to a small number (e.g., 4), and push remainders into a **deferred queue** handled only if MIS kept the candidate parent.
-
-**How:**
-
-* `traverse_collect_scopes`: emit `(parent, partial_scope)` + a “continuation token”.
-* After MIS picks survivors, revisit only survivors with their tokens to finish the chain.
-
-**Expected win:** Reduces scope sizes *before* the conflict stage; costs a small post‑MIS pass (but only over survivors).
-
----
-
-### 9) **Tile‑wise pair enumeration** with *degree caps*
-
-**Why:** You’ve planned tiles; add a **degree cap per node** in tile expansion (keep ≤K nearest candidates in the annulus per node using a small heap) *before* MIS. MIS only needs an independent set; very long degree tails don’t help.
-
-**How:**
-
-* `_expand_pairs_directed`: early‑select top‑K by annulus distance per source (K=32–64), store only those; expose `avg_degree_before/after_cap` in telemetry.
-* Gate it behind `COVERTREEX_DEGREE_CAP`.
-
-**Expected win:** Roughly linear in the degree‑tail heaviness; often 2–5× in dense shells with minimal effect on maximality after local correction.
-
----
-
-## F. Scheduling & memory
-
-### 10) **Degree‑aware shard merging** (what you proposed—make it explicit)
-
-**Why:** You already noticed: merging shards should use **candidate pair counts**, not just membership. Concretely, choose merges that minimize *(\sum \binom{m_c}{2})* over shards.
-
-**How:**
-
-* Inside `_chunk_ranges_from_indptr`, maintain approximate `m_c` per shard (you can get this *without* materializing pairs via frequency tables).
-* Greedily merge tails if `Δ pairs` is below a threshold; expose `pairs_before/after`, not just `members_*`.
-
-**Expected win:** Turns your first dominated batch from 1.9k shards / 364 ms scatter into a few hundred shards / <100 ms scatter.
-
----
-
-### 11) **Batch re‑use of per‑level CSR buffers** (arena style)
-
-**Why:** On 32k you still report multi‑GiB high‑water RSS. Recycle `sources/targets/indptr/indices` arenas sized by a *moving max* across prior batches; zero only the heads.
-
-**How:**
-
-* `algo/_scope_numba.py`: introduce a small Python‑side pool object whose raw arrays are passed into the Numba kernels (Numba accepts array views). Reset with a fill kernel (`nb.prange` zero heads) instead of realloc.
-
-**Expected win:** Drops allocator chatter and keeps scatter stable; small wall gains but big stability improvement.
-
----
-
-## G. If you can bend exactness a bit
-
-### 12) **Approximate maximality with micro‑repair**
-
-**Why:** “Maximal independent set” can be approximated quickly; a **single** Luby round with high‑quality priorities gives you a large independent set. Then run a *micro‑repair* that tries to insert any remaining node whose neighbors aren’t chosen, checking only its small local neighborhood.
-
-**How:**
-
-* In `mis.run_mis`, add mode `fast`: one or two Luby iterations, then `repair`: iterate rejected nodes in random order and insert if none of its (at‑most‑K) neighbors are in (use your per‑parent grouping to cap K).
-* Tie that to a tolerable separation slack (e.g., accept one violation per 10k nodes and repair deterministically).
-
-**Expected win:** 2–10× on worst graphs. Your Tier‑B invariants will flag if you miss repairs—good guardrail.
-
----
-
-# A short “what to try this week” plan
-
-1. **Grid leader election (Euclidean)**
-   Implement the `grid` conflict‑graph impl and compare against today’s dense path on:
-
-   * 8,192 / 1,024 / k=16 and 32,768 / 1,024 / k=8.
-     Log: build wall, `leaders`, `local_mis_nodes`, and coverage.
-     *Goal:* cut dominated‑batch time by **≥5×** with identical separation/maximality.
-
-2. **Hilbert‑sorted batches + adaptive prefix**
-   Add `--batch-order hilbert` to the CLI and `prefix_factor` adaptation.
-   *Goal:* first dominated batch `conflict_adj_scatter_ms < 80 ms` without chunking; smoother per‑batch timings.
-
-3. **Residual two-gate**
-   Add float32 whitened gate in residual metric.
-   *Goal:* reduce residual `_distance_chunk` call count by **≥50%**; measure `residual_pruned_by_gate1`.
-   *Status 2025‑11‑08:* the offline profile + lookup path landed. Run `python tools/build_residual_gate_profile.py docs/data/residual_gate_profile_diag0.json --tree-points 2048 --dimension 8 --seed 42 --bins 512` to refresh the diag0 curve (2,096,128 samples). At runtime, point `COVERTREEX_RESIDUAL_GATE1_LOOKUP_PATH` at that file, set `COVERTREEX_ENABLE_SPARSE_TRAVERSAL=1`, and turn the gate on via `COVERTREEX_RESIDUAL_GATE1=1` (and optional `..._LOOKUP_MARGIN`, `..._RADIUS_CAP`). Audit mode stays enabled by default when we experiment so we still fail fast if the lookup is too aggressive. The gate remains opt-in for now—we need sparse traversal enabled before the lookup actually prunes anything—but the calibration story is no longer blocked on manual α/margin sweeps. Fresh 32 k reruns with the preset (`benchmark_residual_gate_lookup_32768_default_cap10.jsonl` and `_chunked_cap10.jsonl`) clock in at ≈270 s, yet `traversal_gate1_*` stays at zero, so the next follow-up is still to drive the residual radii down (or derive per-scope caps) before the lookup can pay off.
-
-If those three land, re‑run your 32k tables—*before* touching the sparse traversal kernel—that alone should push Euclidean build well under ~15–20 s and residual under ~30–40 s on CPU, while preserving your current query wins.
-
----
-
-## Pseudocode sketches (drop‑in friendly)
-
-### Grid leader election (per level)
+**Before** (`covertreex/algo/conflict_graph.py` — excerpt you showed):
 
 ```python
-# covertreex/algo/conflict_graph_builders.py
-def build_conflict_grid(level, points_batch, radii, *, shifts=3, seed=42):
-    cell_w = 2.0 ** level
-    leaders = set()
-    for s in range(shifts):
-        off = hash64(seed + s) & ((1<<32)-1)
-        # integer grid coords for each point
-        gx = np.floor((points_batch + off) / cell_w).astype(np.int64)
-        # key = tuple grid cell; priority = 64b mix of (point_id, level, s)
-        keys = gx.view([('c'+str(d), gx.dtype) for d in range(gx.shape[1])]).ravel()
-        prio = mix64(point_ids, level, s)
-        # counting-sort by keys, then pick argmin prio per key
-        cell_head = argmin_by_key(keys, prio)  # O(n)
-        leaders.update(cell_head)
-    # Optional: local MIS among neighbor-cell leaders only
-    neighbor_edges = edges_among_neighbor_cells(leaders, gx, cell_w, radii)
-    S = luby_mis_small(neighbor_edges, leaders)  # tiny graph
-    return np.fromiter(S, dtype=np.int64)
+adjacency_build = _build_dense_adjacency(
+    backend=backend,
+    batch_size=batch_size,
+    scope_indptr=scope_indptr,
+    scope_indices=scope_indices,
+)
 ```
 
-### Adaptive prefix growth
+**After** (pass the cached arrays; fall back to None if not residual):
 
 ```python
-# batch_insert.py (after traversal)
-rho = dominated_count / batch_size
-if rho > cfg.high_density:     next_prefix = int(curr + cfg.alpha_small * curr)
-elif rho < cfg.low_density:    next_prefix = int(curr + cfg.alpha_large * curr)
-else:                           next_prefix = int(curr + cfg.alpha_mid   * curr)
-next_prefix = min(next_prefix, max_batch)
+pairwise = getattr(traversal, "residual_pairwise", None)
+radii   = getattr(traversal, "residual_radii", None)
+
+adjacency_build = _build_dense_adjacency(
+    backend=backend,
+    batch_size=batch_size,
+    scope_indptr=scope_indptr,
+    scope_indices=scope_indices,
+    pairwise=pairwise,
+    radii=radii,
+)
 ```
 
-### Residual two‑gate
+And in `_build_dense_adjacency(...)` forward `pairwise`/`radii` to `build_conflict_graph_numba_dense(...)`. You already wrote the builder to accept them; this just wires it up.
+
+*Expected telemetry deltas:* `conflict_pairwise_ms → ~0`, `conflict_adjacency_ms` unchanged, `conflict_graph_ms` drops by ~12–15 ms per dominated batch.
+
+---
+
+### B) **Kill `traversal_semisort_ms` with bucketed CSR (no O(n log n) sorts)**
+
+The “sparse traversal” path’s semisort is your 1.4–5.8 s per batch monster. Replace it with a *two‑pass, counting/bucketing CSR* builder (exactly the pattern you already use in the conflict builder with `_group_by_key_counting` → prefix sum → fill). The idea is:
+
+1. Count how many memberships go to each owner/node (`counts[node] += 1`).
+2. Prefix‑sum to `indptr`.
+3. Fill `indices[indptr[node] + cursor[node]] = member`.
+
+This is linear, parallelizable, and needs **no sorting**.
+
+**New kernel (place alongside your other scope Numba helpers):**
 
 ```python
-# metrics/residual.py
-def residual_gate1_whitened(v32, norms32, i, cand_idx, radius, eps=1e-6):
-    # fast float32 bound (pre-whitened)
-    # derive a conservative mapping from L2 difference to residual radius
-    dist32 = l2_chunk(v32[i], v32[cand_idx])              # prange
-    # alpha calibrates bound safety; keep if might pass residual threshold
-    keep = dist32 <= alpha(radius) + eps
-    return keep
+# covertreex/algo/_scope_numba.py
+@nb.njit(cache=True, parallel=True)
+def build_scope_csr_from_pairs(
+    owners: np.ndarray,   # I32, length M
+    members: np.ndarray,  # I32, length M
+    num_nodes: int,       # batch_size or max(owner)+1
+) -> Tuple[np.ndarray, np.ndarray]:
+    counts = np.zeros(num_nodes, dtype=I64)
+    for i in nb.prange(owners.size):
+        counts[int(owners[i])] += 1
 
-def compute_residual_distances_with_radius(...):
-    gate = residual_gate1_whitened(backend.v32, backend.n32, query_index, chunk_indices, radius)
-    survivors = chunk_indices[gate]
-    if survivors.size == 0:
-        return np.empty(0), np.zeros(0, dtype=np.uint8)
-    return _distance_chunk(... only survivors ...)
+    indptr = np.empty(num_nodes + 1, dtype=I64)
+    acc = I64(0)
+    indptr[0] = 0
+    for n in range(num_nodes):
+        acc += counts[n]
+        indptr[n + 1] = acc
+
+    indices = np.empty(acc, dtype=I32)
+    # thread-local cursors per node
+    cursors = np.zeros(num_nodes, dtype=I64)
+
+    for i in nb.prange(owners.size):
+        node = int(owners[i])
+        pos  = indptr[node] + cursors[node]
+        indices[pos] = members[i]
+        cursors[node] += 1
+
+    return indptr, indices
 ```
 
----
+**Use it in the sparse traversal path** instead of semisort. You likely have `(point_ids, owner_ids)` already; feed those in directly. Keep your existing dedupe step (if required) by hashing segments *after* CSR creation (or set a `segment_dedupe=1` flag and reuse your `_hash_segments/_dedupe_segments_by_hash`).
 
-## Micro‑optimizations you can bank today
-
-* **Degree cap in `_expand_pairs_directed`** (see idea #9): keep top‑K annulus neighbors per node before writing pairs; exposes `avg_degree_capped`.
-* **int32 everywhere** for indices/ids on ≤32k workloads (you already do some; audit the residual path and CSR heads/tails).
-* **Arena reuse** for CSR and scatter buffers (idea #11).
-* **Numba signatures**: explicitly declare array dtypes/shapes in hot kernels to avoid shape‑based recompiles across batches (a common hidden tax).
+*Expected telemetry deltas (sparse traversal only):* `traversal_semisort_ms → ~O(10–50 ms)` per dominated batch instead of seconds, `traversal_scope_chunk_dedupe` unchanged or smaller, same correctness.
 
 ---
 
-## What *not* to chase next (low ROI for your profile)
+### C) **Make the residual “grid” actually select leaders (forced masks)**
 
-* Global GraphBLAS/graph‑coloring MIS on CPU: great library work, but your bottleneck today is *building* the graph and the batch schedule, not solving MIS once you’ve shrunk the graph.
-* More tiling in the current dense builder **without** changing selection: you’ve already pushed CSR/scatter to sub‑millisecond on steady state; the remaining win is reducing *how many candidates reach it*.
+Your residual runs show `conflict_grid_* = 0`, i.e., the grid path is bypassed. You can get the same gains you saw in Euclidean by running a *whitened‑space* grid that maps residual radius to an angular/dot threshold and emits `forced_selected/forced_dominated` masks.
+
+Minimal integration plan (no full rewrite):
+
+1. In `configure_residual_correlation`, you already precompute `gate_v32` (whitened vectors) and `gate_norm32`. Normalize once so `||z||≈1`.
+
+2. Add a residual‑aware grid builder that takes:
+
+   * `Z = gate_v32` (float32, unit-ish norm)
+   * a per‑batch **correlation threshold** `t = 1 - r^2` (from your residual metric: `dist = sqrt(max(0, 1 - |rho|))` ⇒ `|rho| ≥ 1 - r^2`).
+   * a cell width derived from `t` (coarser for small radii). Start pragmatic: quantize each dimension with `scale = ceil(1/(1 - t + 1e-4))` and hash to 64‑bit keys (you already have mixed‑priority hashing).
+
+3. Reuse your existing `grid_select_leaders_numba(...)` mechanics but on `Z` and with that `scale`. Emit `forced_selected`/`forced_dominated` and skip adjacency creation when the dominated ratio is ≪ 1 (your case).
+
+*Expected telemetry:* non‑zero `conflict_grid_*`, `conflict_adj_pairs=0`, `mis_iterations=1`, `conflict_graph_ms` collapses to single‑digit ms *and* fewer dominated nodes reach traversal in the next prefixes.
+
+> This is deliberately approximate but **safe**: the grid only *pre‑colours*; MIS still runs and your residual distance check in adjacency remains the correctness gate. Start with diagnostics on and verify `forced_*` counts line up with your domination ratios.
 
 ---
 
-If you want, I can draft a minimal PR skeleton for **`impl="grid"`** (builder + tests + flags) and a one‑pager on the **residual two‑gate** interfaces—those two alone should give you fresh headroom while keeping the rest of your architecture intact.
+### D) **Adaptive *pair‑cap* chunking (prevents the 512→2048 scan explosion)**
+
+Chunking should be driven by a **pair budget**, not a fixed member cap. Your metrics already compute `candidate_pairs` and segment counts—use them.
+
+Heuristic (works well in practice):
+
+```python
+# choose at most ~130k directed edges per dominated batch (what your
+# good Euclidean run emitted)
+PAIR_BUDGET = int(128_000)
+
+# Given expected mean group size g (from previous batches) and #groups G,
+# choose a chunk_target so G * g*(g-1) ~ PAIR_BUDGET
+# (approximate; clamp to [8192, 262144])
+chunk_target = clamp(int(sqrt(PAIR_BUDGET / max(G, 1))), 8192, 262144)
+```
+
+Wire this into your traversal/conflict builder *when* `domination_ratio < 0.01`. The result is ~constant `conflict_scope_chunk_pairs_after` and a bounded `traversal_scope_chunk_segments` (no more 512→2048 growth).
+
+*Expected telemetry:* stable `traversal_scope_chunk_segments` (dozens, not thousands), `traversal_semisort_ms` and `conflict_adjacency_ms` flatten across batches.
+
+---
+
+### E) **Two‑phase residual distance kernel (cheap early rejection)**
+
+Your `_distance_chunk` already carries a “tail” bound, but you still traverse all D dims for a large share. With small `D=8`, a two‑phase split is still worth it because early exit prevents the `sqrt` + branches per dim loop:
+
+```python
+@njit(cache=True, fastmath=True, parallel=True)
+def _distance_chunk_two_phase(...):
+    # Phase 1: first 4 dims, quick bound check
+    D1 = 4
+    for j in prange(v_chunk.shape[0]):
+        denom = ...
+        partial = 0.0; qi_sq = 0.0; qj_sq = 0.0
+        pruned = False
+        for d in range(D1):
+            ...  # accumulate partial, qi_sq, qj_sq
+            tail = ...
+            if can_prune_with_threshold(...):   # same logic as today
+                distances[j] = radius + eps
+                within[j] = 0
+                pruned = True
+                break
+        if pruned: continue
+
+        # Phase 2: remaining dims
+        for d in range(D1, v_query.shape[0]):
+            ...  # identical
+
+        rho = ...
+        ...
+```
+
+*Expected:* fewer full‑dim iterations in dominated regions. This pays off even more once Gate‑1 is enabled (Phase 1 prunes aggressively).
+
+---
+
+### F) **Minor but free micro‑optimizations**
+
+* Preallocate and reuse `distances`/`within` buffers in the residual kernel (thread‑local scratch) to reduce allocator pressure in big batches.
+* Ensure all arrays passed to Numba kernels are **C‑contiguous** (`np.ascontiguousarray`) *before* the jitted call (you already do this in places).
+* For residual only, consider running the kernel in float32 internally (keep inputs as float64, compute partials in float32, cast back for the final `rho`). This halves memory traffic and may shave ~10–20% in traversal; keep `COVERTREEX_RESIDUAL_GATE1_AUDIT=1` while evaluating.
+
+---
+
+## 4) What to watch in telemetry (to confirm each change worked)
+
+* **Pairwise reuse (A):** `conflict_pairwise_ms → ~0` while `conflict_adj_pairs` stays constant.
+* **Bucketed CSR (B):** `traversal_semisort_ms` drops from seconds to <~50 ms; `traversal_scope_chunk_scans` no longer ramps up; RSS spikes disappear.
+* **Residual grid (C):** `conflict_grid_cells > 0`, large `conflict_grid_leaders_raw/after`, `conflict_adj_pairs=0` on dominated batches, `mis_iterations=1`.
+* **Pair‑cap chunking (D):** `conflict_scope_chunk_pairs_after ≈ 130,816` (your healthy dominated batches), `traversal_scope_chunk_segments` roughly stable.
+* **Gate‑1 (switch‑only):** `traversal_gate1_pruned` large, `traversal_ms` shrinks, audit shows no violations.
+
+---
+
+## 5) A minimal “try this” recipe
+
+Start with the *switches only* and the *pairwise reuse* patch:
+
+```bash
+# Switches first
+COVERTREEX_BACKEND=numpy \
+COVERTREEX_ENABLE_NUMBA=1 \
+COVERTREEX_ENABLE_DIAGNOSTICS=1 \
+COVERTREEX_ENABLE_SPARSE_TRAVERSAL=0 \
+COVERTREEX_SCOPE_CHUNK_TARGET=0 \
+COVERTREEX_BATCH_ORDER=hilbert \
+COVERTREEX_PREFIX_SCHEDULE=doubling \
+COVERTREEX_RESIDUAL_GATE1=1 \
+COVERTREEX_RESIDUAL_GATE1_AUDIT=1 \
+COVERTREEX_RESIDUAL_GATE1_LOOKUP_PATH=docs/data/residual_gate_profile_diag0.json \
+python -m cli.queries \
+  --metric residual \
+  --dimension 8 --tree-points 32768 \
+  --batch-size 512 --queries 1024 --k 8 \
+  --seed 42 --baseline gpboost
+```
+
+Then apply patch **A** (thread pairwise from traversal to conflict builder) and rerun. Confirm `conflict_pairwise_ms` ~ 0. If you need the patch text in a PR‑ready diff, I can write it out exactly against your `conflict_graph.py` and any helper signatures you expose.
+
+Next, if you want the big decrease that gets you near Euclidean‑like build times on residual, implement **B** (bucketed CSR) and **C** (residual grid pre‑selection). Those two remove the pathological semisort and eliminate most adjacency work on dominated batches, which is exactly the shape your logs show.
+
+---
+
+## 6) Why these changes (short rationale)
+
+* Your builds spend time where there’s almost no *information gain*: extremely high domination and repeated membership rewriting. That’s why skipping sort (B), reusing pairwise (A), and pre‑selecting leaders (C) give outsized wins without affecting correctness.
+* Gate‑1 is designed precisely to reduce residual chunk work; it’s off in your logs. Turn it on and let audit prove safety as you tune thresholds/lookup.
+* Chunking by a *pair budget* keeps worst‑case memory and time bounded. Fixed member caps do not.
+
+---
+
+If you want, I can supply exact diffs for (A) and (B) first (they’re small and self‑contained), and a stub for (C) that plugs into your existing grid hashing.

@@ -400,6 +400,190 @@ Environment knobs
 - **Hilbert becomes the default batch order (2025‑11‑07).** Fresh 32 768-point logs (`benchmark_grid_32768_natural.jsonl`, `benchmark_grid_32768_default_run2.jsonl`) show the first dominated batch’s scatter dropping from **3 951 ms → 6.6 ms**, average scatter falling **62 ms → 0.55 ms**, and `conflict_graph_ms` shrinking **83.7 ms → 22.4 ms** when Hilbert ordering is enabled alongside the grid builder. Because the domination ratio and leader counts stay unchanged (≈0.984 and ≈202 leaders/batch), we now default `COVERTREEX_BATCH_ORDER=hilbert` and updated the scaling table above (Euclidean build **37.7 s**, query **0.262 s**, `~3.9 k q/s`).
 - **Adaptive prefix growth defaults tuned + exposed via `--build-mode prefix`.** Use `python -m cli.queries … --build-mode prefix` to route construction through `batch_insert_prefix_doubling` and emit per-prefix telemetry (`prefix_factor`, `prefix_domination_ratio`, `prefix_schedule`) into the JSONL log. The 32 k Hilbert+grid run in this mode (`benchmark_grid_32768_prefix.jsonl`) produced **16 385 adaptive groups** with scatter averaging **0.047 ms** (median 0.043 ms, max 12.2 ms) and domination ratio ≈1.0 while keeping the prefix-factor blend at 1.25/2.25. These numbers justify the new `_DEFAULT_PREFIX_*` constants and give auditors a structured artefact when analysing prefix shaping; the residual variant still needs follow-up because the clamped run exceeds 20 minutes under this schedule (see plan §2).
 
+## PCCT Source & Execution Flow (2025-11-09)
+
+### Source listing — `covertreex/api/pcct.py`
+
+```python
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Tuple
+
+from covertreex.algo.batch import BatchInsertPlan, batch_insert
+from covertreex.algo.batch_delete import BatchDeletePlan, batch_delete
+from covertreex.api.runtime import Runtime
+from covertreex.core.tree import PCCTree, TreeBackend
+from covertreex.queries.knn import knn as knn_query
+
+
+def _ensure_points(backend: TreeBackend, value: Any) -> Any:
+    arr = backend.asarray(value, dtype=backend.default_float)
+    if arr.ndim == 0:
+        arr = backend.xp.reshape(arr, (1, 1))
+    elif arr.ndim == 1:
+        length = int(arr.shape[0])
+        if length == 0:
+            arr = backend.xp.reshape(arr, (0, 0))
+        else:
+            arr = backend.xp.reshape(arr, (1, length))
+    return backend.device_put(arr)
+
+
+def _ensure_indices(backend: TreeBackend, value: Any) -> Any:
+    arr = backend.asarray(value, dtype=backend.default_int)
+    return backend.device_put(arr)
+
+
+def _convert_tree(tree: PCCTree, backend: TreeBackend) -> PCCTree:
+    if tree.backend is backend:
+        return tree
+    same_backend = (
+        tree.backend.name == backend.name
+        and tree.backend.default_float == backend.default_float
+        and tree.backend.default_int == backend.default_int
+    )
+    if same_backend:
+        return tree
+    return tree.to_backend(backend)
+
+
+@dataclass(frozen=True)
+class PCCT:
+    """Thin façade around batch insert/delete + query helpers."""
+
+    runtime: Runtime = field(default_factory=Runtime)
+    tree: PCCTree | None = None
+
+    def fit(
+        self,
+        points: Any,
+        *,
+        apply_batch_order: bool = True,
+        mis_seed: int | None = None,
+        return_plan: bool = False,
+    ) -> PCCTree | Tuple[PCCTree, BatchInsertPlan]:
+        context = self.runtime.activate()
+        backend = context.get_backend()
+        batch = _ensure_points(backend, points)
+        dimension = int(batch.shape[1])
+        base_tree = PCCTree.empty(dimension=dimension, backend=backend)
+        new_tree, plan = batch_insert(
+            base_tree,
+            batch,
+            backend=backend,
+            mis_seed=mis_seed,
+            apply_batch_order=apply_batch_order,
+        )
+        return (new_tree, plan) if return_plan else new_tree
+
+    def insert(
+        self,
+        batch_points: Any,
+        *,
+        mis_seed: int | None = None,
+        apply_batch_order: bool | None = None,
+        return_plan: bool = False,
+    ) -> PCCTree | Tuple[PCCTree, BatchInsertPlan]:
+        tree = self._require_tree()
+        context = self.runtime.activate()
+        backend = context.get_backend()
+        batch = _ensure_points(backend, batch_points)
+        tree_backend = _convert_tree(tree, backend)
+        new_tree, plan = batch_insert(
+            tree_backend,
+            batch,
+            backend=backend,
+            mis_seed=mis_seed,
+            apply_batch_order=apply_batch_order,
+        )
+        return (new_tree, plan) if return_plan else new_tree
+
+    def delete(
+        self,
+        indices: Any,
+        *,
+        return_plan: bool = False,
+    ) -> PCCTree | Tuple[PCCTree, BatchDeletePlan]:
+        tree = self._require_tree()
+        context = self.runtime.activate()
+        backend = context.get_backend()
+        remove = _ensure_indices(backend, indices)
+        tree_backend = _convert_tree(tree, backend)
+        new_tree, plan = batch_delete(tree_backend, remove, backend=backend)
+        return (new_tree, plan) if return_plan else new_tree
+
+    def knn(
+        self,
+        query_points: Any,
+        *,
+        k: int,
+        return_distances: bool = False,
+    ) -> Any:
+        tree = self._require_tree()
+        context = self.runtime.activate()
+        backend = context.get_backend()
+        tree_backend = _convert_tree(tree, backend)
+        queries = _ensure_points(tree_backend.backend, query_points)
+        return knn_query(
+            tree_backend,
+            queries,
+            k=k,
+            return_distances=return_distances,
+            backend=tree_backend.backend,
+        )
+
+    def nearest(self, query_points: Any, *, return_distances: bool = False) -> Any:
+        return self.knn(query_points, k=1, return_distances=return_distances)
+
+    def _require_tree(self) -> PCCTree:
+        if self.tree is None:
+            raise ValueError("PCCT requires an existing tree; call fit() first.")
+        return self.tree
+```
+
+### Execution flow overview
+
+- **Runtime handshake.** `PCCT` owns a `covertreex.api.runtime.Runtime` instance; every public method calls `Runtime.activate()` to materialise a `RuntimeContext`, configure logging/JAX flags, and retrieve the backend (`covertreex/runtime/config.py`). This guarantees that downstream kernels see the same dtype/backend settings as the CLI entrypoints and tests.
+- **Batch ingestion.** `.fit()` builds a fresh `PCCTree` via `PCCTree.empty()` and forwards the data into `covertreex/algo/batch/insert.py::batch_insert`. `.insert()` uses `_convert_tree()` to move an existing tree to the active backend before running the same pipeline. `_ensure_points()` standardises shapes/precision so the traversal/training kernels can assume contiguous 2-D arrays.
+- **Plan + persistence.** `batch_insert()` calls `plan_batch_insert()` → `traverse_collect_scopes()` → `build_conflict_graph()` → `run_mis()` before applying the `covertreex.core.persistence` journal (`build_persistence_journal()` + `apply_persistence_journal()`). `BatchInsertPlan` keeps traversal, conflict, MIS, and ordering telemetry so diagnostics/CLI logs can be emitted verbatim from CLI scripts.
+- **Deletion pipeline.** `.delete()` hands indices to `covertreex/algo/batch_delete.py::batch_delete`, which mirrors the journal update flow (recomputes parents/children and rewrites compressed arrays) while returning a `BatchDeletePlan` for instrumentation.
+- **Queries.** `.knn()` (and `.nearest()`) bridge into `covertreex/queries/knn.py::knn`, which wraps the Numba-accelerated `knn_numba` path when available. The helper shares the same backend so query buffers stay on-device for either NumPy or JAX runs.
+
+## Optional Features & Terminology Reference
+
+| Term / Feature | Source entry points | Why it exists | How to enable / tune |
+| --- | --- | --- | --- |
+| Batches & batch ordering | `covertreex/algo/order/helpers.py::prepare_batch_points`, `covertreex/algo/batch/insert.py::plan_batch_insert` | Permutes each ingestion batch (Hilbert, random, natural) to minimise scope scatter before traversal/conflict building; records permutation + Hilbert metrics in `BatchInsertPlan`. | `COVERTREEX_BATCH_ORDER`, `COVERTREEX_BATCH_ORDER_SEED`, CLI `--batch-order/--batch-order-seed` (default `hilbert`). |
+| Prefix schedules & groups | `covertreex/algo/batch/insert.py::batch_insert_prefix_doubling`, `covertreex/algo/order/helpers.py::choose_prefix_factor` | Splits a large ingestion into prefixes (doubling or adaptive) so domination ratios stay ≈1.0 and MIS never sees pathological superscopes; logs `prefix_factor` + `prefix_domination_ratio` per group. | `COVERTREEX_PREFIX_SCHEDULE`, `COVERTREEX_PREFIX_DENSITY_*`, `COVERTREEX_PREFIX_GROWTH_*`, CLI `--build-mode prefix`. |
+| Conflict graph (dense / segmented / residual) | `covertreex/algo/conflict/strategies.py`, `covertreex/algo/conflict/builders.py` | Switches between CSR-from-mask (`dense`), point-ID segmented builders (`segmented`), and residual-aware pruning (`residual`) so MIS operates on the smallest safe adjacency. | `COVERTREEX_CONFLICT_GRAPH_IMPL={auto,dense,segmented,grid}`, `COVERTREEX_ENABLE_NUMBA`, `COVERTREEX_SCOPE_SEGMENT_DEDUP`. |
+| Grid leader selection | `covertreex/algo/conflict/builders.py::build_grid_adjacency`, `covertreex/algo/_grid_numba.py::grid_select_leaders_numba` | Hash-grid allocator that forces leaders/dominated nodes per cell, eliminating MIS edges for highly dominated batches while publishing `grid_*` telemetry. | `COVERTREEX_CONFLICT_GRAPH_IMPL=grid`, `COVERTREEX_ENABLE_NUMBA=1`, Hilbert ordering recommended. |
+| Scope chunks | `covertreex/algo/_scope_numba.py::_chunk_ranges_from_indptr`, `ScopeAdjacencyResult` | Splits oversubscribed scopes into bounded "chunks" so conflict-pair generation stays linear and exposes counters (`scope_chunk_*`) for auditors. | `COVERTREEX_SCOPE_CHUNK_TARGET`, `COVERTREEX_SCOPE_CHUNK_MAX_SEGMENTS`. |
+| MIS seeding & solver | `covertreex/algo/mis.py::batch_mis_seeds`, `::run_mis`, `covertreex/algo/_mis_numba.py::run_mis_numba` | Deterministic seed fan-out plus Numba-accelerated MIS keep batch-to-batch behaviour reproducible and fast; falls back to pure JAX when Numba is unavailable. | `COVERTREEX_MIS_SEED`, CLI `--mis-seed`, `COVERTREEX_ENABLE_NUMBA`. |
+| Residual gating & prefilter | `covertreex/metrics/residual.py` (gate1, scope radii, telemetry), `covertreex/metrics/residual/scope_caps.py` | Whitened float32 gates and lookup tables drop expensive residual chunk evaluations early, enforce radius floors, and populate `gate_stats`. | `COVERTREEX_METRIC=residual_correlation`, plus `COVERTREEX_RESIDUAL_*` knobs (gate1, lookup, prefilter, scope caps). |
+| Sparse traversal | `covertreex/algo/_traverse_sparse_numba.py::collect_sparse_scopes`, `covertreex/algo/traverse/strategies.py` | Builds CSR scopes directly for large trees (instead of dense masks) to reduce memory pressure before conflict assembly. | `COVERTREEX_ENABLE_SPARSE_TRAVERSAL=1`, CLI `--sparse-traversal`. |
+| Diagnostics & telemetry | `covertreex/diagnostics.py::log_operation`, `covertreex/telemetry/*`, CLI writers under `cli/` | Emits per-stage timings (`conflict_graph_ms`, `scope_chunk_*`, `grid_*`) and writes JSONL/CSV artefacts for the benchmarking harness. | `COVERTREEX_ENABLE_DIAGNOSTICS`, CLI `--log-file/--no-log-file`, `cli.runtime_breakdown --no-csv-output`. |
+
+### Chunks (scope chunking & telemetry)
+
+`_chunk_ranges_from_indptr()` and the `ScopeAdjacencyResult` dataclass in `covertreex/algo/_scope_numba.py` compute bounded (start, end) windows over `scope_indptr` so no worker ever tries to emit more than `scope_chunk_target` pairs. The helper also tracks `chunk_count`, `chunk_emitted`, `chunk_pair_cap`, and before/after pair counts; these surface in `BatchInsertPlan.conflict_graph.timings.scope_chunk_*`. Raising `COVERTREEX_SCOPE_CHUNK_TARGET` increases per-worker work, lowering it forces more segments (and higher scheduler overhead) but caps peak memory better.
+
+### Grids & forced leader selection
+
+`build_grid_adjacency()` (and its Numba twin `grid_select_leaders_numba()`) hash each batch point into a shifted grid keyed by level-derived radii, then picks a deterministic leader per cell via mixed 64-bit priorities. Survivors land in `forced_selected`, others in `forced_dominated`; MIS sees the pre-coloured arrays and can skip adjacency construction entirely. This mode exists for "dominated" regimes where almost every candidate is within someone else’s annulus—think Hilbert-ordered 32 k batches—so the builder can collapse conflict graphs to zero edges while still logging `grid_cells`, `grid_leaders_*`, and `grid_local_edges` counters for regressions.
+
+### Batches & prefix schedules
+
+`prepare_batch_points()` enforces the runtime permutation (default Hilbert), while `batch_insert_prefix_doubling()` in `covertreex/algo/batch/insert.py` slices the permuted data into prefixes dictated by `prefix_slices()` or the adaptive factor from `choose_prefix_factor()`. Every sub-batch carries its own MIS seed (via `batch_mis_seeds()`), conflict graph, and domination ratio so JSONL artefacts can expose where throughput stalls. Use `--build-mode prefix --prefix-schedule adaptive` when reproducing the 32 k benchmarks cited earlier—the CLI writes `prefix_factor`, `prefix_domination_ratio`, and permutation metadata directly from the plan objects.
+
+### Conflict graphs & MIS
+
+`covertreex/algo/conflict/base.py::ConflictGraph` represents adjacency in CSR form together with radii, annulus bins, and optional `forced_*` masks. `strategies.py` selects `dense`, `segmented`, `grid`, or `residual` builders based on runtime flags and cached residual distances; each `AdjacencyBuild` feeds `run_mis()` so the maximal independent set always reflects the exact scopes that survived pruning. The MIS solver accepts those forced masks from the grid builder (or radius filters) so dominated candidates never enter the random priority loop, and exposes its own iteration counter plus indicator arrays for logging.
+
+### Additional optional controls
+
+Other runtime-only features live alongside the terms above: enable JIT kernels with `COVERTREEX_ENABLE_NUMBA=1` (covering traversal, scope chunking, grid selection, and MIS), opt into residual scope caps via `COVERTREEX_RESIDUAL_SCOPE_CAPS_PATH`, or mirror the benchmarking defaults by setting `COVERTREEX_ENABLE_SPARSE_TRAVERSAL`/`COVERTREEX_ENABLE_DIAGNOSTICS`. All knobs resolve through `covertreex/runtime/config.py::RuntimeConfig.from_env()`, so CLI wrappers and tests inherit the same behaviour without duplicating flag parsing.
+
 ## Parallel Compressed Cover Tree — Conflict Graph Builder (dense + segmented)
 
 `ScopeAdjacencyResult` in the implementation now also tracks chunk telemetry (`chunk_count`, `chunk_emitted`, `chunk_max_members`) so diagnostics reflect how `_chunk_ranges_from_indptr` splits oversized scopes.
