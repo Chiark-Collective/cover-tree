@@ -121,6 +121,89 @@ if NUMBA_RESIDUAL_AVAILABLE:
 
         return keep
 
+    @njit(cache=True, fastmath=True, parallel=True)
+    def _distance_block_no_gate(
+        v_matrix: np.ndarray,
+        p_diag: np.ndarray,
+        v_norm_sq: np.ndarray,
+        query_indices: np.ndarray,
+        chunk_indices: np.ndarray,
+        kernel_block: np.ndarray,
+        radii: np.ndarray,
+        eps: float,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        num_queries = query_indices.shape[0]
+        chunk_size = chunk_indices.shape[0]
+        distances = np.empty((num_queries, chunk_size), dtype=np.float64)
+        mask = np.zeros((num_queries, chunk_size), dtype=np.uint8)
+
+        for qi in prange(num_queries):
+            query_idx = int(query_indices[qi])
+            if query_idx < 0 or query_idx >= v_matrix.shape[0]:
+                continue
+            v_query = v_matrix[query_idx]
+            p_i = float(p_diag[query_idx])
+            norm_query = float(v_norm_sq[query_idx])
+            radius = float(radii[qi])
+            threshold = 1.0 - radius * radius
+            if radius >= 1.0:
+                threshold = -1.0
+
+            for cj in range(chunk_size):
+                cand_idx = int(chunk_indices[cj])
+                if cand_idx < 0 or cand_idx >= v_matrix.shape[0]:
+                    distances[qi, cj] = radius + eps
+                    continue
+                v_cand = v_matrix[cand_idx]
+                kernel_val = kernel_block[qi, cj]
+                p_cand = float(p_diag[cand_idx])
+                norm_cand = float(v_norm_sq[cand_idx])
+
+                denom = math.sqrt(max(p_i * p_cand, eps * eps))
+                partial = 0.0
+                accum_q = 0.0
+                accum_c = 0.0
+                pruned = False
+                for d in range(v_query.shape[0]):
+                    vq = v_query[d]
+                    vc = v_cand[d]
+                    partial += vq * vc
+                    accum_q += vq * vq
+                    accum_c += vc * vc
+                    rem_bound = math.sqrt(max(norm_query - accum_q, 0.0) * max(norm_cand - accum_c, 0.0))
+                    if denom > 0.0 and threshold > 0.0:
+                        base = kernel_val - partial
+                        if rem_bound > 0.0:
+                            hi = abs(base + rem_bound)
+                            lo = abs(base - rem_bound)
+                            max_abs = hi if hi > lo else lo
+                        else:
+                            max_abs = abs(base)
+                        max_rho = max_abs / denom
+                        if max_rho + eps < threshold:
+                            distances[qi, cj] = radius + eps
+                            mask[qi, cj] = 0
+                            pruned = True
+                            break
+                if pruned:
+                    continue
+
+                numerator = kernel_val - partial
+                if denom > 0.0:
+                    rho = numerator / denom
+                else:
+                    rho = 0.0
+                if rho > 1.0:
+                    rho = 1.0
+                elif rho < -1.0:
+                    rho = -1.0
+                dist = math.sqrt(max(0.0, 1.0 - abs(rho)))
+                distances[qi, cj] = dist
+                if dist <= radius + eps:
+                    mask[qi, cj] = 1
+
+        return distances, mask
+
 
 def compute_distance_chunk(
     v_query: np.ndarray,
@@ -221,8 +304,88 @@ def gate1_whitened_mask(
     return keep.astype(np.uint8, copy=False)
 
 
+def distance_block_no_gate(
+    v_matrix: np.ndarray,
+    p_diag: np.ndarray,
+    v_norm_sq: np.ndarray,
+    query_indices: np.ndarray,
+    chunk_indices: np.ndarray,
+    kernel_block: np.ndarray,
+    radii: np.ndarray,
+    eps: float,
+) -> Tuple[np.ndarray, np.ndarray]:
+    if NUMBA_RESIDUAL_AVAILABLE:
+        return _distance_block_no_gate(
+            v_matrix,
+            p_diag,
+            v_norm_sq,
+            query_indices,
+            chunk_indices,
+            kernel_block,
+            radii,
+            eps,
+        )
+
+    num_queries = query_indices.shape[0]
+    chunk_size = chunk_indices.shape[0]
+    distances = np.empty((num_queries, chunk_size), dtype=np.float64)
+    mask = np.zeros((num_queries, chunk_size), dtype=np.uint8)
+    for qi in range(num_queries):
+        query_idx = int(query_indices[qi])
+        v_query = v_matrix[query_idx]
+        p_i = float(p_diag[query_idx])
+        norm_query = float(v_norm_sq[query_idx])
+        radius = float(radii[qi])
+        threshold = 1.0 - radius * radius
+        if radius >= 1.0:
+            threshold = -1.0
+        for cj in range(chunk_size):
+            cand_idx = int(chunk_indices[cj])
+            v_cand = v_matrix[cand_idx]
+            kernel_val = kernel_block[qi, cj]
+            p_cand = float(p_diag[cand_idx])
+            norm_cand = float(v_norm_sq[cand_idx])
+            denom = math.sqrt(max(p_i * p_cand, eps * eps))
+            partial = 0.0
+            accum_q = 0.0
+            accum_c = 0.0
+            pruned = False
+            for d in range(v_query.shape[0]):
+                vq = v_query[d]
+                vc = v_cand[d]
+                partial += vq * vc
+                accum_q += vq * vq
+                accum_c += vc * vc
+                rem_bound = math.sqrt(max(norm_query - accum_q, 0.0) * max(norm_cand - accum_c, 0.0))
+                if denom > 0.0 and threshold > 0.0:
+                    base = kernel_val - partial
+                    if rem_bound > 0.0:
+                        hi = abs(base + rem_bound)
+                        lo = abs(base - rem_bound)
+                        max_abs = hi if hi > lo else lo
+                    else:
+                        max_abs = abs(base)
+                    max_rho = max_abs / denom
+                    if max_rho + eps < threshold:
+                        distances[qi, cj] = radius + eps
+                        mask[qi, cj] = 0
+                        pruned = True
+                        break
+            if pruned:
+                continue
+            numerator = kernel_val - partial
+            rho = numerator / denom if denom > 0.0 else 0.0
+            rho = max(min(rho, 1.0), -1.0)
+            dist = math.sqrt(max(0.0, 1.0 - abs(rho)))
+            distances[qi, cj] = dist
+            if dist <= radius + eps:
+                mask[qi, cj] = 1
+    return distances, mask
+
+
 __all__ = [
     "NUMBA_RESIDUAL_AVAILABLE",
     "compute_distance_chunk",
     "gate1_whitened_mask",
+    "distance_block_no_gate",
 ]

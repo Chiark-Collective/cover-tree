@@ -6,7 +6,12 @@ from typing import Callable, Optional, Protocol, Sequence, Tuple
 
 import numpy as np
 
-from .._residual_numba import compute_distance_chunk, gate1_whitened_mask
+from covertreex import config as cx_config
+from .._residual_numba import (
+    compute_distance_chunk,
+    distance_block_no_gate,
+    gate1_whitened_mask,
+)
 from .policy import (
     RESIDUAL_EPS,
     ResidualGateLookup,
@@ -90,6 +95,7 @@ class ResidualCorrHostData:
     gate_lookup_path: str | None = None
     gate_lookup_margin: float | None = None
     gate_lookup: "ResidualGateLookup | None" = None
+    grid_whiten_scale: float | None = None
 
     def __post_init__(self) -> None:
         if self.v_matrix.ndim != 2:
@@ -565,6 +571,44 @@ def compute_residual_distances_with_radius(
     return distances, mask
 
 
+def compute_residual_distances_block_no_gate(
+    backend: ResidualCorrHostData,
+    query_indices: np.ndarray,
+    chunk_indices: np.ndarray,
+    kernel_block: np.ndarray,
+    radii: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    query_arr = np.asarray(query_indices, dtype=np.int64, copy=False)
+    chunk_arr = np.asarray(chunk_indices, dtype=np.int64, copy=False)
+    if query_arr.size == 0 or chunk_arr.size == 0:
+        shape = (int(query_arr.size), int(chunk_arr.size))
+        return (
+            np.zeros(shape, dtype=np.float64),
+            np.zeros(shape, dtype=np.uint8),
+        )
+    kernel_block = np.asarray(kernel_block, dtype=np.float64, copy=False)
+    if kernel_block.shape != (query_arr.size, chunk_arr.size):
+        raise ValueError(
+            "Kernel block shape mismatch for residual block streaming. "
+            f"Expected {(query_arr.size, chunk_arr.size)}, got {kernel_block.shape}."
+        )
+    radii_arr = np.asarray(radii, dtype=np.float64, copy=False)
+    if radii_arr.shape[0] != query_arr.shape[0]:
+        raise ValueError("Radius array must align with query count for block streaming.")
+
+    distances, mask = distance_block_no_gate(
+        backend.v_matrix,
+        backend.p_diag,
+        backend.v_norm_sq,
+        query_arr,
+        chunk_arr,
+        kernel_block,
+        radii_arr,
+        _EPS,
+    )
+    return distances, mask
+
+
 def compute_residual_distance_single(
     backend: ResidualCorrHostData,
     lhs_index: int,
@@ -589,6 +633,7 @@ def configure_residual_correlation(backend: ResidualCorrHostData) -> None:
         object.__setattr__(backend, "v_norm_sq", np.sum(v_matrix * v_matrix, axis=1))
 
     policy = get_residual_policy()
+    runtime = cx_config.runtime_config()
     enabled, alpha, margin, eps, audit, radius_cap = _resolve_gate1_config(backend, policy=policy)
     profile_path = backend.gate_profile_path or policy.gate1_profile_path
     profile_bins = backend.gate_profile_bins or policy.gate1_profile_bins
@@ -596,6 +641,10 @@ def configure_residual_correlation(backend: ResidualCorrHostData) -> None:
     lookup_margin = (
         backend.gate_lookup_margin if backend.gate_lookup_margin is not None else policy.gate1_lookup_margin
     )
+    grid_mode_requested = runtime.metric == "residual_correlation" and runtime.conflict_graph_impl == "grid"
+    grid_whiten_scale = float(getattr(runtime, "residual_grid_whiten_scale", 1.0))
+    if grid_whiten_scale <= 0.0:
+        grid_whiten_scale = 1.0
 
     radius_max_for_profile = max(1.0, radius_cap if radius_cap > 0.0 else 1.0)
     profile_obj = None
@@ -611,7 +660,13 @@ def configure_residual_correlation(backend: ResidualCorrHostData) -> None:
     if lookup_path:
         lookup_obj = ResidualGateLookup.load(lookup_path, margin=float(lookup_margin))
 
-    need_whitened = enabled or profile_obj is not None or lookup_obj is not None
+    need_whitened = (
+        enabled
+        or profile_obj is not None
+        or lookup_obj is not None
+        or grid_mode_requested
+        or grid_whiten_scale != 1.0
+    )
     if need_whitened:
         v32, n32 = _compute_gate1_whitened(np.asarray(backend.v_matrix, dtype=np.float64))
     else:
@@ -632,6 +687,7 @@ def configure_residual_correlation(backend: ResidualCorrHostData) -> None:
     object.__setattr__(backend, "gate_lookup_path", lookup_path)
     object.__setattr__(backend, "gate_lookup_margin", lookup_margin)
     object.__setattr__(backend, "gate_lookup", lookup_obj)
+    object.__setattr__(backend, "grid_whiten_scale", grid_whiten_scale)
 
     set_residual_backend(backend)
 
@@ -674,6 +730,7 @@ __all__ = [
     "compute_residual_distances",
     "compute_residual_distance_single",
     "compute_residual_distances_with_radius",
+    "compute_residual_distances_block_no_gate",
     "decode_indices",
     "compute_residual_distances_from_kernel",
     "compute_residual_lower_bounds_from_kernel",

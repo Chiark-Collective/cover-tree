@@ -12,12 +12,14 @@ from covertreex.metrics import residual as residual_metrics
 from covertreex.metrics.residual import (
     ResidualCorrHostData,
     ResidualGateTelemetry,
+    compute_residual_distances_block_no_gate,
     compute_residual_distances_from_kernel,
     compute_residual_distances_with_radius,
     decode_indices,
     get_residual_backend,
 )
 from covertreex.metrics.residual.scope_caps import get_scope_cap_table
+from .._residual_scope_numba import residual_scope_append, residual_scope_reset
 from .._scope_numba import build_scope_csr_from_pairs
 from .._traverse_numba import NUMBA_TRAVERSAL_AVAILABLE, build_scopes_numba
 from .._traverse_sparse_numba import (
@@ -290,7 +292,7 @@ def _residual_find_parents(
     return best_idx, best_dist
 
 
-def _collect_residual_scopes_streaming(
+def _collect_residual_scopes_streaming_serial(
     *,
     tree: PCCTree,
     host_backend: ResidualCorrHostData,
@@ -319,17 +321,17 @@ def _collect_residual_scopes_streaming(
     total_points = int(tree_indices.shape[0])
     next_cache_np = np.asarray(tree.next_cache, dtype=np.int64)
     top_levels_np = np.asarray(tree.top_levels, dtype=np.int64)
-    tree_id_to_pos = {int(tree_indices[i]): int(i) for i in range(total_points)}
+    tree_positions = np.arange(total_points, dtype=np.int64)
 
     conflict_scopes: list[Tuple[int, ...]] = []
-    scope_owner_acc: list[int] = []
-    scope_member_acc: list[int] = []
+    scope_owner_chunks: list[np.ndarray] = []
+    scope_member_chunks: list[np.ndarray] = []
     scope_lengths = np.zeros(batch_size, dtype=np.int64)
     chunk = int(host_backend.chunk_size or 512)
     trimmed_scopes = 0
     max_scope_members = 0
     max_scope_after = 0
-    limit = scope_limit if scope_limit and scope_limit > 0 else None
+    limit_value = int(scope_limit) if scope_limit and scope_limit > 0 else 0
 
     observed_radii = np.zeros(batch_size, dtype=np.float64)
     saturation_flags = np.zeros(batch_size, dtype=np.uint8)
@@ -338,6 +340,7 @@ def _collect_residual_scopes_streaming(
     dedupe_hits = np.zeros(batch_size, dtype=np.int64)
     flags_length = max(total_points, 1)
     collected_flags = np.zeros(flags_length, dtype=np.uint8)
+    scope_buffer = np.empty(flags_length, dtype=np.int64)
     scan_cap_value = scan_cap if scan_cap and scan_cap > 0 else None
     cache_limit = scope_limit if scope_limit and scope_limit > 0 else _RESIDUAL_SCOPE_DEFAULT_LIMIT
     level_scope_cache: Dict[int, np.ndarray] = {}
@@ -356,7 +359,7 @@ def _collect_residual_scopes_streaming(
         parent_level = int(top_levels_np[parent_pos]) if 0 <= parent_pos < top_levels_np.shape[0] else -1
         query_id = int(query_indices[qi])
         radius = float(radii[qi])
-        collected_positions: list[int] = []
+        scope_count = 0
         saturated = False
         fully_scanned = True
         cap_reached = False
@@ -386,20 +389,22 @@ def _collect_residual_scopes_streaming(
                     radius=radius,
                 )
                 cache_include = np.nonzero(cache_mask)[0]
-                cache_hits_total += int(cache_include.size)
-                for idx_local in cache_include:
-                    pos = int(valid_cached[idx_local])
-                    if collected_flags[pos]:
-                        dedupe_hits[qi] += 1
-                        continue
-                    collected_flags[pos] = 1
-                    collected_positions.append(pos)
-                    if limit and len(collected_positions) >= limit:
+                if cache_include.size:
+                    cache_hits_total += int(cache_include.size)
+                    include_positions = valid_cached[cache_include]
+                    scope_count, dedupe_delta, hit_limit = residual_scope_append(
+                        collected_flags,
+                        include_positions,
+                        scope_buffer,
+                        scope_count,
+                        limit_value,
+                        respect_limit=True,
+                    )
+                    dedupe_hits[qi] += dedupe_delta
+                    if hit_limit:
                         saturated = True
                         fully_scanned = False
-                        break
-                if saturated:
-                    cap_reached = True
+                        cap_reached = True
         if not saturated:
             for start in range(0, total_points, chunk):
                 if scan_cap_value and chunk_points[qi] >= scan_cap_value:
@@ -410,6 +415,7 @@ def _collect_residual_scopes_streaming(
                 chunk_ids = tree_indices[start:stop]
                 if chunk_ids.size == 0:
                     continue
+                chunk_positions = tree_positions[start:stop]
                 chunk_iterations[qi] += 1
                 chunk_points[qi] += chunk_ids.size
                 if scan_cap_value and chunk_points[qi] >= scan_cap_value:
@@ -433,19 +439,19 @@ def _collect_residual_scopes_streaming(
                 max_chunk = float(np.max(distances[include_idx]))
                 if max_chunk > observed_radii[qi]:
                     observed_radii[qi] = max_chunk
-                for idx_local in include_idx:
-                    cid = chunk_ids[idx_local]
-                    pos = tree_id_to_pos.get(int(cid))
-                    if pos is None or pos < 0:
-                        continue
-                    if collected_flags[pos]:
-                        dedupe_hits[qi] += 1
-                        continue
-                    collected_flags[pos] = 1
-                    collected_positions.append(int(pos))
-                    if limit and len(collected_positions) >= limit:
-                        saturated = True
-                        break
+                include_positions = chunk_positions[include_idx]
+                scope_count, dedupe_delta, hit_limit = residual_scope_append(
+                    collected_flags,
+                    include_positions,
+                    scope_buffer,
+                    scope_count,
+                    limit_value,
+                    respect_limit=True,
+                )
+                dedupe_hits[qi] += dedupe_delta
+                if hit_limit:
+                    saturated = True
+                    cap_reached = True
                 if saturated or cap_reached:
                     saturated = True
                     fully_scanned = False
@@ -453,20 +459,27 @@ def _collect_residual_scopes_streaming(
         # `saturated` indicates we bailed early; keep track of full scans so
         # telemetry can distinguish true caps from naturally small scopes.
 
-        def _ensure_collected(idx: int) -> None:
-            if idx < 0 or idx >= total_points:
-                return
-            if not collected_flags[idx]:
-                collected_flags[idx] = 1
-                collected_positions.append(idx)
-
-        _ensure_collected(parent_pos)
+        ensure_positions: list[int] = []
+        if 0 <= parent_pos < total_points:
+            ensure_positions.append(int(parent_pos))
         chain = _collect_next_chain(tree, parent_pos, next_cache=next_cache_np)
         for node in chain:
-            _ensure_collected(int(node))
+            pos = int(node)
+            if 0 <= pos < total_points:
+                ensure_positions.append(pos)
+        if ensure_positions:
+            ensure_arr = np.asarray(ensure_positions, dtype=np.int64)
+            scope_count, _, _ = residual_scope_append(
+                collected_flags,
+                ensure_arr,
+                scope_buffer,
+                scope_count,
+                limit_value,
+                respect_limit=False,
+            )
 
-        if collected_positions:
-            scope_vec = np.asarray(collected_positions, dtype=np.int64)
+        if scope_count > 0:
+            scope_vec = scope_buffer[:scope_count].copy()
             scope_vec = _order_scope_positions_by_level(scope_vec, top_levels_np)
         else:
             scope_vec = np.empty(0, dtype=np.int64)
@@ -475,16 +488,16 @@ def _collect_residual_scopes_streaming(
         max_scope_members = max(max_scope_members, original_size)
         trimmed_flag = False
 
-        if limit and original_size > limit:
+        if limit_value and original_size > limit_value:
             trimmed_scopes += 1
             trimmed_flag = True
             scope_vec = _trim_residual_scope_vector(
                 scope_vec,
                 parent_pos,
                 top_levels_np,
-                limit,
+                limit_value,
             )
-        elif limit and saturated and not fully_scanned:
+        elif limit_value and saturated and not fully_scanned:
             trimmed_scopes += 1
             trimmed_flag = True
 
@@ -497,8 +510,9 @@ def _collect_residual_scopes_streaming(
 
         scope_lengths[qi] = scope_vec.size
         if scope_vec.size:
-            scope_owner_acc.extend([qi] * scope_vec.size)
-            scope_member_acc.extend(scope_vec.tolist())
+            owner_chunk = np.full(scope_vec.size, qi, dtype=np.int64)
+            scope_owner_chunks.append(owner_chunk)
+            scope_member_chunks.append(scope_vec.astype(np.int64, copy=False))
         scope_tuple = tuple(int(x) for x in scope_vec.tolist())
         conflict_scopes.append(scope_tuple)
 
@@ -506,13 +520,17 @@ def _collect_residual_scopes_streaming(
             cache_slice = scope_vec[: min(cache_limit, scope_vec.size)].copy()
             level_scope_cache[parent_level] = cache_slice
 
-        for pos in collected_positions:
-            if 0 <= pos < total_points:
-                collected_flags[pos] = 0
+        residual_scope_reset(collected_flags, scope_buffer, scope_count)
 
-    if scope_member_acc:
-        owners_arr = np.asarray(scope_owner_acc, dtype=np.int64)
-        members_arr = np.asarray(scope_member_acc, dtype=np.int64)
+    if scope_member_chunks:
+        if len(scope_owner_chunks) == 1:
+            owners_arr = scope_owner_chunks[0]
+            members_arr = scope_member_chunks[0]
+        else:
+            owners_arr = np.concatenate(scope_owner_chunks)
+            members_arr = np.concatenate(scope_member_chunks)
+        owners_arr = owners_arr.astype(np.int64, copy=False)
+        members_arr = members_arr.astype(np.int64, copy=False)
         scope_indptr, scope_indices_i32 = build_scope_csr_from_pairs(
             owners_arr,
             members_arr,
@@ -535,6 +553,277 @@ def _collect_residual_scopes_streaming(
         gate_delta,
         observed_radii,
         saturation_flags,
+        chunk_iterations,
+        chunk_points,
+        dedupe_hits,
+        cache_hits_total,
+        cache_prefetch_total,
+    )
+
+
+def _collect_residual_scopes_streaming_parallel(
+    *,
+    tree: PCCTree,
+    host_backend: ResidualCorrHostData,
+    query_indices: np.ndarray,
+    tree_indices: np.ndarray,
+    parent_positions: np.ndarray,
+    radii: np.ndarray,
+    scope_limit: int | None = None,
+    scan_cap: int | None = None,
+) -> Tuple[
+    np.ndarray,
+    np.ndarray,
+    Tuple[Tuple[int, ...], ...],
+    int,
+    int,
+    ResidualGateTelemetry,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    int,
+    int,
+]:
+    if _residual_gate_active(host_backend):
+        return _collect_residual_scopes_streaming_serial(
+            tree=tree,
+            host_backend=host_backend,
+            query_indices=query_indices,
+            tree_indices=tree_indices,
+            parent_positions=parent_positions,
+            radii=radii,
+            scope_limit=scope_limit,
+            scan_cap=scan_cap,
+        )
+
+    batch_size = int(query_indices.shape[0])
+    total_points = int(tree_indices.shape[0])
+    next_cache_np = np.asarray(tree.next_cache, dtype=np.int64)
+    top_levels_np = np.asarray(tree.top_levels, dtype=np.int64)
+    tree_indices_np = np.asarray(tree_indices, dtype=np.int64)
+    dataset_to_pos = {int(tree_indices_np[i]): int(i) for i in range(total_points)}
+
+    gate_snapshot = host_backend.gate_stats.snapshot()
+
+    limit_value = int(scope_limit) if scope_limit and scope_limit > 0 else 0
+    flags_matrix = np.zeros((batch_size, max(total_points, 1)), dtype=np.uint8)
+    scope_counts = np.zeros(batch_size, dtype=np.int64)
+    scope_lengths = np.zeros(batch_size, dtype=np.int64)
+    parents_valid = parent_positions >= 0
+    saturated = np.zeros(batch_size, dtype=bool)
+    trimmed_flags = np.zeros(batch_size, dtype=bool)
+    saturated_flags = np.zeros(batch_size, dtype=np.uint8)
+    observed_radii = np.zeros(batch_size, dtype=np.float64)
+    chunk_iterations = np.zeros(batch_size, dtype=np.int64)
+    chunk_points = np.zeros(batch_size, dtype=np.int64)
+    dedupe_hits = np.zeros(batch_size, dtype=np.int64)
+    cache_hits_total = 0
+    cache_prefetch_total = 0
+    level_scope_cache: Dict[int, np.ndarray] = {}
+    cache_limit = scope_limit if scope_limit and scope_limit > 0 else _RESIDUAL_SCOPE_DEFAULT_LIMIT
+    chunk = int(host_backend.chunk_size or 512)
+    query_block = max(1, min(batch_size, max(4, chunk // 4)))
+    if batch_size <= 32:
+        query_block = 1
+
+    conflict_scopes: list[Tuple[int, ...]] = [tuple() for _ in range(batch_size)]
+    scope_owner_chunks: list[np.ndarray] = []
+    scope_member_chunks: list[np.ndarray] = []
+    trimmed_scopes = 0
+    max_scope_members = 0
+    max_scope_after = 0
+    saturation_flags = np.zeros(batch_size, dtype=np.uint8)
+
+    scan_cap_value = scan_cap if scan_cap and scan_cap > 0 else None
+
+    tree_positions_np = np.arange(total_points, dtype=np.int64)
+
+    for block_start in range(0, batch_size, query_block):
+        block_range = range(block_start, min(batch_size, block_start + query_block))
+        block_valid: list[int] = []
+        for qi in block_range:
+            if not parents_valid[qi]:
+                conflict_scopes[qi] = ()
+                continue
+            parent_pos = int(parent_positions[qi])
+            parent_level = int(top_levels_np[parent_pos]) if 0 <= parent_pos < top_levels_np.shape[0] else -1
+            query_id = int(query_indices[qi])
+            radius = float(radii[qi])
+            flags_row = flags_matrix[qi]
+            cached_positions = level_scope_cache.get(parent_level)
+            if cached_positions is not None and cached_positions.size:
+                valid_cached = cached_positions[
+                    (cached_positions >= 0) & (cached_positions < total_points)
+                ]
+                if valid_cached.size:
+                    cache_prefetch_total += int(valid_cached.size)
+                    cached_ids = tree_indices_np[valid_cached]
+                    cache_kernel = host_backend.kernel_provider(
+                        np.asarray([query_id], dtype=np.int64),
+                        cached_ids,
+                    )
+                    cache_distances, cache_mask = compute_residual_distances_with_radius(
+                        backend=host_backend,
+                        query_index=query_id,
+                        chunk_indices=cached_ids,
+                        kernel_row=cache_kernel[0],
+                        radius=radius,
+                    )
+                    cache_include = np.nonzero(cache_mask)[0]
+                    if cache_include.size:
+                        cache_hits_total += int(cache_include.size)
+                        include_positions = valid_cached[cache_include]
+                        scope_counts[qi], dedupe_delta, trimmed_flag, added = _append_scope_positions(
+                            flags_row,
+                            include_positions,
+                            limit_value,
+                            int(scope_counts[qi]),
+                        )
+                        dedupe_hits[qi] += dedupe_delta
+                        if added:
+                            obs = float(np.max(cache_distances[cache_include]))
+                            if obs > observed_radii[qi]:
+                                observed_radii[qi] = obs
+                        if trimmed_flag:
+                            trimmed_flags[qi] = True
+                            saturated[qi] = True
+                            saturated_flags[qi] = 1
+            block_valid.append(qi)
+
+        active_block = [qi for qi in block_valid if not saturated[qi]]
+        for start in range(0, total_points, chunk):
+            if not active_block:
+                break
+            stop = min(start + chunk, total_points)
+            chunk_ids = tree_indices_np[start:stop]
+            if chunk_ids.size == 0:
+                continue
+            chunk_positions = tree_positions_np[start:stop]
+            block_arr = np.asarray(active_block, dtype=np.int64)
+            block_query_ids = query_indices[block_arr]
+            block_radii = radii[block_arr]
+            kernel_block = host_backend.kernel_provider(block_query_ids, chunk_ids)
+            dist_block, mask_block = compute_residual_distances_block_no_gate(
+                backend=host_backend,
+                query_indices=block_query_ids,
+                chunk_indices=chunk_ids,
+                kernel_block=kernel_block,
+                radii=block_radii,
+            )
+            next_active: list[int] = []
+            for local_idx, qi in enumerate(active_block):
+                if saturated[qi]:
+                    continue
+                chunk_iterations[qi] += 1
+                chunk_points[qi] += chunk_ids.size
+                mask_row = mask_block[local_idx]
+                include_idx = np.nonzero(mask_row)[0]
+                if include_idx.size:
+                    include_positions = chunk_positions[include_idx]
+                    scope_counts[qi], dedupe_delta, trimmed_flag, added = _append_scope_positions(
+                        flags_matrix[qi],
+                        include_positions,
+                        limit_value,
+                        int(scope_counts[qi]),
+                    )
+                    dedupe_hits[qi] += dedupe_delta
+                    if added:
+                        obs = float(np.max(dist_block[local_idx, include_idx]))
+                        if obs > observed_radii[qi]:
+                            observed_radii[qi] = obs
+                    if trimmed_flag:
+                        trimmed_flags[qi] = True
+                        saturated[qi] = True
+                        saturated_flags[qi] = 1
+                if scan_cap_value and chunk_points[qi] >= scan_cap_value:
+                    saturated[qi] = True
+                    saturated_flags[qi] = 1
+                if not saturated[qi]:
+                    next_active.append(qi)
+            active_block = next_active
+
+        for qi in block_valid:
+            if not parents_valid[qi]:
+                continue
+            parent_pos = int(parent_positions[qi])
+            flags_row = flags_matrix[qi]
+            scope_counts[qi], dedupe_delta, trimmed_flag, _ = _append_scope_positions(
+                flags_row,
+                np.asarray([parent_pos], dtype=np.int64),
+                limit_value,
+                int(scope_counts[qi]),
+            )
+            dedupe_hits[qi] += dedupe_delta
+            if trimmed_flag:
+                trimmed_flags[qi] = True
+                saturated_flags[qi] = 1
+            chain = _collect_next_chain(tree, parent_pos, next_cache=next_cache_np)
+            if chain:
+                chain_positions = np.asarray([int(pos) for pos in chain], dtype=np.int64)
+                scope_counts[qi], dedupe_delta, trimmed_flag, _ = _append_scope_positions(
+                    flags_row,
+                    chain_positions,
+                    limit_value,
+                    int(scope_counts[qi]),
+                )
+                dedupe_hits[qi] += dedupe_delta
+                if trimmed_flag:
+                    trimmed_flags[qi] = True
+                    saturated_flags[qi] = 1
+
+            scope_vec = np.nonzero(flags_row)[0]
+            flags_row[: total_points] = 0
+            if scope_vec.size:
+                scope_vec = _order_scope_positions_by_level(scope_vec, top_levels_np)
+            original_size = scope_vec.size
+            max_scope_members = max(max_scope_members, original_size)
+            if scope_vec.size:
+                scope_owner_chunks.append(np.full(scope_vec.size, qi, dtype=np.int64))
+                scope_member_chunks.append(scope_vec.astype(np.int64, copy=False))
+            scope_lengths[qi] = scope_vec.size
+            max_scope_after = max(max_scope_after, scope_vec.size)
+            conflict_scopes[qi] = tuple(int(x) for x in scope_vec.tolist())
+            if scope_vec.size:
+                cache_slice = scope_vec[: min(cache_limit, scope_vec.size)].copy()
+                parent_level = int(top_levels_np[parent_pos]) if 0 <= parent_pos < top_levels_np.shape[0] else -1
+                level_scope_cache[parent_level] = cache_slice
+            if scope_vec.size == 0:
+                saturated_flags[qi] = 0
+
+    trimmed_scopes = int(np.count_nonzero(trimmed_flags))
+
+    if scope_member_chunks:
+        if len(scope_owner_chunks) == 1:
+            owners_arr = scope_owner_chunks[0]
+            members_arr = scope_member_chunks[0]
+        else:
+            owners_arr = np.concatenate(scope_owner_chunks)
+            members_arr = np.concatenate(scope_member_chunks)
+        scope_indptr, scope_indices_i32 = build_scope_csr_from_pairs(
+            owners_arr.astype(np.int64, copy=False),
+            members_arr.astype(np.int64, copy=False),
+            batch_size,
+        )
+        scope_indices = scope_indices_i32.astype(np.int64, copy=False)
+    else:
+        scope_indptr = np.zeros(batch_size + 1, dtype=np.int64)
+        scope_indices = np.empty(0, dtype=np.int64)
+
+    total_scope_points = int(np.sum(chunk_points))
+    total_scope_scans = int(np.sum(chunk_iterations))
+    total_dedupe_hits = int(np.sum(dedupe_hits))
+
+    return (
+        scope_indptr,
+        scope_indices,
+        tuple(conflict_scopes),
+        trimmed_scopes,
+        max_scope_after,
+        host_backend.gate_stats.delta(gate_snapshot),
+        observed_radii,
+        saturated_flags,
         chunk_iterations,
         chunk_points,
         dedupe_hits,
@@ -587,6 +876,45 @@ def _order_scope_positions_by_level(
         ordered[pos] = scope_vec[idx]
         cursors[bucket] += 1
     return ordered
+
+
+def _residual_gate_active(host_backend: ResidualCorrHostData) -> bool:
+    enabled = bool(getattr(host_backend, "gate1_enabled", False))
+    if not enabled:
+        return False
+    radius_cap = getattr(host_backend, "gate1_radius_cap", None)
+    if radius_cap is not None and radius_cap <= 0.0:
+        return False
+    gate_vectors = getattr(host_backend, "gate_v32", None)
+    lookup = getattr(host_backend, "gate_lookup", None)
+    return gate_vectors is not None or lookup is not None
+
+
+def _append_scope_positions(
+    flags_row: np.ndarray,
+    positions: np.ndarray,
+    limit_value: int,
+    scope_count: int,
+) -> tuple[int, int, bool, int]:
+    if positions.size == 0:
+        return scope_count, 0, False, 0
+    dedupe = int(np.count_nonzero(flags_row[positions]))
+    new_mask = flags_row[positions] == 0
+    new_positions = positions[new_mask]
+    trimmed = False
+    if limit_value > 0 and new_positions.size:
+        available = max(limit_value - scope_count, 0)
+        if available <= 0:
+            trimmed = True
+            new_positions = new_positions[:0]
+        elif new_positions.size > available:
+            trimmed = True
+            new_positions = new_positions[:available]
+    added = int(new_positions.size)
+    if added:
+        flags_row[new_positions] = 1
+        scope_count += added
+    return scope_count, dedupe, trimmed, added
 
 
 def _collect_euclidean_sparse(
@@ -822,7 +1150,7 @@ def _collect_residual(
         dedupe_hits,
         cache_hits_total,
         cache_prefetch_total,
-    ) = _collect_residual_scopes_streaming(
+    ) = _collect_residual_scopes_streaming_parallel(
         tree=tree,
         host_backend=host_backend,
         query_indices=batch_indices_np,
