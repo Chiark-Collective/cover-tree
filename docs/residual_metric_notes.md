@@ -1,5 +1,7 @@
 # Residual-Correlation Metric Integration (2025-11)
 
+_Status snapshot (2025-11-10)._ The Numba scope streamer is merged, sparse traversal now feeds the bucketed CSR builder directly, and the refreshed Gate‑1 lookup (`docs/data/residual_gate_profile_32768_caps.json`) passes audits on the Hilbert 32 k harness. Gate-on reruns are still in-progress: `traversal_gate1_candidates≈2.33×10^8` yet `traversal_gate1_pruned=0`, so cache/prefilter work remains before we can claim build-time wins.
+
 This note summarizes the current host-side implementation for the Vecchia residual-correlation metric inside `covertreex`.
 
 ## Host Caches & Configuration
@@ -33,7 +35,8 @@ We introduced `ResidualCorrHostData` in `covertreex/metrics/residual.py`. It pac
 - `_collect_residual_scopes_streaming` now tracks chunk-level telemetry (chunks scanned, points touched, dedupe hits, saturation flags). These counters flow into `TraversalTimings` (`traversal_scope_chunk_{scans,points,dedupe,saturated}`) and the JSONL writer so profiling the 16 384-cap hit is straightforward.
 - Per-level scope caches remember up to `scope_limit` tree positions from the most recent query at each level. Later queries with the same parent level prefetch those nodes first (`traversal_scope_cache_{prefetch,hits}` capture how many were re-checked and re-used) before the chunk streamer emits new kernel tiles.
 - When `COVERTREEX_SCOPE_CHUNK_TARGET>0`, the same value now caps **both** the scope size and the number of tree points we are willing to scan per query. Once the scan budget is exhausted we mark the scope as saturated, stop requesting new kernel tiles, and rely on the telemetry above to highlight the truncation.
-- Practical impact: the 32 768-point Hilbert run with `COVERTREEX_SCOPE_CHUNK_TARGET=8192` (`benchmark_residual_scopecap_20251108.jsonl`) now finishes in **687.29 s build / 0.027 s query (37.6 k q/s)** with the scan budget tripping on 48 of 64 dominated batches (`traversal_scope_chunk_points` per batch ≈4.19 M = 512 queries × 8 192 cap, `traversal_scope_chunk_saturated=48`). The earlier cap-only replay (no scan guard) took 900.2 s, so this reuse alone saves ~24 % wall time without touching the conflict graph.
+- Practical impact: the 32 768-point Hilbert run with `COVERTREEX_SCOPE_CHUNK_TARGET=8192` (`pcct-20251110-105526-68dddf`, log `artifacts/benchmarks/artifacts/benchmarks/residual_sparse_streamer_20251110115526.jsonl`) now finishes in **≈493 s build / 0.027 s query (37.6 k q/s)** with the scan budget tripping on 48 of 64 dominated batches (`traversal_scope_chunk_points` per batch ≈4.19 M = 512 queries × 8 192 cap, `traversal_scope_chunk_saturated=48`). The earlier cap-only replay (no scan guard) took 900.2 s, so reuse plus the Numba streamer cuts ~45 % off the sparse path without touching the conflict graph.
+- For smaller Hilbert sweeps we now collapse the JSONL telemetry with `tools/export_benchmark_diagnostics.py`. Example: `python tools/export_benchmark_diagnostics.py --output artifacts/benchmarks/residual_budget_diagnostics.csv artifacts/benchmarks/artifacts/benchmarks/residual_{dense,sparse}_budget_4096.jsonl` yields a two-row CSV showing (a) dense residual, budgets disabled → **76.49 s** build with zero budget counters, (b) sparse streamer with `scope_chunk_target=4096` & schedule `1 024,2 048,4 096` → **103.37 s** build, total budget amplification `3.73×`, zero early-terminates, and ≥93.7 % of batches reusing cached pairwise blocks. Hand this CSV (plus the log paths) to anyone auditing adaptive-scan progress.
 - Residual batches emit `traversal_scope_radius_{obs,initial,limit,cap_values}_*` summaries plus `traversal_scope_radius_cap_hits` and `*_delta_{mean,max}` in every JSONL record. Those stats let you inspect how aggressive the ladder currently is (observed maxima) versus the limits you feed into traversal.
 - Optional per-scope caps can rein in traversal radii before the gate runs. Provide a JSON table via `COVERTREEX_RESIDUAL_SCOPE_CAPS_PATH=/path/to/caps.json` (schema `{"schema": 1, "default": <optional>, "levels": {"0": 0.5, "1": 0.75}}`) and/or a global fallback with `COVERTREEX_RESIDUAL_SCOPE_CAP_DEFAULT`. The caps clamp the runtime radius but still honour `COVERTREEX_RESIDUAL_RADIUS_FLOOR`; cap hits show up in the JSON logs so you can confirm how often each level is being throttled.
 - `docs/data/residual_scope_caps_scope8192.json` captured the legacy flat 1.25 cap, while `docs/data/residual_scope_caps_32768.json` now records the per-level medians (+0.05 margin) from the November 8 32 768-point replay. Derive fresh tables without hand-editing JSON by adding `--residual-scope-cap-output /path/to/out.json` (plus optional `--residual-scope-cap-percentile` / `--residual-scope-cap-margin`) to `cli.queries`; the new `ResidualScopeCapRecorder` streams per-level ladder samples directly from each batch insert, annotates the active `run_id`, and emits summaries at shutdown.
@@ -64,15 +67,48 @@ It emits both distances and a mask indicating which entries fall below a caller-
 
 ### Gate‑1 (whitened Euclidean bound)
 
-- `ResidualCorrHostData` now materialises a float32-whitened copy of `v_matrix` (`gate_v32` + `gate_norm32`) along with telemetry counters and user-tunable parameters (`gate1_alpha`, `gate1_margin`, `gate1_eps`, `gate1_audit`).
-- `compute_residual_distances_with_radius` consults `RuntimeConfig.residual_gate1_*`, runs the Numba `gate1_whitened_mask` before calling `_distance_chunk`, and scatters survivor distances back into the full chunk order so existing callers keep the same contract.
-- Per-batch telemetry (`traversal_gate1_{candidates,kept,pruned}`, `traversal_gate1_ms`) is emitted via the traversal timings and JSONL sink; audit mode optionally replays `_distance_chunk` on pruned rows and fails fast if a true neighbour slips through the gate.
-- The gate is feature-flagged via `COVERTREEX_RESIDUAL_GATE1=1` plus the associated `..._ALPHA`, `..._MARGIN`, `..._EPS`, and `..._AUDIT` knobs so we can tune the α/ε mapping on benchmark data before enabling it by default.
-- Latest diag0 sweeps (`benchmark_residual_gate_p2k_alpha{0_75,1_0,1_25,1_5,2_0,2_25,2_5,3_0,4_0,10_0}_diag0.jsonl`) still fail the audit as soon as dominated scopes appear—even with the clamped `si_cache` and the residual radius ladder—so Gate‑1 remains *off* in production unless you opt in explicitly. The only run that completes is the intentionally loose `benchmark_residual_gate_p2k_alpha100_diag0{,_run2}.jsonl`, and those logs show zero pruned candidates (the gate keeps everything), confirming we previously lacked a safe but selective threshold.
+- `ResidualCorrHostData` materialises a float32-whitened copy of `v_matrix` (`gate_v32` + `gate_norm32`) plus telemetry counters and runtime knobs (`gate1_alpha`, `gate1_margin`, `gate1_eps`, `gate1_audit`, `gate1_band_eps`, `gate1_keep_pct`, `gate1_prune_pct`). Gate‑1 now ships **disabled by default**; you must export `COVERTREEX_RESIDUAL_GATE1=1` (or use the CLI `--residual-gate` preset) to opt in.
+- `compute_residual_distances_with_radius` now evaluates a **two-threshold, gray-band** gate: per-radius bins supply both “keep” and “prune” quantiles, the keep side shrinks by `(1−margin)`, the prune side expands by `(1+margin)`, and any whitened distance within `band_eps` of the prune threshold is forced into the gray band for an exact kernel call. Only entries above `prune+band_eps` are discarded.
+- Per-batch telemetry (`traversal_gate1_{candidates,kept,pruned}`, `traversal_gate1_ms`) still flows through traversal timings; audit mode replays `_distance_chunk` on the pruned rows and raises immediately if a true neighbour slips through.
+- The gate remains fully opt-in (`COVERTREEX_RESIDUAL_GATE1=1`) and guarded by the new env knobs `COVERTREEX_RESIDUAL_GATE1_{BAND_EPS,KEEP_PCT,PRUNE_PCT}` so we can sweep gray-band widths independently from α/ε.
+- Lookup-driven runs now consume quantile envelopes (p95/p99/p99.9 by default). As we refresh `docs/data/residual_gate_profile_32768_caps.json` we can simply change `KEEP_PCT/PRUNE_PCT` to pick the envelope we want without rebuilding the tree.
+- Gate-on reruns should finally show `traversal_gate1_pruned>0` once we regenerate the lookup with the new quantile schema; until that happens we keep the feature disabled by default and only use it for explicit experiments.
+
+## Gate Profile Capture & JSONL Ingestion
+
+- `cli.queries` exposes three new knobs for residual runs:
+  - `--residual-gate-profile-path=/path/to/profile.json` records the per-run Gate‑1 samples (same structure as `ResidualGateProfile.dump`).
+  - `--residual-gate-profile-bins=N` overrides the bin count (default 512).
+  - `--residual-gate-profile-log=/path/to/profile_logs.jsonl` appends the recorded profile payload (plus run metadata, runtime snapshot, and the batch log path) to a JSONL stream.
+- The CLI auto-creates a timestamped profile JSON under `artifacts/profiles/` when you supply `--residual-gate-profile-log` but omit `--residual-gate-profile-path`, so a single run now yields both the binwise lookup and a normalized JSONL line without any manual file juggling.
+- `tools/ingest_residual_gate_profile.py` replaces the ad-hoc rebuild workflow. Point it at one or more JSON/JSONL profile dumps and it will:
+  1. Validate that all inputs share identical `radius_bin_edges`.
+  2. Merge the `max_whitened`, `max_ratio`, and `counts` arrays via element-wise maxima / sums.
+  3. Merge **quantile envelopes** per percentile (taking the per-bin max across runs) and stamp `quantile_{counts,totals}` so we can audit coverage later.
+  4. Stamp aggregate metadata (`sources`, `run_ids`, overrides) and write a ready-to-use lookup JSON.
+
+Example:
+
+```bash
+# Capture a Hilbert run with streamer + scope cap, profile log + JSON file
+uv run python -m cli.queries --metric residual \
+  --tree-points 32768 --queries 1024 --k 8 --batch-size 512 \
+  --residual-gate-profile-log profiles/residual_gate_runs.jsonl \
+  --residual-gate-profile-bins 512 \
+  --residual-gate lookup
+
+# Merge multiple runs into a single lookup artefact
+uv run python tools/ingest_residual_gate_profile.py \
+  artifacts/profiles/residual_gate_runs.jsonl \
+  --output docs/data/residual_gate_profile_32768_caps.json \
+  --metadata corpus=hilbert32k scope_cap=8192
+```
+
+The resulting lookup mirrors `ResidualGateProfile.dump` but includes additional provenance (sources, run ids, runtime snapshot). `COVERTREEX_RESIDUAL_GATE1_PROFILE_PATH` can then point at the merged JSON without re-running the expensive sparse traversal.
 
 ### Calibration & Lookup Table
 
-- `tools/build_residual_gate_profile.py` builds an empirical profile from a synthetic residual workload. It reproduces the diag0 harness (2048 points, dimension 8, seed 42) and samples every pair, recording (residual distance, whitened distance) into evenly spaced radius bins.
+- `tools/build_residual_gate_profile.py` builds an empirical profile from a synthetic residual workload. It reproduces the diag0 harness (2048 points, dimension 8, seed 42) and samples every pair, recording (residual distance, whitened distance) into evenly spaced radius bins. Use `--quantiles 95,99,99.9 --quantile-sample-cap 4096` (defaults shown) to control which percentiles are preserved in the on-disk lookup.
 - The 32 768-point capture (`docs/data/residual_gate_profile_32768_caps.json`) is now the default lookup used by `COVERTREEX_RESIDUAL_GATE1_LOOKUP_PATH` and the CLI presets. The file was refreshed on **2025‑11‑10** via a full sparse run with `COVERTREEX_RESIDUAL_GATE1_PROFILE_PATH=$PWD/docs/data/residual_gate_profile_32768_caps.json` (log `artifacts/benchmarks/residual_sparse_streamer_profile_20251110122936.jsonl`, run id `pcct-20251110-112936-0d2a25`), so it reflects the radius ladder and telemetry we see with the Numba streamer + 8 192 scan cap. Use the original diag0 artefact (`docs/data/residual_gate_profile_diag0.json`) only for quick smoke tests.
 - To regenerate or explore alternative datasets, run for example:
 
