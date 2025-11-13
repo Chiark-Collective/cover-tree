@@ -84,6 +84,9 @@ def runtime_from_args(
     prefix_schedule = _get_arg(args, "prefix_schedule")
     if prefix_schedule:
         runtime_kwargs["prefix_schedule"] = prefix_schedule
+    residual_stream_tile = _get_arg(args, "residual_stream_tile")
+    if residual_stream_tile is not None:
+        runtime_kwargs["residual_stream_tile"] = residual_stream_tile
     mis_seed = _get_arg(args, "mis_seed")
     if mis_seed is not None:
         runtime_kwargs["mis_seed"] = mis_seed

@@ -243,5 +243,6 @@ Until those traversal improvements ship, keep the residual grid in place for det
 - Residual mode requires `backend.name == "numpy"` (NumPy backend) until the GPU/JAX kernels are ported.
 - The decoder must map tree payloads to dataset indices; if trees store transformed buffers, supply a custom `point_decoder` when creating `ResidualCorrHostData`.
 - The chunk kernel honours `chunk_size`; tune it to balance host-side streaming vs. cache reuse.
+- `COVERTREEX_RESIDUAL_STREAM_TILE` (CLI `--residual-stream-tile`) caps the dense streamer’s tile size. The runtime now defaults to `min(scope_limit, backend.chunk_size)` (64 entries when Gate‑1 is off), and the override lets auditors reproduce the historical 512-entry scans or probe smaller tiles without code edits.
 - Setting `COVERTREEX_ENABLE_SPARSE_TRAVERSAL=1` now engages residual streaming automatically when the metric is residual-correlation; otherwise, traversal falls back to the dense mask path.
 - **Conflict fallback (2025‑11‑11).** When the traversal cache is missing we now stream adjacency rows through the same whitened helper rather than calling `_rbf_kernel` directly. Each `(source, target)` chunk inherits the staged float32 workspace, Gate‑1 prunes obviously distant edges, and only the surviving edges trigger SGEMM kernel tiles before we compare against `min(radii_source, radii_target)`.

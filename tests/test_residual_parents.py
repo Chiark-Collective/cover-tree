@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import numpy as np
 import pytest
 from types import SimpleNamespace
@@ -12,7 +13,7 @@ from covertreex.metrics.residual import (
 )
 
 
-def _build_host_backend() -> ResidualCorrHostData:
+def _build_host_backend(chunk_size: int = 2) -> ResidualCorrHostData:
     v_matrix = np.array(
         [
             [1.0, 0.0],
@@ -42,7 +43,7 @@ def _build_host_backend() -> ResidualCorrHostData:
         p_diag=p_diag,
         kernel_diag=kernel_diag,
         kernel_provider=kernel_provider,
-        chunk_size=2,
+        chunk_size=int(chunk_size),
         gate1_enabled=False,
     )
     return backend
@@ -155,3 +156,65 @@ def test_resolve_scope_limits_gate_on_skips_fallback() -> None:
     limit, scan_cap = residual_strategy._resolve_scope_limits(runtime, gate_active=True)
     assert limit == residual_strategy._RESIDUAL_SCOPE_DEFAULT_LIMIT
     assert scan_cap == 0
+
+
+def test_parallel_streaming_honors_stream_tile_override() -> None:
+    backend = _build_host_backend(chunk_size=64)
+    base_kernel = backend.kernel_provider
+    recorded: list[int] = []
+
+    def tracking_kernel(rows: np.ndarray, cols: np.ndarray) -> np.ndarray:
+        recorded.append(int(np.asarray(cols, dtype=np.int64).size))
+        return base_kernel(rows, cols)
+
+    backend = replace(backend, kernel_provider=tracking_kernel)
+    tree_indices = np.tile(np.array([0, 1, 2], dtype=np.int64), 32)
+    tree = _dummy_tree(num_points=tree_indices.size)
+    workspace = ResidualWorkspace(max_queries=1, max_chunk=backend.chunk_size)
+    telemetry = ResidualDistanceTelemetry()
+
+    residual_strategy._collect_residual_scopes_streaming_parallel(
+        tree=tree,
+        host_backend=backend,
+        query_indices=np.array([0], dtype=np.int64),
+        tree_indices=tree_indices,
+        parent_positions=np.array([0], dtype=np.int64),
+        radii=np.array([1.0], dtype=np.float64),
+        scope_limit=None,
+        stream_tile=5,
+        workspace=workspace,
+        telemetry=telemetry,
+    )
+
+    assert recorded and max(recorded) <= 5
+
+
+def test_parallel_streaming_tiles_with_scope_limit() -> None:
+    backend = _build_host_backend(chunk_size=64)
+    recorded: list[int] = []
+    base_kernel = backend.kernel_provider
+
+    def tracking_kernel(rows: np.ndarray, cols: np.ndarray) -> np.ndarray:
+        recorded.append(int(np.asarray(cols, dtype=np.int64).size))
+        return base_kernel(rows, cols)
+
+    backend = replace(backend, kernel_provider=tracking_kernel)
+    tree_indices = np.tile(np.array([0, 1, 2], dtype=np.int64), 32)
+    tree = _dummy_tree(num_points=tree_indices.size)
+    workspace = ResidualWorkspace(max_queries=1, max_chunk=backend.chunk_size)
+    telemetry = ResidualDistanceTelemetry()
+
+    residual_strategy._collect_residual_scopes_streaming_parallel(
+        tree=tree,
+        host_backend=backend,
+        query_indices=np.array([0], dtype=np.int64),
+        tree_indices=tree_indices,
+        parent_positions=np.array([0], dtype=np.int64),
+        radii=np.array([1.0], dtype=np.float64),
+        scope_limit=3,
+        stream_tile=None,
+        workspace=workspace,
+        telemetry=telemetry,
+    )
+
+    assert recorded and max(recorded) <= 3

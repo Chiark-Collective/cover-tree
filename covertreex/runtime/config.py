@@ -23,7 +23,8 @@ _PREFIX_SCHEDULES = {"doubling", "adaptive"}
 _DEFAULT_SCOPE_CHUNK_TARGET = 0
 _DEFAULT_SCOPE_CHUNK_MAX_SEGMENTS = 512
 _DEFAULT_SCOPE_BUDGET_SCHEDULE: Tuple[int, ...] = ()
-_DEFAULT_RESIDUAL_SCOPE_BUDGET_SCHEDULE: Tuple[int, ...] = (64, 128, 256)
+_DEFAULT_RESIDUAL_SCOPE_BUDGET_SCHEDULE: Tuple[int, ...] = (32, 64, 96)
+_DEFAULT_RESIDUAL_STREAM_TILE = 64
 _DEFAULT_SCOPE_BUDGET_UP_THRESH = 0.015
 _DEFAULT_SCOPE_BUDGET_DOWN_THRESH = 0.002
 _DEFAULT_BATCH_ORDER_STRATEGY = "hilbert"
@@ -256,6 +257,7 @@ class RuntimeConfig:
     residual_gate1_lookup_margin: float
     residual_force_whitened: bool
     residual_scope_member_limit: int | None
+    residual_stream_tile: int | None
     residual_scope_cap_path: str | None
     residual_scope_cap_default: float
     residual_prefilter_enabled: bool
@@ -436,6 +438,11 @@ class RuntimeConfig:
             residual_scope_member_limit = 0
         else:
             residual_scope_member_limit = raw_scope_member_limit
+        raw_stream_tile = _parse_optional_int(os.getenv("COVERTREEX_RESIDUAL_STREAM_TILE"))
+        if raw_stream_tile is None or raw_stream_tile <= 0:
+            residual_stream_tile = _DEFAULT_RESIDUAL_STREAM_TILE if residual_metric else None
+        else:
+            residual_stream_tile = raw_stream_tile
         residual_scope_cap_path = os.getenv("COVERTREEX_RESIDUAL_SCOPE_CAPS_PATH")
         residual_scope_cap_default = _parse_optional_float(
             os.getenv("COVERTREEX_RESIDUAL_SCOPE_CAP_DEFAULT"),
@@ -519,6 +526,7 @@ class RuntimeConfig:
             residual_gate1_lookup_margin=residual_gate1_lookup_margin,
             residual_force_whitened=residual_force_whitened,
             residual_scope_member_limit=residual_scope_member_limit,
+            residual_stream_tile=residual_stream_tile,
             residual_scope_cap_path=residual_scope_cap_path,
             residual_scope_cap_default=residual_scope_cap_default,
             residual_prefilter_enabled=residual_prefilter_enabled,

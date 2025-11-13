@@ -65,6 +65,15 @@ def _parse_args() -> argparse.Namespace:
         help="Chunk size for residual kernel streaming.",
     )
     parser.add_argument(
+        "--residual-stream-tile",
+        type=int,
+        default=64,
+        help=(
+            "Residual-only: tile size for dense scope streaming (default: 64, further clamped by "
+            "scope member caps)."
+        ),
+    )
+    parser.add_argument(
         "--baseline",
         choices=("none", "sequential", "gpboost", "external", "both", "all"),
         default="none",

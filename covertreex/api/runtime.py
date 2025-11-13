@@ -191,6 +191,7 @@ class Runtime:
     residual: Residual | None = None
     residual_force_whitened: bool | None = None
     residual_scope_member_limit: int | None = None
+    residual_stream_tile: int | None = None
     extra: Dict[str, Any] = field(default_factory=dict)
 
     def to_config(self, base: cx_config.RuntimeConfig | None = None) -> cx_config.RuntimeConfig:
@@ -228,6 +229,11 @@ class Runtime:
             "residual_scope_member_limit",
             self.residual_scope_member_limit,
         )
+        _apply_if_present(
+            overrides,
+            "residual_stream_tile",
+            self.residual_stream_tile,
+        )
         overrides.update(self.extra)
         if not overrides:
             return base_config
@@ -254,6 +260,7 @@ class Runtime:
             "enable_diagnostics": config.enable_diagnostics,
             "residual_force_whitened": config.residual_force_whitened,
             "residual_scope_member_limit": config.residual_scope_member_limit,
+            "residual_stream_tile": config.residual_stream_tile,
         }
 
     def with_updates(self, **kwargs: Any) -> "Runtime":
@@ -291,4 +298,5 @@ class Runtime:
             residual=residual,
             residual_force_whitened=config.residual_force_whitened,
             residual_scope_member_limit=config.residual_scope_member_limit,
+            residual_stream_tile=config.residual_stream_tile,
         )

@@ -223,7 +223,7 @@ We tried both remediation ideas on the 4 k Hilbert “shakeout” before touch
 
 ### Current Status (post-telemetry fixes)
 
-- **Scope budgets:** Added a residual-specific fallback schedule `(64, 128, 256)` when `COVERTREEX_SCOPE_BUDGET_SCHEDULE` is unset. Dense runs now record `traversal_scope_budget_*` again, but because the chunk size stays at 512, each query still inspects a full 512-point chunk before the budget logic even applies. Result: `traversal_scope_chunk_points` remains **262,144**, and semisort stays in the **2–5 s** range even after the SGEMM fix. Shrinking `--residual-chunk-size` helped conflict fan-out but not enough to reach the 30 ms target.
+- **Scope budgets:** Added a residual-specific fallback schedule `(32, 64, 96)` when `COVERTREEX_SCOPE_BUDGET_SCHEDULE` is unset. Dense runs now record `traversal_scope_budget_*` again, but because the chunk size stays at 512, each query still inspects a full 512-point chunk before the budget logic even applies. Result: `traversal_scope_chunk_points` remains **262,144**, and semisort stays in the **2–5 s** range even after the SGEMM fix. Shrinking `--residual-chunk-size` helped conflict fan-out but not enough to reach the 30 ms target.
 - **Gate-on telemetry:** Enabling `COVERTREEX_RESIDUAL_GATE1=1` with the refreshed lookup trims scopes to ~512 entries, but we pay for 512 whitened SGEMMs per batch. `traversal_semisort_ms` drops to ~2.2 s, not milliseconds, so gate-on is still far too expensive to serve as the “dense” preset.
 - **Scan caps (env overrides):** Forcing `COVERTREEX_SCOPE_CHUNK_TARGET=2048` merely caps chunk scans, not scope size, so semisort remains multi-second. No combination of scan-cap + gate-off tested so far restores the historical 30 ms dominated batches.
 
@@ -232,3 +232,80 @@ We tried both remediation ideas on the 4 k Hilbert “shakeout” before touch
 1. Finish the dense scope streamer rewrite so each 512-point tree chunk is scanned once per batch (shared kernel block + level-cache trimming), targeting **≤64** survivors/query without revisiting SGEMMs.
 2. Keep SGEMM / gate telemetry strictly opt-in (via `COVERTREEX_RESIDUAL_FORCE_WHITENED` + gate flags) and document the new `COVERTREEX_RESIDUAL_SCOPE_MEMBER_LIMIT` override for auditors.
 3. Validate on the 4 k shakeout (Hilbert) after the streamer changes before spending another hour on the 32 k sweep; don’t attempt 32 k until `traversal_semisort_ms ≤ 0.05 s` on the 4 k preset.
+
+### Next-Step Optimization Plan (2025-11-14)
+
+To close the remaining gap to the 30 ms dominated-batch target we will execute the following sequence immediately after landing the outstanding bisect/fix:
+
+1. **Scope-stream tiling.** Update `_collect_residual_scopes_streaming_parallel` so dense runs slice each 512-point chunk into `tile = min(scope_limit, host_backend.chunk_size)` segments and stop evaluating additional tiles once every active query hits its membership budget. This keeps the batched kernel path but bounds raw residual evaluations at `query_block × tile_size` instead of `query_block × 512`.
+2. **Tighter dense fallback budgets.** Reduce `_RESIDUAL_SCOPE_DENSE_FALLBACK_LIMIT` to 64 and align the fallback scope budget schedule to `(32, 64, 96)` (or similar monotonic steps) so we never build >64-entry scopes when Gate‑1 is off unless the operator explicitly overrides `COVERTREEX_RESIDUAL_SCOPE_MEMBER_LIMIT`.
+3. **Runtime tunables + docs.** Add a `COVERTREEX_RESIDUAL_STREAM_TILE` (CLI `--residual-stream-tile`) override wired through `build_residual_backend` so auditors can reproduce both the historical large-chunk behaviour and the new dense tiling without code edits. Document the knob beside the member-limit override in this file and `docs/residual_metric_notes.md`.
+4. **Validation loop.** Re-run the 4 k Hilbert preset (default + `RESIDUAL_SCOPE_MEMBER_LIMIT=0`) and block on `traversal_semisort_ms ≤ 0.05 s` with `traversal_scope_chunk_points` tracking `batch_size × tile`. Only then reattempt the 32 k sweep, capturing JSONL/CSV artifacts plus the updated telemetry snapshots for the audit trail.
+
+Each step should land with targeted regression tests (`tests/test_residual_parents.py`) verifying the new tiling limit, budget resolver, and runtime plumbing so future merges cannot silently revert the gains.
+
+### 2025-11-14 Dense Stream Tiling + Runtime Knobs
+
+- **Chunk tiling landed.** `_collect_residual_scopes_streaming_parallel` now slices each Hilbert chunk into tiles no larger than `min(scope_limit, COVERTREEX_RESIDUAL_STREAM_TILE, backend.chunk_size)` and stops issuing kernel calls as soon as every active query saturates. Telemetry confirms that `traversal_scope_chunk_points` scales with `batch_size × tile` rather than `batch_size × 512` whenever the dense member cap engages.
+- **64-entry dense fallback.** The gate-off member cap defaults to **64** again, and the residual fallback budget ladder is now `(32, 64, 96)`. That means dense runs never examine more than ~64 survivors per query unless the operator sets `COVERTREEX_RESIDUAL_SCOPE_MEMBER_LIMIT` explicitly.
+- **Stream-tile override.** Added `COVERTREEX_RESIDUAL_STREAM_TILE` (CLI `--residual-stream-tile`) so audits can force larger or smaller tile sizes without touching code. `Runtime.describe()` now prints `residual_stream_tile`, and the env knob propagates through `cli/runtime.py` so JSONL telemetry contains the value for every run.
+- **Regression cover.** `tests/test_residual_parents.py` now covers both the stream-tile override and the scope-limit tiling path, ensuring future refactors cannot silently revert the bounded-kernel contract.
+
+### 2025-11-14 Dense Validation Snapshot
+
+We re-ran both the 4 k “shakeout” and the full 32 k Hilbert sweep with the new defaults:
+
+- **Default recipe (guardrails on).**
+  
+  ```bash
+  export COVERTREEX_BACKEND=numpy
+  export COVERTREEX_ENABLE_NUMBA=1
+  export COVERTREEX_SCOPE_CHUNK_TARGET=0
+  export COVERTREEX_ENABLE_SPARSE_TRAVERSAL=0
+  export COVERTREEX_BATCH_ORDER=hilbert
+  export COVERTREEX_PREFIX_SCHEDULE=doubling
+  export COVERTREEX_RESIDUAL_GATE1=0
+  export COVERTREEX_RESIDUAL_FORCE_WHITENED=0
+  export COVERTREEX_RESIDUAL_STREAM_TILE=64  # dense default everywhere
+  
+  python -m cli.queries \
+    --metric residual \
+    --dimension 8 --tree-points 4096 \
+    --batch-size 512 --queries 256 --k 8 \
+    --seed 0 --baseline none \
+    --log-file artifacts/benchmarks/residual_phase05_hilbert_4k_tiled.jsonl
+  ```
+
+  - `traversal_semisort_ms`: median **0.320 s** (p90 0.343 s, max 0.350 s).
+  - `traversal_scope_chunk_points` locked to **8 192** (512 queries × 16-point tiles) with `traversal_scope_chunk_max_members=64` across all dominated batches.
+  - Total traversal wall clock **≈2.66 s** for the 8 dominated batches (down from multi-minute stalls in the regression report).
+
+- **Full 32 k Hilbert sweep (same env, `--tree-points 32768 --queries 1024`).**
+
+  ```bash
+  python -m cli.queries \
+    --metric residual \
+    --dimension 8 --tree-points 32768 \
+    --batch-size 512 --queries 1024 --k 8 \
+    --seed 42 --baseline none \
+    --residual-stream-tile 64 \
+    --log-file artifacts/benchmarks/residual_dense_32768_tiled.jsonl
+  ```
+
+  - 64 dominated batches, `traversal_semisort_ms` median **0.253 s** (p90 0.267 s, max 0.299 s) with scopes capped at **8 192** points and **64** survivors by construction.
+  - Total traversal time **≈34.1 s**, more than 6× faster than the guardrails-off rerun (2–3 s semisort pulses, >2 h wall, see earlier regression note).
+
+> **Default rollout:** `cli/queries` now passes `--residual-stream-tile 64` by default (and the runtime mirrors that when `COVERTREEX_RESIDUAL_STREAM_TILE` is unset), so every dense residual run automatically inherits the tiling cap unless operators explicitly override it. Keep the member cap enabled unless running an explicit “guardrails off” investigation; both knobs are surfaced in JSONL telemetry for auditing.
+
+#### Guardrails-Off Reference (for comparison only)
+
+Setting `COVERTREEX_RESIDUAL_SCOPE_MEMBER_LIMIT=0` and `--residual-stream-tile 512` on the 4 k preset (`artifacts/benchmarks/artifacts/benchmarks/residual_phase05_hilbert_4k_scopefree.jsonl`) still reproduces the catastrophic behaviour: `traversal_semisort_ms` median **2.32 s**, scope points back to **262 144**, and traversal wall **≈16.8 s**. This confirms the remaining delta to the historical 30 ms dominated batches is purely raw kernel streaming.
+
+### Remaining Levers
+
+1. **Even smaller tiles.** Streaming 16-point tiles (current default) keeps scopes tight but still costs ~0.25–0.35 s per dominated batch. Dropping to 8- or 4-point tiles (or dynamically shrinking based on saturation rate) would cut the raw kernel work proportionally; prototype by setting `COVERTREEX_RESIDUAL_STREAM_TILE=32` (4 k) before touching 32 k.
+2. **Tighter fallback budgets.** The dense fallback ladder now stops at 64 entries; pushing it to `(24, 48, 64)` or similar would give another 1.3–1.5× reduction if accuracy holds, at the cost of more frequent budget escalations.
+3. **Scope-prefetch heuristics.** Level caches still miss on early dominated batches. Re-introducing smarter Hilbert prefetch or per-level radius trimming could cut the number of tiles each query touches and drive medians closer to the historical 30 ms target without shrinking the tile further.
+4. **Gate work (deferred).** Once the dense streamer is back under 100 ms/batch, revisit Gate‑1 with a safer lookup profile so we can optionally offload the last factor-of-2 via SGEMM; today the kernel path dominates so dense improvements are the priority.
+
+Document every future run (4 k shakeout first, then 32 k) with the commands above so we can keep the audit trail continuous.
