@@ -368,7 +368,7 @@ class RuntimeConfig:
         )
         residual_gate1_enabled = _bool_from_env(
             os.getenv("COVERTREEX_RESIDUAL_GATE1"),
-            default=False,
+            default=True if residual_metric else False,
         )
         residual_gate1_alpha = _parse_optional_float(
             os.getenv("COVERTREEX_RESIDUAL_GATE1_ALPHA"),

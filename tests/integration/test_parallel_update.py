@@ -45,6 +45,25 @@ def _setup_tree():
     )
 
 
+def _batch_in_plan_order(batch, plan):
+    permutation = getattr(plan, "batch_permutation", None)
+    if permutation is None:
+        return batch
+    perm = jnp.asarray(permutation, dtype=jnp.int32)
+    return batch[perm]
+
+
+def _expected_appended_batch(batch, plan):
+    ordered_batch = _batch_in_plan_order(batch, plan)
+    return jnp.concatenate(
+        [
+            ordered_batch[plan.selected_indices],
+            ordered_batch[plan.dominated_indices],
+        ],
+        axis=0,
+    )
+
+
 def _expected_level_offsets(levels):
     levels_np = np.asarray(levels, dtype=np.int64)
     if levels_np.size == 0:
@@ -223,8 +242,13 @@ def test_plan_batch_insert_runs_pipeline():
     assert tree.num_points == 3  # unchanged original tree
 
     appended = new_tree.points[-batch.shape[0] :]
+    batch_plan_order = _batch_in_plan_order(batch, plan)
     expected = jnp.concatenate(
-        [batch[plan.selected_indices], batch[plan.dominated_indices]], axis=0
+        [
+            batch_plan_order[plan.selected_indices],
+            batch_plan_order[plan.dominated_indices],
+        ],
+        axis=0,
     )
     assert jnp.allclose(appended, expected)
 
@@ -450,22 +474,14 @@ def test_batch_insert_persistence_across_versions():
     batch1 = jnp.asarray([[2.4, 2.4], [0.6, 0.5]])
     tree1, plan1 = batch_insert(tree, batch1, mis_seed=0)
 
-    expected1 = np.asarray(
-        jnp.concatenate(
-            [batch1[plan1.selected_indices], batch1[plan1.dominated_indices]], axis=0
-        )
-    )
+    expected1 = np.asarray(_expected_appended_batch(batch1, plan1))
     appended1 = np.asarray(tree1.points)[tree.num_points :]
     assert np.allclose(appended1, expected1)
 
     batch2 = jnp.asarray([[3.1, 3.05], [3.4, 3.35], [0.1, 0.2]])
     tree2, plan2 = batch_insert(tree1, batch2, mis_seed=1)
 
-    expected2 = np.asarray(
-        jnp.concatenate(
-            [batch2[plan2.selected_indices], batch2[plan2.dominated_indices]], axis=0
-        )
-    )
+    expected2 = np.asarray(_expected_appended_batch(batch2, plan2))
 
     # Original tree untouched
     assert np.allclose(np.asarray(tree.points), original_points)
@@ -514,7 +530,12 @@ def test_batch_insert_prefix_doubling_matches_manual_sequence():
     for idx, group in enumerate(result.groups):
         pts = batch[jnp.asarray(group.permutation_indices.tolist())]
         sub_seed = int(seeds[idx]) if seeds else None
-        tree_manual, _ = batch_insert(tree_manual, pts, mis_seed=sub_seed)
+        tree_manual, _ = batch_insert(
+            tree_manual,
+            pts,
+            mis_seed=sub_seed,
+            apply_batch_order=False,
+        )
 
     assert jnp.allclose(tree_pref.points, tree_manual.points)
     assert tree_pref.stats.num_batches == tree_manual.stats.num_batches

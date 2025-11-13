@@ -1250,7 +1250,6 @@ register_traversal_strategy(
     "residual_sparse",
     predicate=lambda runtime, backend: (
         runtime.metric == "residual_correlation"
-        and runtime.enable_numba
         and backend.name == "numpy"
     ),
     factory=_ResidualTraversal,

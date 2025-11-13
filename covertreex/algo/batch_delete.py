@@ -283,10 +283,25 @@ def _compute_delete_computation(
         )
 
         group_np = np.asarray(group_points, dtype=float)
+        if plan.batch_permutation is not None:
+            perm_indices = np.asarray(plan.batch_permutation, dtype=np.int64)
+            ordered_group_np = group_np[perm_indices]
+            ordered_group_nodes = group_nodes[perm_indices]
+        else:
+            ordered_group_np = group_np
+            ordered_group_nodes = group_nodes
         current_size = current_points_np.shape[0]
 
-        selected_points_np = group_np[selected_batch_indices] if selected_batch_indices.size else np.empty((0, dimension), dtype=float)
-        dominated_points_np = group_np[dominated_batch_indices] if dominated_batch_indices.size else np.empty((0, dimension), dtype=float)
+        selected_points_np = (
+            ordered_group_np[selected_batch_indices]
+            if selected_batch_indices.size
+            else np.empty((0, dimension), dtype=float)
+        )
+        dominated_points_np = (
+            ordered_group_np[dominated_batch_indices]
+            if dominated_batch_indices.size
+            else np.empty((0, dimension), dtype=float)
+        )
 
         selected_levels_np = traversal_levels_np[selected_batch_indices] if selected_batch_indices.size else np.empty((0,), dtype=np.int64)
         dominated_levels_np = traversal_levels_np[dominated_batch_indices] if dominated_batch_indices.size else np.empty((0,), dtype=np.int64)
@@ -327,7 +342,11 @@ def _compute_delete_computation(
                     parent_idx = selected_to_global.get(int(nb))
                     if parent_idx is None:
                         continue
-                    dist = float(np.linalg.norm(group_np[batch_idx] - group_np[int(nb)]))
+                    dist = float(
+                        np.linalg.norm(
+                            ordered_group_np[batch_idx] - ordered_group_np[int(nb)]
+                        )
+                    )
                     candidates.append((dist, parent_idx))
                 if candidates:
                     candidates.sort(key=lambda item: item[0])
@@ -344,13 +363,17 @@ def _compute_delete_computation(
                     continue
                 if parent_idx < current_size:
                     dominated_parent_dists_np[offset] = float(
-                        np.linalg.norm(group_np[batch_idx] - current_points_np[parent_idx])
+                        np.linalg.norm(
+                            ordered_group_np[batch_idx] - current_points_np[parent_idx]
+                        )
                     )
                 else:
                     parent_offset = parent_idx - current_size
                     if 0 <= parent_offset < inserted_points_np.shape[0]:
                         dominated_parent_dists_np[offset] = float(
-                            np.linalg.norm(group_np[batch_idx] - inserted_points_np[parent_offset])
+                            np.linalg.norm(
+                                ordered_group_np[batch_idx] - inserted_points_np[parent_offset]
+                            )
                         )
                     else:
                         dominated_parent_dists_np[offset] = 0.0
@@ -434,8 +457,16 @@ def _compute_delete_computation(
                 backend=backend,
             )
 
-        selected_original = group_nodes[selected_batch_indices] if num_selected else np.empty((0,), dtype=np.int64)
-        dominated_original = group_nodes[dominated_batch_indices] if num_dominated else np.empty((0,), dtype=np.int64)
+        selected_original = (
+            ordered_group_nodes[selected_batch_indices]
+            if num_selected
+            else np.empty((0,), dtype=np.int64)
+        )
+        dominated_original = (
+            ordered_group_nodes[dominated_batch_indices]
+            if num_dominated
+            else np.empty((0,), dtype=np.int64)
+        )
         ordered_batch = np.concatenate([selected_original, dominated_original], axis=0)
         ordered_original.extend(int(idx) for idx in ordered_batch.tolist())
 

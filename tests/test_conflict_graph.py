@@ -645,6 +645,10 @@ def test_residual_grid_uses_whitened_scale_without_gate(monkeypatch: pytest.Monk
     monkeypatch.setenv("COVERTREEX_RESIDUAL_GATE1", "0")
     monkeypatch.setenv("COVERTREEX_RESIDUAL_GRID_WHITEN_SCALE", str(scale))
     monkeypatch.setenv("COVERTREEX_ENABLE_NUMBA", "1")
+    monkeypatch.setattr(
+        "covertreex.algo.conflict.builders.NUMBA_GRID_AVAILABLE",
+        False,
+    )
     cx_config.reset_runtime_config_cache()
 
     configure_residual_correlation(backend_state)
