@@ -69,7 +69,7 @@ class QueryCLIOptions:
     residual_stream_tile: int | None = 64
     residual_force_whitened: bool | None = None
     residual_scope_member_limit: int | None = None
-    residual_gate: str | None = None
+    residual_gate: str | None = "off"
     residual_gate_lookup_path: str = "docs/data/residual_gate_profile_diag0.json"
     residual_gate_margin: float = 0.02
     residual_gate_cap: float = 0.0
@@ -122,8 +122,9 @@ _GATE_PANEL = "Gate & prefilter"
 _TELEMETRY_PANEL = "Telemetry & baselines"
 
 
-@app.callback()
+@app.callback(invoke_without_command=True)
 def cli(
+    ctx: typer.Context,
     dimension: Annotated[
         int,
         typer.Option(
@@ -461,7 +462,7 @@ def cli(
             help="Residual gate preset (off keeps dense path).",
             rich_help_panel=_GATE_PANEL,
         ),
-    ] = None,
+    ] = "off",
     residual_gate_lookup_path: Annotated[
         str,
         typer.Option(
@@ -696,7 +697,9 @@ def cli(
         no_log_file=no_log_file,
         build_mode=build_mode,
     )
-    run_queries(options)
+    ctx.obj = options
+    if ctx.invoked_subcommand is None:
+        run_queries(options)
 
 
 def _validate_residual_runtime(snapshot: Mapping[str, Any]) -> None:
