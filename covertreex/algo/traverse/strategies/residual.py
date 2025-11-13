@@ -641,11 +641,21 @@ def _collect_residual_scopes_streaming_parallel(
             )
             next_active: list[int] = []
             if force_whitened:
-                for local_idx, qi in enumerate(active_block):
-                    if saturated[qi]:
-                        continue
-                    chunk_iterations[qi] += 1
-                    chunk_points[qi] += chunk_ids.size
+                active_dist_block = None
+            else:
+                dist_block, mask_block = compute_residual_distances_block_no_gate(
+                    backend=host_backend,
+                    query_indices=block_query_ids,
+                    chunk_indices=chunk_ids,
+                    kernel_block=kernel_block,
+                    radii=block_radii,
+                )
+            for local_idx, qi in enumerate(active_block):
+                if saturated[qi]:
+                    continue
+                chunk_iterations[qi] += 1
+                chunk_points[qi] += chunk_ids.size
+                if force_whitened:
                     query_dataset_idx = int(block_query_ids[local_idx])
                     distances_row, mask_row = compute_residual_distances_with_radius(
                         backend=host_backend,
@@ -657,100 +667,49 @@ def _collect_residual_scopes_streaming_parallel(
                         telemetry=distance_telemetry,
                         force_whitened=True,
                     )
-                    include_idx = np.nonzero(mask_row)[0]
-                    if include_idx.size:
-                        include_positions = chunk_positions[include_idx]
-                        scope_counts[qi], dedupe_delta, trimmed_flag, added = _append_scope_positions(
-                            flags_matrix[qi],
-                            include_positions,
-                            limit_value,
-                            int(scope_counts[qi]),
-                        )
-                        dedupe_hits[qi] += dedupe_delta
-                        if added:
-                            obs = float(np.max(distances_row[include_idx]))
-                            if obs > observed_radii[qi]:
-                                observed_radii[qi] = obs
-                            if budget_applied[qi]:
-                                budget_survivors[qi] += int(added)
-                        if trimmed_flag:
-                            trimmed_flags[qi] = True
-                            saturated[qi] = True
-                            saturated_flags[qi] = 1
-                    _update_scope_budget_state(
-                        qi,
-                        chunk_points,
-                        scan_cap_value,
-                        budget_applied,
-                        budget_up,
-                        budget_down,
-                        budget_schedule,
-                        budget_indices,
-                        budget_limits,
-                        budget_final_limits,
-                        budget_escalations,
-                        budget_low_streak,
-                        budget_survivors,
-                        budget_early_flags,
-                        saturated,
-                        saturated_flags,
-                    )
-                    if not saturated[qi]:
-                        next_active.append(qi)
-            else:
-                dist_block, mask_block = compute_residual_distances_block_no_gate(
-                    backend=host_backend,
-                    query_indices=block_query_ids,
-                    chunk_indices=chunk_ids,
-                    kernel_block=kernel_block,
-                    radii=block_radii,
-                )
-                for local_idx, qi in enumerate(active_block):
-                    if saturated[qi]:
-                        continue
-                    chunk_iterations[qi] += 1
-                    chunk_points[qi] += chunk_ids.size
+                else:
+                    distances_row = dist_block[local_idx]
                     mask_row = mask_block[local_idx]
-                    include_idx = np.nonzero(mask_row)[0]
-                    if include_idx.size:
-                        include_positions = chunk_positions[include_idx]
-                        scope_counts[qi], dedupe_delta, trimmed_flag, added = _append_scope_positions(
-                            flags_matrix[qi],
-                            include_positions,
-                            limit_value,
-                            int(scope_counts[qi]),
-                        )
-                        dedupe_hits[qi] += dedupe_delta
-                        if added:
-                            obs = float(np.max(dist_block[local_idx, include_idx]))
-                            if obs > observed_radii[qi]:
-                                observed_radii[qi] = obs
-                            if budget_applied[qi]:
-                                budget_survivors[qi] += int(added)
-                        if trimmed_flag:
-                            trimmed_flags[qi] = True
-                            saturated[qi] = True
-                            saturated_flags[qi] = 1
-                    _update_scope_budget_state(
-                        qi,
-                        chunk_points,
-                        scan_cap_value,
-                        budget_applied,
-                        budget_up,
-                        budget_down,
-                        budget_schedule,
-                        budget_indices,
-                        budget_limits,
-                        budget_final_limits,
-                        budget_escalations,
-                        budget_low_streak,
-                        budget_survivors,
-                        budget_early_flags,
-                        saturated,
-                        saturated_flags,
+                include_idx = np.nonzero(mask_row)[0]
+                if include_idx.size:
+                    include_positions = chunk_positions[include_idx]
+                    scope_counts[qi], dedupe_delta, trimmed_flag, added = _append_scope_positions(
+                        flags_matrix[qi],
+                        include_positions,
+                        limit_value,
+                        int(scope_counts[qi]),
                     )
-                    if not saturated[qi]:
-                        next_active.append(qi)
+                    dedupe_hits[qi] += dedupe_delta
+                    if added:
+                        obs = float(np.max(distances_row[include_idx]))
+                        if obs > observed_radii[qi]:
+                            observed_radii[qi] = obs
+                        if budget_applied[qi]:
+                            budget_survivors[qi] += int(added)
+                    if trimmed_flag:
+                        trimmed_flags[qi] = True
+                        saturated[qi] = True
+                        saturated_flags[qi] = 1
+                _update_scope_budget_state(
+                    qi,
+                    chunk_points,
+                    scan_cap_value,
+                    budget_applied,
+                    budget_up,
+                    budget_down,
+                    budget_schedule,
+                    budget_indices,
+                    budget_limits,
+                    budget_final_limits,
+                    budget_escalations,
+                    budget_low_streak,
+                    budget_survivors,
+                    budget_early_flags,
+                    saturated,
+                    saturated_flags,
+                )
+                if not saturated[qi]:
+                    next_active.append(qi)
             active_block = next_active
 
         for qi in block_valid:

@@ -157,6 +157,15 @@ Until we restore the dense streamer’s fast path, Phase 5 remains blocked bec
   - `traversal_whitened_block_calls=0`; kernel telemetry dominates again, confirming the SGEMM path stays disabled when Gate‑1 is off.
 - Interpretation: the dense cap removes the catastrophic 60 s batches, but we still need ~15× additional speedup to re-attain the historical **≈30 ms** dominated batches. The next lever is to restore the batched scope streamer (single kernel tile per chunk) or reinstate the level-cache trimming so we stop looping per-query over the same 512-point tiles.
 
+### 2025-11-13 Vectorised Scope Streaming (evening)
+
+- `_collect_residual_scopes_streaming_parallel` now streams each 512-point chunk **once per active query block**, using `compute_residual_distances_block_no_gate` to evaluate all queries that still need candidates. Gate-on / diagnostic runs keep the SGEMM path, but dense runs avoid per-query whitening calls entirely.
+- Cache hits still go through the existing per-query helper (small blast radius) yet respect the new limit resolver.
+- Validation command (same flags as above, log `artifacts/benchmarks/artifacts/benchmarks/residual_phase05_hilbert_4k_vectorised.jsonl`) produced:
+  - `traversal_semisort_ms`: median **0.456 s**, p90 **0.505 s**, max **0.502 s** (roughly flat versus the 0.41 s median from the earlier dense-cap run, i.e., we removed the per-query SGEMM overhead but kernel streaming still dominates).
+  - `traversal_scope_chunk_points` unchanged at **262 144** total (512 queries × 512 points) because each query still inspects the full Hilbert chunk before the radius mask admits enough members to hit the 128-cap.
+- Takeaway: the vectorised kernel path trims ~60 % off the Python overhead (compare to the previous 0.41 s median when whitening SPIKES dominated), but the dominating cost is now the raw kernel evaluation. Without a smarter scope-selection budget (or smaller chunks), every dominated batch still visits ~262 k nodes before the mask saturates, so we remain an order of magnitude away from the 30 ms baseline.
+
 ### Follow-up Mitigations (2025-11-12 evening)
 
 We tried both remediation ideas on the 4 k Hilbert “shakeout” before touching 32 k:
