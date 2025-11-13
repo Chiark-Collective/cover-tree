@@ -309,3 +309,29 @@ Setting `COVERTREEX_RESIDUAL_SCOPE_MEMBER_LIMIT=0` and `--residual-stream-tile 5
 4. **Gate work (deferred).** Once the dense streamer is back under 100 ms/batch, revisit Gate‑1 with a safer lookup profile so we can optionally offload the last factor-of-2 via SGEMM; today the kernel path dominates so dense improvements are the priority.
 
 Document every future run (4 k shakeout first, then 32 k) with the commands above so we can keep the audit trail continuous.
+
+### 2025-11-15 Tooling & Correctness Coverage
+
+- **CLI surface area:** `python -m cli.queries` is now Typer-based, so every runtime/residual knob (scope caps, stream tiling, gate/prefilter presets, MIS toggles, etc.) is accessible via a flag with grouped help. Telemetry JSONL output is always on unless `--no-log-file` is passed, which keeps the audit trail consistent even for ad-hoc experiments.
+- **Agent guidance:** `AGENTS.md` explicitly instructs automation to avoid destructive edits; all new switches must be additive and reproducible.
+- **Correctness tests:** `tests/test_pcct_variants.py` compares Euclidean and residual builds across runtime permutations (batch order, sparse traversal, `enable_numba`, residual force-whitened, residual scope member caps). These invariance tests run in <1 s and guard against functional regressions while we iterate on traversal internals.
+- **Next doc sync:** once the remaining traversal regressions are resolved, refresh `docs/CLI.md` (new) and this file with a clean 4 k + 32 k telemetry snapshot produced via the Typer CLI so auditors can re-run the exact commands without spelunking legacy env shims.
+
+### 2025-11-15 Default CLI Dense 32 k Snapshot
+
+After wiring the Typer callback to run without a subcommand and defaulting `--residual-gate` to `"off"`, the CLI now reproduces the fast dense preset with zero environment tweaks. Latest run (log `artifacts/benchmarks/artifacts/benchmarks/residual_dense_32768_tiled_run3.jsonl`):
+
+```bash
+python -m cli.queries \
+  --metric residual \
+  --dimension 8 --tree-points 32768 \
+  --batch-size 512 --queries 1024 --k 8 \
+  --seed 42 --baseline none \
+  --log-file artifacts/benchmarks/residual_dense_32768_tiled_run3.jsonl
+```
+
+- CLI summary: `pcct | build=33.3236s … latency=0.0266 ms throughput=37,621.7 q/s`.
+- Telemetry banner: `engine=residual_parallel gate=off`, `whitened pairs=0`, `kernel pairs=5.47×10^8` across 26,335 calls (≈1.97 s kernel time), matching the dense tiled profile.
+- Dominated batches: `traversal_semisort_ms` median **0.263 s**, p90 **0.280 s**, max **0.289 s** (64 batches). Each batch capped at `traversal_scope_chunk_points=8,192` and `traversal_scope_chunk_max_members=64`.
+
+These numbers line up with the earlier “tiled” section and confirm the new CLI defaults serve the audit-friendly fast preset out of the box.
