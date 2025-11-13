@@ -310,16 +310,16 @@ Setting `COVERTREEX_RESIDUAL_SCOPE_MEMBER_LIMIT=0` and `--residual-stream-tile 5
 
 Document every future run (4 k shakeout first, then 32 k) with the commands above so we can keep the audit trail continuous.
 
-### 2025-11-15 Tooling & Correctness Coverage
+### 2025-11-13 Tooling & Correctness Coverage
 
 - **CLI surface area:** `python -m cli.queries` is now Typer-based, so every runtime/residual knob (scope caps, stream tiling, gate/prefilter presets, MIS toggles, etc.) is accessible via a flag with grouped help. Telemetry JSONL output is always on unless `--no-log-file` is passed, which keeps the audit trail consistent even for ad-hoc experiments.
 - **Agent guidance:** `AGENTS.md` explicitly instructs automation to avoid destructive edits; all new switches must be additive and reproducible.
 - **Correctness tests:** `tests/test_pcct_variants.py` compares Euclidean and residual builds across runtime permutations (batch order, sparse traversal, `enable_numba`, residual force-whitened, residual scope member caps). These invariance tests run in <1 s and guard against functional regressions while we iterate on traversal internals.
 - **Next doc sync:** once the remaining traversal regressions are resolved, refresh `docs/CLI.md` (new) and this file with a clean 4 k + 32 k telemetry snapshot produced via the Typer CLI so auditors can re-run the exact commands without spelunking legacy env shims.
 
-### 2025-11-15 Default CLI Dense 32 k Snapshot
+### 2025-11-13 Default CLI Dense 32 k Snapshot
 
-After wiring the Typer callback to run without a subcommand and defaulting `--residual-gate` to `"off"`, the CLI now reproduces the fast dense preset with zero environment tweaks. Latest run (log `artifacts/benchmarks/artifacts/benchmarks/residual_dense_32768_tiled_run3.jsonl`):
+After wiring the Typer callback to run without a subcommand and defaulting `--residual-gate` to `"off"` on 2025-11-13, the CLI now reproduces the fast dense preset with zero environment tweaks. Latest run (log `artifacts/benchmarks/artifacts/benchmarks/residual_dense_32768_tiled_run3.jsonl`):
 
 ```bash
 python -m cli.queries \
