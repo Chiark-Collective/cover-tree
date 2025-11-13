@@ -88,3 +88,100 @@ Until then, all regressions must be triaged on the historical-good commit.
 - Longer term (once the baseline numbers are re-established): explore extending `compute_residual_distances_with_radius` to accept query arrays so the whitened fast-path can stay vectorised even when Gate‑1 is on. That would let us regain the new telemetry hooks without re-introducing the per-query inner loop.
 
 Either way, the fix must re-add a regression test that asserts gate-off runs keep `traversal_whitened_block_calls=0` (or ≪ batch size) so future refactors cannot silently reintroduce this pattern.
+
+### 32 k Replay After Parent Fix (2025-11-12, 16:57 UTC)
+
+- Command: `python -m cli.queries --metric residual --dimension 8 --tree-points 32768 --batch-size 512 --queries 1024 --k 8 --seed 42 --baseline gpboost --log-file artifacts/benchmarks/artifacts/benchmarks/artifacts/benchmarks/artifacts/benchmarks/residual_dense_postfix.jsonl` with `COVERTREEX_BACKEND=numpy`, `COVERTREEX_ENABLE_NUMBA=1`, `COVERTREEX_SCOPE_CHUNK_TARGET=0`, `COVERTREEX_ENABLE_SPARSE_TRAVERSAL=0`, `COVERTREEX_BATCH_ORDER=hilbert`, `COVERTREEX_PREFIX_SCHEDULE=doubling`.
+- Observations:
+  - Total build time = **3,104.5 s** (sum of `traversal_build_wall_ms`).
+  - Median dominated batch: `traversal_ms≈61.9 s`, `traversal_pairwise_ms≈6 ms`, `traversal_semisort_ms≈61.6 s`.
+  - `traversal_whitened_block_calls` per batch: **896** (64 queries × 14 cache/chunk probes), despite `traversal_gate_active=0` and `traversal_gate1_candidates=0`.
+  - `traversal_scope_chunk_points=262,144`, `traversal_scope_chunk_scans=512` for the first dominated batch → every query streams the entire tree, so semisort now dominates.
+- Interpretation: parent search is fixed (pairwise back to milliseconds), but scope streaming is now doing a full whitened SGEMM per query×chunk even when the gate is off.
+
+### Why Semisort Still Explodes
+
+- Phase 0 added `force_whitened=True` to every call site of `compute_residual_distances_with_radius` inside `_collect_residual_scopes_streaming_serial/parallel` (see `covertreex/algo/traverse/strategies/residual.py:231-278` and `:592-650`). This forces `compute_residual_distances_with_radius` to call `compute_whitened_block` even when `_residual_gate_active(...)` is false.
+- Because we keep `chunk=512`, that means each dominated batch now performs **512 whitened SGEMMs**, each touching up to 512 tree points, purely to collect scope candidates. Those GEMMs dominate `traversal_semisort_ms`; the gate metrics stay at zero because the results never feed Gate‑1, but the cost is still paid.
+- The historical dense baseline streamed the raw kernel rows when the gate was off, so semisort stayed ≈30 ms/batch. The new telemetry hook accidentally replaced that fast path with mandatory SGEMMs.
+
+### Next Fix
+
+1. **Condition `force_whitened` on gate state.** Only pass `force_whitened=True` when `_residual_gate_active(host_backend)` is true (serial streamer) or when a diagnostic knob explicitly requests it. Dense/gate-off runs must call `_residual_find_parents` and `_collect_residual_scopes_*` without forcing whitening so we only stream raw kernel blocks.
+2. **Keep telemetry optional.** When the gate is off, still record `kernel_provider_*` metrics so we can see the dense cost, but leave `whitened_block_*` at zero. Add a CLI/environment flag (e.g., `COVERTREEX_RESIDUAL_FORCE_WHITENED=1`) if we want to capture SGEMM coverage without enabling the gate.
+3. **Validate with the 4 k shakeout** before the expensive 32 k replay to ensure `traversal_semisort_ms` falls back to the ≈30 ms target.
+4. **Document and test.** Extend the regression test suite to cover the gate-off streamer path (assert `whitened_block_calls==0` and `traversal_semisort_ms` stays small) so future telemetry work cannot silently reintroduce the SGEMM.
+
+Until we restore the dense streamer’s fast path, Phase 5 remains blocked because every dominated batch performs ~2×10⁵ extra FLOPs.
+
+### 2025-11-12 Streaming Fix
+
+- `_collect_residual_scopes_streaming_{serial,parallel}` now accept a `force_whitened` flag and only set it when the gate is active (or when the new override `COVERTREEX_RESIDUAL_FORCE_WHITENED=1` is present). Dense/gate-off runs once again stream the raw kernel blocks, so `whitened_block_*` counters drop back to zero while `kernel_provider_*` captures the true cost.
+- The residual runtime config exports `residual_force_whitened`, plumbed through `Runtime.describe()` and the CLI, so auditors can still capture SGEMM coverage without enabling Gate‑1.
+- Added regression tests:
+  - `tests/test_residual_parents.py::test_residual_parent_search_skips_whitened_path_when_gate_disabled` (existing) guards the parent search.
+  - `tests/test_residual_parents.py::test_scope_streaming_respects_force_whitened_flag` stubs the streaming path and asserts `force_whitened` only flips when requested.
+- Next validation step: rerun the 4 k shakeout with `COVERTREEX_RESIDUAL_FORCE_WHITENED=0` to confirm `traversal_semisort_ms` collapses before replaying the full 32 k workload.
+
+### 2025-11-13 Dense Scope Pruning
+
+- Added a dense-only fallback membership cap that limits gate-off scopes to **≤128** entries per query. When the runtime does not specify `COVERTREEX_RESIDUAL_SCOPE_MEMBER_LIMIT`, `_collect_residual(...)` now clamps `scope_limit` to 128 whenever Gate‑1 is disabled, forcing the streamer to bail as soon as a few dozen candidates survive.
+- New override: `COVERTREEX_RESIDUAL_SCOPE_MEMBER_LIMIT`. Set it to a positive integer to pick a custom dense cap, or `0` to disable the fallback entirely (e.g., when reproducing historical pre-cap runs). The value is visible via `Runtime.describe()` and can be surfaced through the CLI config plumbing.
+- Regression tests (`tests/test_residual_parents.py::test_resolve_scope_limits_*`) cover both the dense fallback and manual overrides, so future changes cannot silently drop the cap.
+- Impact: dominated batches stop scanning the full 262 k candidates once 64–128 survivors are collected, bringing `traversal_scope_chunk_points` back down to Hilbert-era levels before we revisit the 4 k/32 k sweeps.
+
+#### 4 k Shakeout Snapshot (2025-11-13 15:40 UTC)
+
+- Command:
+
+  ```bash
+  COVERTREEX_BACKEND=numpy \
+  COVERTREEX_ENABLE_NUMBA=1 \
+  COVERTREEX_SCOPE_CHUNK_TARGET=0 \
+  COVERTREEX_ENABLE_SPARSE_TRAVERSAL=0 \
+  COVERTREEX_BATCH_ORDER=hilbert \
+  COVERTREEX_PREFIX_SCHEDULE=doubling \
+  COVERTREEX_RESIDUAL_GATE1=0 \
+  COVERTREEX_RESIDUAL_FORCE_WHITENED=0 \
+  python -m cli.queries \
+    --metric residual \
+    --dimension 8 --tree-points 4096 \
+    --batch-size 512 --queries 256 --k 8 \
+    --seed 0 --baseline none \
+    --log-file artifacts/benchmarks/residual_phase05_hilbert_4k_membercap_v2.jsonl
+  ```
+
+- Results:
+  - 8 dominated batches; `traversal_semisort_ms` median **0.41 s**, p90 **1.22 s**, max **1.15 s** (down from multi-minute stalls).
+  - `traversal_scope_chunk_points` now caps at **65,536** (512 queries × 128 members) with `traversal_scope_chunk_max_members=128` in every dominated batch.
+  - `traversal_whitened_block_calls=0`; kernel telemetry dominates again, confirming the SGEMM path stays disabled when Gate‑1 is off.
+- Interpretation: the dense cap removes the catastrophic 60 s batches, but we still need ~15× additional speedup to re-attain the historical **≈30 ms** dominated batches. The next lever is to restore the batched scope streamer (single kernel tile per chunk) or reinstate the level-cache trimming so we stop looping per-query over the same 512-point tiles.
+
+### Follow-up Mitigations (2025-11-12 evening)
+
+We tried both remediation ideas on the 4 k Hilbert “shakeout” before touching 32 k:
+
+1. **Scope scan cap (env override).**  
+   - Command: `COVERTREEX_SCOPE_CHUNK_TARGET=2048 … 4 k preset … --log-file artifacts/benchmarks/artifacts/benchmarks/residual_phase05_hilbert_4k_scancap2048.jsonl`.  
+   - Result: `traversal_whitened_block_calls=0` (gate still off), but each dominated batch still reports `traversal_semisort_ms≈4.53 s`, `traversal_scope_chunk_points=262,144`, `traversal_scope_chunk_scans=512`. The cap stops further chunk scans but still collects 512 entries per query, so we merely shaved ~75 % off the previous (18 s) cost—nowhere near the 30 ms target.
+
+2. **Gate-on via lookup (`docs/data/residual_gate_profile_32768_caps.json`).**  
+   - CLI `--residual-gate lookup …` fails because audit throws (“gate pruned inside radius”). Enabling via env (`COVERTREEX_RESIDUAL_GATE1=1`, `COVERTREEX_RESIDUAL_GATE1_LOOKUP_PATH=…`) succeeds (`artifacts/benchmarks/artifacts/benchmarks/residual_phase05_hilbert_4k_gate_env.jsonl`).  
+   - Gate keeps only 512 candidates per batch (`traversal_scope_chunk_points=512`), but we pay for 512 whitened SGEMMs (`traversal_whitened_block_calls=512`), so `traversal_semisort_ms≈2.19 s`—better, yet still orders of magnitude slower than the historical dense run.
+
+**Conclusion:**  
+- Scan caps alone are insufficient; they still build large scopes.  
+- Gate-on helps but SGEMM dominates unless we radically reduce chunk sizes or whitened cost.  
+- Next step is to implement the budget schedule/trim logic so dense runs cap scope membership to tens of entries without SGEMM, then re-run the 4 k preset before attempting 32 k again.
+
+### Current Status (post-telemetry fixes)
+
+- **Scope budgets:** Added a residual-specific fallback schedule `(64, 128, 256)` when `COVERTREEX_SCOPE_BUDGET_SCHEDULE` is unset. Dense runs now record `traversal_scope_budget_*` again, but because the chunk size stays at 512, each query still inspects a full 512-point chunk before the budget logic even applies. Result: `traversal_scope_chunk_points` remains **262,144**, and semisort stays in the **2–5 s** range even after the SGEMM fix. Shrinking `--residual-chunk-size` helped conflict fan-out but not enough to reach the 30 ms target.
+- **Gate-on telemetry:** Enabling `COVERTREEX_RESIDUAL_GATE1=1` with the refreshed lookup trims scopes to ~512 entries, but we pay for 512 whitened SGEMMs per batch. `traversal_semisort_ms` drops to ~2.2 s, not milliseconds, so gate-on is still far too expensive to serve as the “dense” preset.
+- **Scan caps (env overrides):** Forcing `COVERTREEX_SCOPE_CHUNK_TARGET=2048` merely caps chunk scans, not scope size, so semisort remains multi-second. No combination of scan-cap + gate-off tested so far restores the historical 30 ms dominated batches.
+
+**Action items before rerunning 32 k:**
+
+1. Finish the dense scope streamer rewrite so each 512-point tree chunk is scanned once per batch (shared kernel block + level-cache trimming), targeting **≤64** survivors/query without revisiting SGEMMs.
+2. Keep SGEMM / gate telemetry strictly opt-in (via `COVERTREEX_RESIDUAL_FORCE_WHITENED` + gate flags) and document the new `COVERTREEX_RESIDUAL_SCOPE_MEMBER_LIMIT` override for auditors.
+3. Validate on the 4 k shakeout (Hilbert) after the streamer changes before spending another hour on the 32 k sweep; don’t attempt 32 k until `traversal_semisort_ms ≤ 0.05 s` on the 4 k preset.

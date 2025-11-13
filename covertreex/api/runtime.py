@@ -189,6 +189,8 @@ class Runtime:
     prefix_growth_mid: float | None = None
     prefix_growth_large: float | None = None
     residual: Residual | None = None
+    residual_force_whitened: bool | None = None
+    residual_scope_member_limit: int | None = None
     extra: Dict[str, Any] = field(default_factory=dict)
 
     def to_config(self, base: cx_config.RuntimeConfig | None = None) -> cx_config.RuntimeConfig:
@@ -220,6 +222,12 @@ class Runtime:
         if self.residual is not None:
             base_policy = ResidualPolicy.from_runtime(base_config)
             overrides.update(self.residual.as_overrides(base_policy=base_policy))
+        _apply_if_present(overrides, "residual_force_whitened", self.residual_force_whitened)
+        _apply_if_present(
+            overrides,
+            "residual_scope_member_limit",
+            self.residual_scope_member_limit,
+        )
         overrides.update(self.extra)
         if not overrides:
             return base_config
@@ -244,6 +252,8 @@ class Runtime:
             "enable_numba": config.enable_numba,
             "enable_sparse_traversal": config.enable_sparse_traversal,
             "enable_diagnostics": config.enable_diagnostics,
+            "residual_force_whitened": config.residual_force_whitened,
+            "residual_scope_member_limit": config.residual_scope_member_limit,
         }
 
     def with_updates(self, **kwargs: Any) -> "Runtime":
@@ -279,4 +289,6 @@ class Runtime:
             prefix_growth_mid=config.prefix_growth_mid,
             prefix_growth_large=config.prefix_growth_large,
             residual=residual,
+            residual_force_whitened=config.residual_force_whitened,
+            residual_scope_member_limit=config.residual_scope_member_limit,
         )

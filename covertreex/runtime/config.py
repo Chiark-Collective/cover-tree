@@ -23,6 +23,7 @@ _PREFIX_SCHEDULES = {"doubling", "adaptive"}
 _DEFAULT_SCOPE_CHUNK_TARGET = 0
 _DEFAULT_SCOPE_CHUNK_MAX_SEGMENTS = 512
 _DEFAULT_SCOPE_BUDGET_SCHEDULE: Tuple[int, ...] = ()
+_DEFAULT_RESIDUAL_SCOPE_BUDGET_SCHEDULE: Tuple[int, ...] = (64, 128, 256)
 _DEFAULT_SCOPE_BUDGET_UP_THRESH = 0.015
 _DEFAULT_SCOPE_BUDGET_DOWN_THRESH = 0.002
 _DEFAULT_BATCH_ORDER_STRATEGY = "hilbert"
@@ -50,6 +51,7 @@ _DEFAULT_RESIDUAL_PREFILTER_LOOKUP = str(
 )
 _DEFAULT_RESIDUAL_PREFILTER_AUDIT = False
 _DEFAULT_RESIDUAL_GRID_WHITEN_SCALE = 1.0
+_DEFAULT_RESIDUAL_FORCE_WHITENED = False
 
 
 def _bool_from_env(value: str | None, *, default: bool) -> bool:
@@ -252,6 +254,8 @@ class RuntimeConfig:
     residual_gate1_profile_bins: int
     residual_gate1_lookup_path: str | None
     residual_gate1_lookup_margin: float
+    residual_force_whitened: bool
+    residual_scope_member_limit: int | None
     residual_scope_cap_path: str | None
     residual_scope_cap_default: float
     residual_prefilter_enabled: bool
@@ -328,6 +332,8 @@ class RuntimeConfig:
             )
         metric = os.getenv("COVERTREEX_METRIC", "euclidean").strip().lower() or "euclidean"
         residual_metric = metric == "residual_correlation"
+        if not scope_budget_schedule and residual_metric:
+            scope_budget_schedule = _DEFAULT_RESIDUAL_SCOPE_BUDGET_SCHEDULE
         batch_order_strategy = _parse_batch_order_strategy(
             os.getenv("COVERTREEX_BATCH_ORDER")
         )
@@ -417,6 +423,19 @@ class RuntimeConfig:
             os.getenv("COVERTREEX_RESIDUAL_GATE1_LOOKUP_MARGIN"),
             default=_DEFAULT_RESIDUAL_GATE1_LOOKUP_MARGIN,
         )
+        residual_force_whitened = _bool_from_env(
+            os.getenv("COVERTREEX_RESIDUAL_FORCE_WHITENED"),
+            default=_DEFAULT_RESIDUAL_FORCE_WHITENED,
+        )
+        raw_scope_member_limit = _parse_optional_int(
+            os.getenv("COVERTREEX_RESIDUAL_SCOPE_MEMBER_LIMIT")
+        )
+        if raw_scope_member_limit is None:
+            residual_scope_member_limit = None
+        elif raw_scope_member_limit <= 0:
+            residual_scope_member_limit = 0
+        else:
+            residual_scope_member_limit = raw_scope_member_limit
         residual_scope_cap_path = os.getenv("COVERTREEX_RESIDUAL_SCOPE_CAPS_PATH")
         residual_scope_cap_default = _parse_optional_float(
             os.getenv("COVERTREEX_RESIDUAL_SCOPE_CAP_DEFAULT"),
@@ -498,6 +517,8 @@ class RuntimeConfig:
             residual_gate1_profile_bins=residual_gate1_profile_bins,
             residual_gate1_lookup_path=residual_gate1_lookup_path,
             residual_gate1_lookup_margin=residual_gate1_lookup_margin,
+            residual_force_whitened=residual_force_whitened,
+            residual_scope_member_limit=residual_scope_member_limit,
             residual_scope_cap_path=residual_scope_cap_path,
             residual_scope_cap_default=residual_scope_cap_default,
             residual_prefilter_enabled=residual_prefilter_enabled,
@@ -674,6 +695,8 @@ def describe_runtime() -> Dict[str, Any]:
         "residual_gate1_profile_bins": config.residual_gate1_profile_bins,
         "residual_gate1_lookup_path": config.residual_gate1_lookup_path,
         "residual_gate1_lookup_margin": config.residual_gate1_lookup_margin,
+        "residual_force_whitened": config.residual_force_whitened,
+        "residual_scope_member_limit": config.residual_scope_member_limit,
         "residual_scope_cap_path": config.residual_scope_cap_path,
         "residual_scope_cap_default": config.residual_scope_cap_default,
         "residual_grid_whiten_scale": config.residual_grid_whiten_scale,
