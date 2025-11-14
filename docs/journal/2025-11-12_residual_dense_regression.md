@@ -192,6 +192,13 @@ Until we restore the dense streamer’s fast path, Phase 5 remains blocked bec
   - `traversal_kernel_provider_ms`: statistically flat (median **10.8 ms**), confirming the win comes purely from doing fewer per-query post-processing steps once budgets tighten.
 - Next up: reclaim another ~5–10× by (a) reblocking query batches when only a handful remain active, so kernel calls target ≤32 survivors, and (b) exploring bitset-backed `_append_scope_positions` to remove the per-query NumPy scans.
 
+### 2025-11-14 Prototype bitset + dynamic query-block toggles
+
+- Added optional runtime/CLI switches so we can iterate on more aggressive dedupe without rewriting the default dense path:
+  - `--residual-scope-bitset` (`COVERTREEX_RESIDUAL_SCOPE_BITSET=1`) routes `_append_scope_positions` through a packed uint64 bitset before falling back to the boolean mask. This avoids repeated NumPy slicing when we revisit the 32 k bisect.
+  - `--residual-dynamic-query-block` (`COVERTREEX_RESIDUAL_DYNAMIC_QUERY_BLOCK=1`) lets `_collect_residual_scopes_streaming_parallel` shrink its query blocks once only a handful of survivors remain active, instead of always issuing 128-query kernel tiles.
+- Both toggles default to “off” so the ≤30 s baseline from `residual_dense_32768_maskopt_v2.jsonl` stays reproducible. The new knobs are purely experimental for now; we’ll keep them disabled until profiling shows a meaningful win, but they’re available to anyone investigating the remaining traversal headroom.
+
 ### 2025-11-14 32 k Dense Re-run (guardrails off)
 
 - Command:

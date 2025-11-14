@@ -192,6 +192,8 @@ class Runtime:
     residual_force_whitened: bool | None = None
     residual_scope_member_limit: int | None = None
     residual_stream_tile: int | None = None
+    residual_scope_bitset: bool | None = None
+    residual_dynamic_query_block: bool | None = None
     extra: Dict[str, Any] = field(default_factory=dict)
 
     def to_config(self, base: cx_config.RuntimeConfig | None = None) -> cx_config.RuntimeConfig:
@@ -233,6 +235,16 @@ class Runtime:
             overrides,
             "residual_stream_tile",
             self.residual_stream_tile,
+        )
+        _apply_if_present(
+            overrides,
+            "residual_scope_bitset",
+            self.residual_scope_bitset,
+        )
+        _apply_if_present(
+            overrides,
+            "residual_dynamic_query_block",
+            self.residual_dynamic_query_block,
         )
         overrides.update(self.extra)
         if not overrides:

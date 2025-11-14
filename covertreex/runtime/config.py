@@ -258,6 +258,8 @@ class RuntimeConfig:
     residual_force_whitened: bool
     residual_scope_member_limit: int | None
     residual_stream_tile: int | None
+    residual_scope_bitset: bool
+    residual_dynamic_query_block: bool
     residual_scope_cap_path: str | None
     residual_scope_cap_default: float
     residual_prefilter_enabled: bool
@@ -429,6 +431,14 @@ class RuntimeConfig:
             os.getenv("COVERTREEX_RESIDUAL_FORCE_WHITENED"),
             default=_DEFAULT_RESIDUAL_FORCE_WHITENED,
         )
+        residual_scope_bitset = _bool_from_env(
+            os.getenv("COVERTREEX_RESIDUAL_SCOPE_BITSET"),
+            default=False,
+        )
+        residual_dynamic_query_block = _bool_from_env(
+            os.getenv("COVERTREEX_RESIDUAL_DYNAMIC_QUERY_BLOCK"),
+            default=False,
+        )
         raw_scope_member_limit = _parse_optional_int(
             os.getenv("COVERTREEX_RESIDUAL_SCOPE_MEMBER_LIMIT")
         )
@@ -527,6 +537,8 @@ class RuntimeConfig:
             residual_force_whitened=residual_force_whitened,
             residual_scope_member_limit=residual_scope_member_limit,
             residual_stream_tile=residual_stream_tile,
+            residual_scope_bitset=residual_scope_bitset,
+            residual_dynamic_query_block=residual_dynamic_query_block,
             residual_scope_cap_path=residual_scope_cap_path,
             residual_scope_cap_default=residual_scope_cap_default,
             residual_prefilter_enabled=residual_prefilter_enabled,
@@ -704,6 +716,8 @@ def describe_runtime() -> Dict[str, Any]:
         "residual_gate1_lookup_path": config.residual_gate1_lookup_path,
         "residual_gate1_lookup_margin": config.residual_gate1_lookup_margin,
         "residual_force_whitened": config.residual_force_whitened,
+        "residual_scope_bitset": config.residual_scope_bitset,
+        "residual_dynamic_query_block": config.residual_dynamic_query_block,
         "residual_scope_member_limit": config.residual_scope_member_limit,
         "residual_scope_cap_path": config.residual_scope_cap_path,
         "residual_scope_cap_default": config.residual_scope_cap_default,

@@ -69,6 +69,8 @@ class QueryCLIOptions:
     residual_stream_tile: int | None = 64
     residual_force_whitened: bool | None = None
     residual_scope_member_limit: int | None = None
+    residual_scope_bitset: bool | None = None
+    residual_dynamic_query_block: bool | None = None
     residual_gate: str | None = "off"
     residual_gate_lookup_path: str = "docs/data/residual_gate_profile_diag0.json"
     residual_gate_margin: float = 0.02
@@ -407,6 +409,22 @@ def cli(
             rich_help_panel=_RESIDUAL_PANEL,
         ),
     ] = None,
+    residual_scope_bitset: Annotated[
+        Optional[bool],
+        typer.Option(
+            "--residual-scope-bitset/--no-residual-scope-bitset",
+            help="Prototype bitset dedupe for dense residual scopes (default off).",
+            rich_help_panel=_RESIDUAL_PANEL,
+        ),
+    ] = None,
+    residual_dynamic_query_block: Annotated[
+        Optional[bool],
+        typer.Option(
+            "--residual-dynamic-query-block/--no-residual-dynamic-query-block",
+            help="Prototype dynamic query-block sizing for residual traversal.",
+            rich_help_panel=_RESIDUAL_PANEL,
+        ),
+    ] = None,
     residual_scope_caps: Annotated[
         Optional[str],
         typer.Option(
@@ -668,6 +686,8 @@ def cli(
         residual_stream_tile=residual_stream_tile,
         residual_force_whitened=residual_force_whitened,
         residual_scope_member_limit=residual_scope_member_limit,
+        residual_scope_bitset=residual_scope_bitset,
+        residual_dynamic_query_block=residual_dynamic_query_block,
         residual_scope_caps=residual_scope_caps,
         residual_scope_cap_default=residual_scope_cap_default,
         residual_scope_cap_output=residual_scope_cap_output,

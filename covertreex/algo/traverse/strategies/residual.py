@@ -112,6 +112,7 @@ def _collect_residual_scopes_streaming_serial(
     workspace: ResidualWorkspace | None = None,
     telemetry: ResidualDistanceTelemetry | None = None,
     force_whitened: bool = False,
+    bitset_enabled: bool = False,
 ) -> Tuple[
     np.ndarray,
     np.ndarray,
@@ -468,6 +469,8 @@ def _collect_residual_scopes_streaming_parallel(
     workspace: ResidualWorkspace | None = None,
     telemetry: ResidualDistanceTelemetry | None = None,
     force_whitened: bool = False,
+    bitset_enabled: bool = False,
+    dynamic_query_block: bool = False,
 ) -> Tuple[
     np.ndarray,
     np.ndarray,
@@ -501,7 +504,12 @@ def _collect_residual_scopes_streaming_parallel(
     gate_snapshot = host_backend.gate_stats.snapshot()
 
     limit_value = int(scope_limit) if scope_limit and scope_limit > 0 else 0
-    flags_matrix = np.zeros((batch_size, max(total_points, 1)), dtype=np.uint8)
+    max_points = max(total_points, 1)
+    flags_matrix = np.zeros((batch_size, max_points), dtype=np.uint8)
+    bitset_words = (max_points + 63) // 64 if bitset_enabled else 0
+    scope_bitsets = (
+        np.zeros((batch_size, bitset_words), dtype=np.uint64) if bitset_enabled else None
+    )
     scope_counts = np.zeros(batch_size, dtype=np.int64)
     scope_lengths = np.zeros(batch_size, dtype=np.int64)
     parents_valid = parent_positions >= 0
@@ -558,8 +566,23 @@ def _collect_residual_scopes_streaming_parallel(
     budget_applied = np.zeros(batch_size, dtype=bool)
     budget_early_flags = np.zeros(batch_size, dtype=np.uint8)
 
-    for block_start in range(0, batch_size, query_block):
-        block_range = range(block_start, min(batch_size, block_start + query_block))
+    def _block_ranges():
+        if not dynamic_query_block:
+            for start in range(0, batch_size, query_block):
+                yield start, min(batch_size, start + query_block)
+            return
+        block_start = 0
+        while block_start < batch_size:
+            remaining_active = int(np.count_nonzero(parents_valid[block_start:]))
+            if remaining_active <= 0:
+                break
+            block_size = _resolve_query_block_size(query_block, remaining_active)
+            if block_size <= 0:
+                break
+            block_end = min(batch_size, block_start + block_size)
+            yield block_start, block_end
+    for block_start, block_end in _block_ranges():
+        block_range = range(block_start, block_end)
         block_valid: list[int] = []
         for qi in block_range:
             if not parents_valid[qi]:
@@ -569,6 +592,7 @@ def _collect_residual_scopes_streaming_parallel(
             query_id = int(query_indices[qi])
             radius = float(radii[qi])
             flags_row = flags_matrix[qi]
+            bitset_row = scope_bitsets[qi] if bitset_enabled else None
             if budget_enabled:
                 initial_limit = budget_schedule[0] if budget_schedule else 0
                 if scan_cap_value is not None:
@@ -615,6 +639,7 @@ def _collect_residual_scopes_streaming_parallel(
                         include_positions = valid_cached[cache_include]
                         scope_counts[qi], dedupe_delta, trimmed_flag, added = _append_scope_positions(
                             flags_row,
+                            bitset_row,
                             include_positions,
                             limit_value,
                             int(scope_counts[qi]),
@@ -720,6 +745,7 @@ def _collect_residual_scopes_streaming_parallel(
                         include_positions = tile_positions[include_idx]
                         scope_counts[qi], dedupe_delta, trimmed_flag, added = _append_scope_positions(
                             flags_matrix[qi],
+                            scope_bitsets[qi] if bitset_enabled else None,
                             include_positions,
                             limit_value,
                             int(scope_counts[qi]),
@@ -770,6 +796,7 @@ def _collect_residual_scopes_streaming_parallel(
             flags_row = flags_matrix[qi]
             scope_counts[qi], dedupe_delta, trimmed_flag, _ = _append_scope_positions(
                 flags_row,
+                scope_bitsets[qi] if bitset_enabled else None,
                 np.asarray([parent_pos], dtype=np.int64),
                 limit_value,
                 int(scope_counts[qi]),
@@ -786,6 +813,7 @@ def _collect_residual_scopes_streaming_parallel(
                 chain_positions = np.asarray([int(pos) for pos in chain], dtype=np.int64)
                 scope_counts[qi], dedupe_delta, trimmed_flag, _ = _append_scope_positions(
                     flags_row,
+                    scope_bitsets[qi] if bitset_enabled else None,
                     chain_positions,
                     limit_value,
                     int(scope_counts[qi]),
@@ -803,6 +831,8 @@ def _collect_residual_scopes_streaming_parallel(
                 level_slice = top_levels_np[scope_vec]
                 scope_vec = select_topk_by_level(scope_vec, level_slice, limit_value)
             flags_row[: total_points] = 0
+            if bitset_enabled and scope_bitsets is not None:
+                scope_bitsets[qi].fill(0)
             original_size = scope_vec.size
             max_scope_members = max(max_scope_members, original_size)
             exceeded_limit = bool(limit_value) and original_size > limit_value
@@ -990,29 +1020,107 @@ def _residual_gate_active(host_backend: ResidualCorrHostData) -> bool:
 
 def _append_scope_positions(
     flags_row: np.ndarray,
+    bitset_row: np.ndarray | None,
     positions: np.ndarray,
     limit_value: int,
     scope_count: int,
 ) -> tuple[int, int, bool, int]:
-    if positions.size == 0:
+    if bitset_row is None:
+        return _append_scope_positions_dense(flags_row, positions, limit_value, scope_count)
+    return _append_scope_positions_bitset(
+        flags_row,
+        bitset_row,
+        positions,
+        limit_value,
+        scope_count,
+    )
+
+
+def _append_scope_positions_dense(
+    flags_row: np.ndarray,
+    positions: np.ndarray,
+    limit_value: int,
+    scope_count: int,
+) -> tuple[int, int, bool, int]:
+    positions_arr = np.asarray(positions, dtype=np.int64)
+    if positions_arr.size == 0:
         return scope_count, 0, False, 0
-    dedupe = int(np.count_nonzero(flags_row[positions]))
-    new_mask = flags_row[positions] == 0
-    new_positions = positions[new_mask]
+    max_index = flags_row.shape[0]
+    valid_mask = (positions_arr >= 0) & (positions_arr < max_index)
+    if not np.any(valid_mask):
+        return scope_count, 0, False, 0
+    positions_arr = positions_arr[valid_mask]
+    if positions_arr.size == 0:
+        return scope_count, 0, False, 0
+    existing_mask = flags_row[positions_arr] != 0
+    dedupe = int(np.count_nonzero(existing_mask))
+    new_positions = positions_arr[~existing_mask]
+    if new_positions.size == 0:
+        return scope_count, dedupe, False, 0
     trimmed = False
-    if limit_value > 0 and new_positions.size:
+    if limit_value > 0:
         available = max(limit_value - scope_count, 0)
         if available <= 0:
-            trimmed = True
-            new_positions = new_positions[:0]
-        elif new_positions.size > available:
+            return scope_count, dedupe, True, 0
+        if new_positions.size > available:
             trimmed = True
             new_positions = new_positions[:available]
-    added = int(new_positions.size)
-    if added:
-        flags_row[new_positions] = 1
-        scope_count += added
-    return scope_count, dedupe, trimmed, added
+    flags_row[new_positions] = 1
+    scope_count += int(new_positions.size)
+    if limit_value > 0 and scope_count >= limit_value:
+        trimmed = True
+    return scope_count, dedupe, trimmed, int(new_positions.size)
+
+
+def _append_scope_positions_bitset(
+    flags_row: np.ndarray,
+    bitset_row: np.ndarray,
+    positions: np.ndarray,
+    limit_value: int,
+    scope_count: int,
+) -> tuple[int, int, bool, int]:
+    max_index = flags_row.shape[0]
+    positions_arr = np.asarray(positions, dtype=np.int64)
+    if positions_arr.size == 0:
+        return scope_count, 0, False, 0
+    valid_mask = (positions_arr >= 0) & (positions_arr < max_index)
+    if not np.any(valid_mask):
+        return scope_count, 0, False, 0
+    positions_arr = positions_arr[valid_mask]
+    if positions_arr.size == 0:
+        return scope_count, 0, False, 0
+
+    word_idx = positions_arr >> 6
+    bit_mask = np.uint64(1) << np.uint64(positions_arr & 63)
+    existing_mask = (bitset_row[word_idx] & bit_mask) != 0
+    dedupe = int(np.count_nonzero(existing_mask))
+    new_positions = positions_arr[~existing_mask]
+    new_word_idx = word_idx[~existing_mask]
+    new_bit_mask = bit_mask[~existing_mask]
+
+    if new_positions.size == 0:
+        return scope_count, dedupe, False, 0
+
+    trimmed = False
+    max_allowed = limit_value if limit_value > 0 else None
+    if max_allowed is not None:
+        remaining = max_allowed - scope_count
+        if remaining <= 0:
+            return scope_count, dedupe, True, 0
+        if new_positions.size > remaining:
+            trimmed = True
+            new_positions = new_positions[:remaining]
+            new_word_idx = new_word_idx[:remaining]
+            new_bit_mask = new_bit_mask[:remaining]
+
+    np.bitwise_or.at(bitset_row, new_word_idx.astype(np.intp, copy=False), new_bit_mask)
+    flags_row[new_positions] = 1
+
+    scope_count += int(new_positions.size)
+    if max_allowed is not None and scope_count >= max_allowed:
+        trimmed = True
+
+    return scope_count, dedupe, trimmed, int(new_positions.size)
 
 
 def _compute_dynamic_tile_stride(
@@ -1049,6 +1157,18 @@ def _compute_dynamic_tile_stride(
     if max_remaining <= 0:
         return stride
     return max(1, min(stride, max_remaining))
+
+
+def _resolve_query_block_size(base_block: int, remaining_active: int) -> int:
+    if remaining_active <= 0:
+        return 0
+    if remaining_active <= 8:
+        return remaining_active
+    half_block = max(8, base_block // 2)
+    if remaining_active <= half_block:
+        return remaining_active
+    return min(base_block, remaining_active)
+
 
 def _collect_residual(
     tree: PCCTree,
@@ -1190,6 +1310,8 @@ def _collect_residual(
         if gate_active
         else _collect_residual_scopes_streaming_parallel
     )
+    bitset_enabled = bool(getattr(runtime, "residual_scope_bitset", False))
+    dynamic_query_block = bool(getattr(runtime, "residual_dynamic_query_block", False))
     engine_label = "residual_serial" if gate_active else "residual_parallel"
     (
         scope_indptr_np,
@@ -1225,6 +1347,8 @@ def _collect_residual(
         workspace=workspace,
         telemetry=distance_telemetry,
         force_whitened=force_whitened_stream,
+        bitset_enabled=bitset_enabled,
+        dynamic_query_block=dynamic_query_block,
     )
     semisort_seconds = time.perf_counter() - scope_start
     whitened_pairs_total = int(distance_telemetry.whitened_pairs)
