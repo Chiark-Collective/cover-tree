@@ -67,6 +67,7 @@ class PCCT:
             backend=backend,
             mis_seed=mis_seed,
             apply_batch_order=apply_batch_order,
+            context=context,
         )
         return (new_tree, plan) if return_plan else new_tree
 
@@ -89,6 +90,7 @@ class PCCT:
             backend=backend,
             mis_seed=mis_seed,
             apply_batch_order=apply_batch_order,
+            context=context,
         )
         return (new_tree, plan) if return_plan else new_tree
 
@@ -103,7 +105,12 @@ class PCCT:
         backend = context.get_backend()
         remove = _ensure_indices(backend, indices)
         tree_backend = _convert_tree(tree, backend)
-        new_tree, plan = batch_delete(tree_backend, remove, backend=backend)
+        new_tree, plan = batch_delete(
+            tree_backend,
+            remove,
+            backend=backend,
+            context=context,
+        )
         return (new_tree, plan) if return_plan else new_tree
 
     def knn(
@@ -124,6 +131,7 @@ class PCCT:
             k=k,
             return_distances=return_distances,
             backend=tree_backend.backend,
+            context=context,
         )
 
     def nearest(self, query_points: Any, *, return_distances: bool = False) -> Any:

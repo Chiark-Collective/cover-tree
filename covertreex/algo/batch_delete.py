@@ -107,9 +107,11 @@ def _compute_delete_computation(
     remove_indices: Any,
     *,
     backend: Optional[TreeBackend] = None,
+    context: cx_config.RuntimeContext | None = None,
 ) -> _DeleteComputation:
     backend = backend or tree.backend
-    runtime = cx_config.runtime_config()
+    context = context or cx_config.runtime_context()
+    runtime = context.config
 
     indices = backend.asarray(remove_indices, dtype=backend.default_int)
     indices_np = np.sort(np.asarray(backend.to_numpy(indices), dtype=np.int64))
@@ -238,7 +240,7 @@ def _compute_delete_computation(
     else:
         unique_levels = []
 
-    seeds = batch_mis_seeds(len(unique_levels), seed=runtime.mis_seed)
+    seeds = batch_mis_seeds(len(unique_levels), seed=runtime.mis_seed, runtime=runtime)
 
     level_summaries: List[_DeleteLevelSummaryData] = []
     ordered_original: List[int] = []
@@ -255,7 +257,13 @@ def _compute_delete_computation(
         batch_points = backend.asarray(group_points, dtype=backend.default_float)
 
         mis_seed = seeds[level_idx] if level_idx < len(seeds) else None
-        plan = plan_batch_insert(current_tree, batch_points, backend=backend, mis_seed=mis_seed)
+        plan = plan_batch_insert(
+            current_tree,
+            batch_points,
+            backend=backend,
+            mis_seed=mis_seed,
+            context=context,
+        )
 
         traversal_parents_np = np.asarray(
             backend.to_numpy(plan.traversal.parents), dtype=np.int64
@@ -622,14 +630,19 @@ def batch_delete(
     remove_indices: Any,
     *,
     backend: Optional[TreeBackend] = None,
+    context: cx_config.RuntimeContext | None = None,
 ) -> Tuple[PCCTree, BatchDeletePlan]:
     backend = backend or tree.backend
-    with log_operation(LOGGER, "batch_delete") as op_log:
+    resolved_context = context or cx_config.current_runtime_context()
+    if resolved_context is None:
+        resolved_context = cx_config.runtime_context()
+    with log_operation(LOGGER, "batch_delete", context=resolved_context) as op_log:
         return _batch_delete_impl(
             op_log,
             tree,
             remove_indices,
             backend=backend,
+            context=resolved_context,
         )
 
 
@@ -639,8 +652,14 @@ def _batch_delete_impl(
     remove_indices: Any,
     *,
     backend: TreeBackend,
+    context: cx_config.RuntimeContext | None,
 ) -> Tuple[PCCTree, BatchDeletePlan]:
-    computation = _compute_delete_computation(tree, remove_indices, backend=backend)
+    computation = _compute_delete_computation(
+        tree,
+        remove_indices,
+        backend=backend,
+        context=context,
+    )
     plan = _build_plan_from_computation(backend, computation)
 
     total_removed = int(plan.removed_indices.shape[0])

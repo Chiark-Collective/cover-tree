@@ -6,9 +6,21 @@ jax = pytest.importorskip("jax")
 jnp = pytest.importorskip("jax.numpy")
 
 from covertreex import config as cx_config
+from covertreex.api import Runtime, Residual
 from covertreex.algo import batch_delete, batch_insert
 from covertreex.core.tree import PCCTree, TreeLogStats, get_runtime_backend
 from covertreex.queries import knn
+
+
+def _diagnostics_runtime(*, diagnostics: bool | None = True) -> Runtime:
+    kwargs = {
+        "backend": "numpy",
+        "precision": "float64",
+        "residual": Residual(gate1_enabled=False),
+    }
+    if diagnostics is not None:
+        kwargs["diagnostics"] = diagnostics
+    return Runtime(**kwargs)
 
 
 def _make_tree() -> PCCTree:
@@ -41,12 +53,13 @@ def _make_tree() -> PCCTree:
 
 
 def test_batch_insert_emits_resource_log(caplog: pytest.LogCaptureFixture) -> None:
-    cx_config.reset_runtime_config_cache()
+    cx_config.reset_runtime_context()
+    context = _diagnostics_runtime(diagnostics=None).activate()
     tree = _make_tree()
     batch = jnp.asarray([[2.5, 2.4], [0.2, 0.1]])
     caplog.set_level(logging.INFO, logger="covertreex.algo.batch_insert")
 
-    batch_insert(tree, batch, mis_seed=0)
+    batch_insert(tree, batch, mis_seed=0, context=context)
 
     records = [
         record for record in caplog.records if "op=batch_insert" in record.message
@@ -58,15 +71,18 @@ def test_batch_insert_emits_resource_log(caplog: pytest.LogCaptureFixture) -> No
     assert "rss_delta=" in message
     assert "candidates=" in message
 
+    cx_config.reset_runtime_context()
+
 
 def test_batch_delete_emits_resource_log(caplog: pytest.LogCaptureFixture) -> None:
-    cx_config.reset_runtime_config_cache()
+    cx_config.reset_runtime_context()
+    context = _diagnostics_runtime(diagnostics=None).activate()
     tree = _make_tree()
     batch = jnp.asarray([[2.5, 2.4], [0.2, 0.1]])
-    inserted, _ = batch_insert(tree, batch, mis_seed=0)
+    inserted, _ = batch_insert(tree, batch, mis_seed=0, context=context)
     caplog.set_level(logging.INFO, logger="covertreex.algo.batch_delete")
 
-    batch_delete(inserted, [0])
+    batch_delete(inserted, [0], context=context)
 
     records = [
         record for record in caplog.records if "op=batch_delete" in record.message
@@ -76,14 +92,17 @@ def test_batch_delete_emits_resource_log(caplog: pytest.LogCaptureFixture) -> No
     assert "removed=" in message
     assert "wall_ms=" in message
 
+    cx_config.reset_runtime_context()
+
 
 def test_knn_emits_resource_log(caplog: pytest.LogCaptureFixture) -> None:
-    cx_config.reset_runtime_config_cache()
+    cx_config.reset_runtime_context()
+    context = _diagnostics_runtime(diagnostics=None).activate()
     tree = _make_tree()
     queries = jnp.asarray([[0.1, 0.1], [2.7, 2.8]])
     caplog.set_level(logging.INFO, logger="covertreex.queries.knn")
 
-    indices, _ = knn(tree, queries, k=2, return_distances=True)
+    indices, _ = knn(tree, queries, k=2, return_distances=True, context=context)
 
     assert np.asarray(indices).shape == (2, 2)
     records = [
@@ -94,18 +113,20 @@ def test_knn_emits_resource_log(caplog: pytest.LogCaptureFixture) -> None:
     assert "queries=2" in message
     assert "k=2" in message
 
+    cx_config.reset_runtime_context()
+
 
 def test_diagnostics_can_be_disabled(
     caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("COVERTREEX_ENABLE_DIAGNOSTICS", "0")
-    cx_config.reset_runtime_config_cache()
-
+    cx_config.reset_runtime_context()
+    context = _diagnostics_runtime(diagnostics=None).activate()
     tree = _make_tree()
     queries = jnp.asarray([[0.1, 0.1]])
     caplog.set_level(logging.INFO, logger="covertreex.queries.knn")
 
-    knn(tree, queries, k=1)
+    knn(tree, queries, k=1, context=context)
 
     records = [
         record for record in caplog.records if "op=knn_query" in record.message
@@ -116,4 +137,4 @@ def test_diagnostics_can_be_disabled(
     assert "rss_delta=NA" in message
 
     monkeypatch.delenv("COVERTREEX_ENABLE_DIAGNOSTICS", raising=False)
-    cx_config.reset_runtime_config_cache()
+    cx_config.reset_runtime_context()

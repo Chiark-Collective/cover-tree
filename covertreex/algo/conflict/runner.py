@@ -61,15 +61,16 @@ def build_conflict_graph(
     batch_points: Any,
     *,
     backend: TreeBackend | None = None,
+    context: cx_config.RuntimeContext | None = None,
 ) -> ConflictGraph:
     """Construct a conflict graph with distance-aware pruning."""
 
     backend = backend or tree.backend
     xp = backend.xp
     batch = backend.asarray(batch_points, dtype=backend.default_float)
-    metric = get_metric()
-
-    runtime = cx_config.runtime_config()
+    runtime_context = context or cx_config.runtime_context()
+    runtime = runtime_context.config
+    metric = get_metric(runtime.metric)
     residual_mode = (
         runtime.metric == "residual_correlation" and backend.name == "numpy"
     )
@@ -211,8 +212,9 @@ def build_conflict_graph(
     adjacency_sort_seconds = 0.0
     adjacency_csr_seconds = 0.0
 
-    context = ConflictGraphContext(
+    graph_context = ConflictGraphContext(
         backend=backend,
+        runtime=runtime,
         batch=batch,
         batch_size=batch_size,
         scope_indptr=scope_indptr,
@@ -233,7 +235,7 @@ def build_conflict_graph(
         residual_mode=residual_mode,
         has_residual_distances=residual_pairwise_np is not None,
     )
-    adjacency_build = strategy.build(context)
+    adjacency_build = strategy.build(graph_context)
 
     if (
         residual_mode

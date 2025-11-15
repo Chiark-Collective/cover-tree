@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import time
@@ -16,6 +17,7 @@ import numpy as np
 
 from .schemas import (
     BENCHMARK_BATCH_SCHEMA_ID,
+    BENCHMARK_BATCH_SCHEMA_VERSION,
     RESIDUAL_SCOPE_CAP_SCHEMA_ID,
     RESIDUAL_SCOPE_CAP_SCHEMA_VERSION,
 )
@@ -116,6 +118,11 @@ def _augment_residual_scope_metrics(record: Dict[str, Any], residual_cache: Any)
                 record["traversal_scope_radius_cap_delta_max"] = float(np.max(delta))
 
 
+def _hash_payload(payload: Mapping[str, Any]) -> str:
+    normalised = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(normalised).hexdigest()
+
+
 class BenchmarkLogWriter:
     def __init__(
         self,
@@ -124,6 +131,7 @@ class BenchmarkLogWriter:
         run_id: str | None = None,
         runtime: Mapping[str, Any] | None = None,
         metadata: Mapping[str, Any] | None = None,
+        run_hash: str | None = None,
     ):
         self._path = Path(path).expanduser()
         if self._path.parent:
@@ -131,12 +139,16 @@ class BenchmarkLogWriter:
         self._handle = self._path.open("a", encoding="utf-8")
         self._previous_rss = _read_rss_bytes()
         self._schema_id = BENCHMARK_BATCH_SCHEMA_ID
+        self._schema_version = BENCHMARK_BATCH_SCHEMA_VERSION
         self._run_id = run_id or "run-0"
-        self._runtime_fields: Dict[str, Any] = {}
-        if runtime:
-            runtime_items = runtime.items() if hasattr(runtime, "items") else []
-            self._runtime_fields = {f"runtime_{key}": value for key, value in runtime_items}
+        self._runtime_snapshot: Dict[str, Any] = dict(runtime or {})
+        self._seed_pack: Dict[str, Any] = dict(self._runtime_snapshot.get("seeds") or {})
+        runtime_items = self._runtime_snapshot.items()
+        self._runtime_fields: Dict[str, Any] = {f"runtime_{key}": value for key, value in runtime_items}
         self._metadata: Dict[str, Any] = dict(metadata or {})
+        self._runtime_digest = _hash_payload({"runtime": self._runtime_snapshot})
+        hash_payload = {"runtime_digest": self._runtime_digest, "seeds": self._seed_pack}
+        self._run_hash = run_hash or _hash_payload(hash_payload)
         self._batch_event_index = 0
 
     def close(self) -> None:
@@ -161,11 +173,17 @@ class BenchmarkLogWriter:
 
         record = {
             "schema_id": self._schema_id,
+            "schema_version": self._schema_version,
             "run_id": self._run_id,
+            "run_hash": self._run_hash,
+            "runtime_digest": self._runtime_digest,
+            "seed_pack": self._seed_pack,
             "batch_event_index": int(self._batch_event_index),
             "timestamp": time.time(),
             "batch_index": int(batch_index),
             "batch_size": int(batch_size),
+            "runtime": self._runtime_snapshot,
+            "metadata": self._metadata,
             "candidates": int(plan.traversal.parents.shape[0]),
             "selected": int(plan.selected_indices.size),
             "dominated": int(plan.dominated_indices.size),

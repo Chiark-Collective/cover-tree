@@ -15,6 +15,7 @@ from covertreex import config as cx_config
 from covertreex.baseline import has_gpboost_cover_tree
 from covertreex.telemetry import (
     BENCHMARK_BATCH_SCHEMA_ID,
+    BENCHMARK_BATCH_SCHEMA_VERSION,
     BenchmarkLogWriter,
     RUNTIME_BREAKDOWN_SCHEMA_ID,
     runtime_breakdown_fieldnames,
@@ -161,7 +162,12 @@ def test_benchmark_log_writer_emits_json(tmp_path):
     assert first_entry["batch_index"] == 0
     assert first_entry["batch_event_index"] == 0
     assert first_entry["schema_id"] == BENCHMARK_BATCH_SCHEMA_ID
+    assert first_entry["schema_version"] == BENCHMARK_BATCH_SCHEMA_VERSION
     assert first_entry["run_id"] == "test-run"
+    assert "run_hash" in first_entry and first_entry["run_hash"]
+    assert first_entry.get("runtime_digest")
+    assert "seed_pack" in first_entry
+    assert first_entry["runtime"]["backend"] == "numpy"
     assert first_entry["runtime_backend"] == "numpy"
     assert "traversal_ms" in first_entry
     assert "rss_bytes" in first_entry or "rss_delta_bytes" in first_entry

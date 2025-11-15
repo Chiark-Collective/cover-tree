@@ -1,36 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, List, Literal, Mapping, Optional, Sequence, Tuple
+from typing import Any, List, Literal, Optional, Tuple
 
-import numpy as np
-from numpy.random import default_rng
 import typer
 from typing_extensions import Annotated
 
-from covertreex import config as cx_config, reset_residual_metric
-from covertreex.metrics import build_residual_backend, configure_residual_correlation
-from covertreex.telemetry import generate_run_id, timestamped_artifact
+from cli.pcct.execution import benchmark_run
+from cli.pcct.query import execute_query_benchmark
 
-from cli.runtime import runtime_from_args
-from tests.utils.datasets import gaussian_points
-
-from .baselines import run_baseline_comparisons
-from .benchmark import benchmark_knn_latency
-from .gate import _append_gate_profile_log
-from .runtime import (
-    _emit_engine_banner,
-    _ensure_thread_env_defaults,
-    _gate_active_for_backend,
-    _resolve_artifact_arg,
-    _thread_env_snapshot,
-)
-from .telemetry import (
-    CLITelemetryHandles,
-    ResidualTraversalTelemetry,
-    initialise_cli_telemetry,
-)
-
+_LEGACY_ENTRYPOINT_WARNING_ENABLED = True
+_LEGACY_ENTRYPOINT_WARNING_EMITTED = False
 
 @dataclass
 class QueryCLIOptions:
@@ -51,14 +31,18 @@ class QueryCLIOptions:
     enable_sparse_traversal: bool | None = None
     diagnostics: bool | None = None
     log_level: str | None = None
+    global_seed: int | None = None
     mis_seed: int | None = None
     conflict_graph: str | None = None
     scope_segment_dedupe: bool | None = None
     scope_chunk_target: int | None = None
     scope_chunk_max_segments: int | None = None
+    scope_chunk_pair_merge: bool | None = None
+    scope_conflict_buffer_reuse: bool | None = None
     degree_cap: int | None = None
     batch_order: str | None = None
     batch_order_seed: int | None = None
+    residual_grid_seed: int | None = None
     prefix_schedule: str | None = None
     prefix_density_low: float | None = None
     prefix_density_high: float | None = None
@@ -111,7 +95,10 @@ class QueryCLIOptions:
         values = {}
         for field in cls.__dataclass_fields__:
             if hasattr(namespace, field):
-                values[field] = getattr(namespace, field)
+                value = getattr(namespace, field)
+                if field == "devices" and value:
+                    value = tuple(value)
+                values[field] = value
         return cls(**values)
 
 
@@ -128,6 +115,33 @@ _RUNTIME_PANEL = "Runtime controls"
 _RESIDUAL_PANEL = "Residual metric"
 _GATE_PANEL = "Gate & prefilter"
 _TELEMETRY_PANEL = "Telemetry & baselines"
+
+
+def disable_legacy_entrypoint_warning() -> None:
+    """Prevent the legacy CLI warning when invoked via `pcct`."""
+
+    global _LEGACY_ENTRYPOINT_WARNING_ENABLED
+    _LEGACY_ENTRYPOINT_WARNING_ENABLED = False
+
+
+def enable_legacy_entrypoint_warning() -> None:
+    """Re-enable the legacy warning (primarily for tests)."""
+
+    global _LEGACY_ENTRYPOINT_WARNING_ENABLED, _LEGACY_ENTRYPOINT_WARNING_EMITTED
+    _LEGACY_ENTRYPOINT_WARNING_ENABLED = True
+    _LEGACY_ENTRYPOINT_WARNING_EMITTED = False
+
+
+def _emit_legacy_warning_once() -> None:
+    global _LEGACY_ENTRYPOINT_WARNING_EMITTED
+    if _LEGACY_ENTRYPOINT_WARNING_EMITTED or not _LEGACY_ENTRYPOINT_WARNING_ENABLED:
+        return
+    typer.echo(
+        "[compat] `python -m cli.queries` is deprecated; use `pcct query` "
+        "for the Typer subcommand interface. See docs/CLI.md for details.",
+        err=True,
+    )
+    _LEGACY_ENTRYPOINT_WARNING_EMITTED = True
 
 
 @app.callback(invoke_without_command=True)
@@ -272,6 +286,14 @@ def cli(
             rich_help_panel=_RUNTIME_PANEL,
         ),
     ] = None,
+    global_seed: Annotated[
+        Optional[int],
+        typer.Option(
+            "--global-seed",
+            help="Base SeedPack seed applied when channel-specific seeds are omitted.",
+            rich_help_panel=_RUNTIME_PANEL,
+        ),
+    ] = None,
     mis_seed: Annotated[
         Optional[int],
         typer.Option(
@@ -349,6 +371,14 @@ def cli(
         typer.Option(
             "--batch-order-seed",
             help="Seed used when --batch-order=random.",
+            rich_help_panel=_RUNTIME_PANEL,
+        ),
+    ] = None,
+    residual_grid_seed: Annotated[
+        Optional[int],
+        typer.Option(
+            "--residual-grid-seed",
+            help="Seed used by residual grid leader selection.",
             rich_help_panel=_RUNTIME_PANEL,
         ),
     ] = None,
@@ -721,6 +751,7 @@ def cli(
         ),
     ] = "batch",
 ) -> None:
+    _emit_legacy_warning_once()
     options = QueryCLIOptions(
         dimension=dimension,
         tree_points=tree_points,
@@ -797,68 +828,11 @@ def cli(
         run_queries(options)
 
 
-def _validate_residual_runtime(snapshot: Mapping[str, Any]) -> None:
-    errors = []
-    backend = snapshot.get("backend")
-    if backend != "numpy":
-        errors.append(f"expected backend 'numpy' but runtime selected {backend!r}")
-    if not snapshot.get("enable_numba"):
-        errors.append(
-            "Numba acceleration is required for residual traversal; enable it by leaving "
-            "COVERTREEX_ENABLE_NUMBA unset or passing --enable-numba=1."
-        )
-    if errors:
-        joined = "\n - ".join(errors)
-        raise RuntimeError(
-            "Residual metric requires the residual traversal engine; unable to satisfy the"
-            f" prerequisites:\n - {joined}"
-        )
-
-
 def run_queries(options: QueryCLIOptions) -> None:
     args = options
-    run_id = args.run_id or generate_run_id()
     if args.residual_gate not in (None, "off") and args.metric != "residual":
         raise ValueError("--residual-gate presets are only supported when --metric residual is selected.")
 
-    if args.metric == "residual":
-        profile_log_path = _resolve_artifact_arg(args.residual_gate_profile_log, category="profiles")
-        if args.residual_gate_profile_path:
-            profile_json_path = _resolve_artifact_arg(
-                args.residual_gate_profile_path,
-                category="profiles",
-            )
-        elif profile_log_path:
-            profile_json_path = str(
-                timestamped_artifact(
-                    category="profiles",
-                    prefix=f"residual_gate_profile_{run_id}",
-                    suffix=".json",
-                )
-            )
-        else:
-            profile_json_path = None
-        args.residual_gate_profile_path = profile_json_path
-        args.residual_gate_profile_log = profile_log_path
-    else:
-        args.residual_gate_profile_path = None
-        args.residual_gate_profile_log = None
-
-    _ensure_thread_env_defaults()
-    cli_runtime = runtime_from_args(args)
-    runtime_snapshot = dict(cli_runtime.describe())
-    if args.metric == "residual":
-        _validate_residual_runtime(runtime_snapshot)
-    context = cli_runtime.activate()
-    thread_snapshot = _thread_env_snapshot()
-    runtime_snapshot["runtime_blas_threads"] = thread_snapshot["blas_threads"]
-    runtime_snapshot["runtime_numba_threads"] = thread_snapshot["numba_threads"]
-    engine_label = "euclidean_dense"
-    gate_flag = False
-    if args.metric != "residual":
-        runtime_snapshot["runtime_traversal_engine"] = engine_label
-        runtime_snapshot["runtime_gate_active"] = gate_flag
-        _emit_engine_banner(engine_label, gate_flag, thread_snapshot)
     log_metadata = {
         "benchmark": "cli.queries",
         "dimension": args.dimension,
@@ -870,113 +844,12 @@ def run_queries(options: QueryCLIOptions) -> None:
         "build_mode": args.build_mode,
         "baseline": args.baseline,
     }
-    telemetry_handles: CLITelemetryHandles | None = None
-    log_writer = None
-    log_path: str | None = None
-    scope_cap_recorder = None
-    telemetry_view: ResidualTraversalTelemetry | None = None
-
-    try:
-        telemetry_handles = initialise_cli_telemetry(
-            args=args,
-            run_id=run_id,
-            runtime_snapshot=runtime_snapshot,
-            log_metadata=log_metadata,
-            context=context,
-        )
-        log_writer = telemetry_handles.log_writer
-        log_path = telemetry_handles.log_path
-        scope_cap_recorder = telemetry_handles.scope_cap_recorder
-        telemetry_view = telemetry_handles.traversal_view
-
-        point_rng = default_rng(args.seed)
-        points_np = gaussian_points(point_rng, args.tree_points, args.dimension, dtype=np.float64)
-        query_rng = default_rng(args.seed + 1)
-        queries_np = gaussian_points(query_rng, args.queries, args.dimension, dtype=np.float64)
-
-        if args.metric == "residual":
-            residual_backend = build_residual_backend(
-                points_np,
-                seed=args.seed,
-                inducing_count=args.residual_inducing,
-                variance=args.residual_variance,
-                lengthscale=args.residual_lengthscale,
-                chunk_size=args.residual_chunk_size,
-            )
-            configure_residual_correlation(residual_backend, context=context)
-            gate_flag = _gate_active_for_backend(residual_backend)
-            engine_label = "residual_serial" if gate_flag else "residual_parallel"
-            runtime_snapshot["runtime_traversal_engine"] = engine_label
-            runtime_snapshot["runtime_gate_active"] = gate_flag
-            _emit_engine_banner(engine_label, gate_flag, thread_snapshot)
-        else:
-            runtime_snapshot.setdefault("runtime_traversal_engine", engine_label)
-            runtime_snapshot.setdefault("runtime_gate_active", gate_flag)
-
-        tree, result = benchmark_knn_latency(
-            dimension=args.dimension,
-            tree_points=args.tree_points,
-            query_count=args.queries,
-            k=args.k,
-            batch_size=args.batch_size,
-            seed=args.seed,
-            prebuilt_points=points_np,
-            prebuilt_queries=queries_np,
-            log_writer=log_writer,
-            scope_cap_recorder=scope_cap_recorder,
-            build_mode=args.build_mode,
-            plan_callback=telemetry_view.observe_plan if telemetry_view is not None else None,
-            context=context,
-        )
-
-        print(
-            f"pcct | build={result.build_seconds:.4f}s "
-            f"queries={result.queries} k={result.k} "
-            f"time={result.elapsed_seconds:.4f}s "
-            f"latency={result.latency_ms:.4f}ms "
-            f"throughput={result.queries_per_second:,.1f} q/s"
-        )
-
-        if args.baseline != "none":
-            baseline_results = run_baseline_comparisons(
-                points_np,
-                queries_np,
-                k=args.k,
-                mode=args.baseline,
-            )
-            for baseline in baseline_results:
-                slowdown = (
-                    baseline.latency_ms / result.latency_ms if result.latency_ms else float("inf")
-                )
-
-                print(
-                    f"baseline[{baseline.name}] | build={baseline.build_seconds:.4f}s "
-                    f"time={baseline.elapsed_seconds:.4f}s "
-                    f"latency={baseline.latency_ms:.4f}ms "
-                    f"throughput={baseline.queries_per_second:,.1f} q/s "
-                    f"slowdown={slowdown:.3f}x"
-                )
-        if telemetry_view is not None and telemetry_view.has_data:
-            for line in telemetry_view.render_summary():
-                print(line)
-    finally:
-        reset_residual_metric()
-        if args.metric == "residual":
-            _append_gate_profile_log(
-                profile_json_path=args.residual_gate_profile_path,
-                profile_log_path=args.residual_gate_profile_log,
-                run_id=run_id,
-                log_metadata=log_metadata,
-                runtime_snapshot=runtime_snapshot,
-                batch_log_path=log_path,
-            )
-        cx_config.reset_runtime_context()
-        if telemetry_handles is not None:
-            telemetry_handles.close()
+    with benchmark_run(args, benchmark="cli.queries", metadata=log_metadata) as run:
+        execute_query_benchmark(options, run)
 
 
 def main() -> None:
     app()
 
 
-__all__ = ["main"]
+__all__ = ["main", "disable_legacy_entrypoint_warning", "enable_legacy_entrypoint_warning"]

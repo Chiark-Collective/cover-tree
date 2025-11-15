@@ -6,6 +6,9 @@ from .registry import (
     select_traversal_strategy,
 )
 
+# Load plugin entry points once traversal registry is in scope.
+from covertreex.plugins import traversal as _traversal_plugins  # noqa: F401
+
 # Import implementations for side effects so their strategies self-register.
 from . import residual as _residual  # noqa: F401
 from . import euclidean as _euclidean  # noqa: F401

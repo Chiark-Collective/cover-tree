@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Protocol, Tuple
 
+from covertreex.logging import get_logger
+
 from covertreex import config as cx_config
 
 ArrayLike = Any
@@ -33,6 +35,13 @@ class Metric:
         return self.pointwise_kernel(backend, lhs, rhs)
 
 
+def _resolve_runtime_config() -> cx_config.RuntimeConfig:
+    active = cx_config.current_runtime_context()
+    if active is not None:
+        return active.config
+    return cx_config.RuntimeConfig.from_env()
+
+
 class MetricRegistry:
     """Minimal registry for runtime-selectable metrics."""
 
@@ -53,6 +62,17 @@ class MetricRegistry:
 
     def names(self) -> Tuple[str, ...]:
         return tuple(sorted(self._metrics.keys()))
+
+    def unregister(self, name: str) -> None:
+        key = name.lower()
+        self._metrics.pop(key, None)
+
+    def describe(self) -> Tuple[Tuple[str, str], ...]:
+        entries: list[Tuple[str, str]] = []
+        for name, metric in self._metrics.items():
+            factory_module = metric.pairwise_kernel.__module__
+            entries.append((name, factory_module))
+        return tuple(sorted(entries, key=lambda item: item[0]))
 
 
 def _ensure_2d(backend: "TreeBackend", array: ArrayLike) -> ArrayLike:
@@ -152,7 +172,7 @@ def get_metric(name: str | None = None) -> Metric:
     """Return a registered metric, defaulting to the runtime-selected metric."""
 
     if name is None:
-        name = cx_config.runtime_config().metric
+        name = _resolve_runtime_config().metric
     return _REGISTRY.get(name)
 
 
@@ -184,6 +204,24 @@ def reset_residual_metric() -> None:
 
 def available_metrics() -> Tuple[str, ...]:
     return _REGISTRY.names()
+
+
+def describe_registered_metrics() -> Tuple[dict[str, str], ...]:
+    return tuple(
+        {"name": name, "module": module, "factory": module}
+        for name, module in _REGISTRY.describe()
+    )
+
+
+def _load_metric_plugins() -> None:
+    try:
+        from covertreex.plugins import metrics as _metrics_plugins  # noqa: F401
+    except Exception:  # pragma: no cover - defensive
+        LOGGER = get_logger("plugins.metrics")
+        LOGGER.exception("Failed to import metric plugins.")
+
+
+_load_metric_plugins()
 
 
 # Avoid circular import at module load.

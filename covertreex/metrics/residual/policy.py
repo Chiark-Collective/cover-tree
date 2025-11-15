@@ -388,8 +388,13 @@ class ResidualPolicy:
 def get_residual_policy(
     runtime: cx_config.RuntimeConfig | None = None,
 ) -> ResidualPolicy:
-    ctx = runtime or cx_config.runtime_config()
-    return ResidualPolicy.from_runtime(ctx)
+    if runtime is None:
+        active = cx_config.current_runtime_context()
+        if active is not None:
+            runtime = active.config
+        else:
+            runtime = cx_config.RuntimeConfig.from_env()
+    return ResidualPolicy.from_runtime(runtime)
 
 
 __all__ = [

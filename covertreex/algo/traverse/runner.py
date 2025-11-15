@@ -27,6 +27,7 @@ def traverse_collect_scopes(
     batch_points: Any,
     *,
     backend: TreeBackend | None = None,
+    context: cx_config.RuntimeContext | None = None,
 ) -> TraversalResult:
     """Compute parent assignments and conflict scopes for a batch of points."""
 
@@ -37,7 +38,8 @@ def traverse_collect_scopes(
     if batch_size == 0:
         return empty_result(backend, 0)
 
-    runtime = cx_config.runtime_config()
+    context = context or cx_config.runtime_context()
+    runtime = context.config
     if tree.is_empty() and runtime.metric != "residual_correlation":
         return empty_result(backend, batch_size)
 

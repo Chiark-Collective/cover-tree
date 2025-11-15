@@ -63,6 +63,7 @@ _ATTR_TO_FIELD = {
     "enable_sparse_traversal": "enable_sparse_traversal",
     "diagnostics": "enable_diagnostics",
     "log_level": "log_level",
+    "global_seed": "global_seed",
     "mis_seed": "mis_seed",
     "conflict_graph": "conflict_graph_impl",
     "scope_segment_dedupe": "scope_segment_dedupe",
@@ -71,6 +72,7 @@ _ATTR_TO_FIELD = {
     "degree_cap": "conflict_degree_cap",
     "batch_order": "batch_order_strategy",
     "batch_order_seed": "batch_order_seed",
+    "residual_grid_seed": "residual_grid_seed",
     "prefix_schedule": "prefix_schedule",
     "prefix_density_low": "prefix_density_low",
     "prefix_density_high": "prefix_density_high",
@@ -91,8 +93,10 @@ _ATTR_TO_FIELD = {
 _FIELD_PATH_OVERRIDES: Dict[str, Tuple[str, ...]] = {
     "enable_diagnostics": ("diagnostics", "enabled"),
     "log_level": ("diagnostics", "log_level"),
+    "global_seed": ("seeds", "global_seed"),
     "mis_seed": ("seeds", "mis"),
     "batch_order_seed": ("seeds", "batch_order"),
+    "residual_grid_seed": ("seeds", "residual_grid"),
 }
 
 
@@ -251,6 +255,7 @@ class Runtime:
     enable_sparse_traversal: bool | None = None
     diagnostics: bool | None = None
     log_level: str | None = None
+    global_seed: int | None = None
     mis_seed: int | None = None
     conflict_graph: str | None = None
     scope_segment_dedupe: bool | None = None
@@ -259,6 +264,7 @@ class Runtime:
     degree_cap: int | None = None
     batch_order: str | None = None
     batch_order_seed: int | None = None
+    residual_grid_seed: int | None = None
     prefix_schedule: str | None = None
     prefix_density_low: float | None = None
     prefix_density_high: float | None = None
@@ -385,6 +391,7 @@ class Runtime:
             enable_sparse_traversal=config.enable_sparse_traversal,
             diagnostics=config.enable_diagnostics,
             log_level=config.log_level,
+            global_seed=config.seeds.global_seed,
             mis_seed=config.mis_seed,
             conflict_graph=config.conflict_graph_impl,
             scope_segment_dedupe=config.scope_segment_dedupe,
@@ -393,6 +400,7 @@ class Runtime:
             degree_cap=config.conflict_degree_cap,
             batch_order=config.batch_order_strategy,
             batch_order_seed=config.batch_order_seed,
+            residual_grid_seed=config.seeds.residual_grid,
             prefix_schedule=config.prefix_schedule,
             prefix_density_low=config.prefix_density_low,
             prefix_density_high=config.prefix_density_high,

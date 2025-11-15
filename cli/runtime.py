@@ -103,6 +103,9 @@ def runtime_from_args(
     log_level = _get_arg(args, "log_level")
     if log_level:
         runtime_kwargs["log_level"] = log_level
+    global_seed = _get_arg(args, "global_seed")
+    if global_seed is not None:
+        runtime_kwargs["global_seed"] = global_seed
     enable_sparse = _get_arg(args, "enable_sparse_traversal")
     if enable_sparse is not None:
         runtime_kwargs["enable_sparse_traversal"] = bool(enable_sparse)
@@ -135,6 +138,9 @@ def runtime_from_args(
     batch_seed = _get_arg(args, "batch_order_seed")
     if batch_seed is not None:
         runtime_kwargs["batch_order_seed"] = batch_seed
+    residual_grid_seed = _get_arg(args, "residual_grid_seed")
+    if residual_grid_seed is not None:
+        runtime_kwargs["residual_grid_seed"] = residual_grid_seed
     prefix_schedule = _get_arg(args, "prefix_schedule")
     if prefix_schedule:
         runtime_kwargs["prefix_schedule"] = prefix_schedule

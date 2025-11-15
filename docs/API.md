@@ -97,17 +97,28 @@ indices, distances = PCCT(runtime, tree).knn(queries, k=8)
 Batch inserts accept both NumPy and JAX arrays depending on the runtime backend. Conflicts,
 traversal, and MIS selection now run through strategy registries (`covertreex.algo.traverse` and
 `covertreex.algo.conflict`) so custom strategies can be registered by calling
-`register_traversal_strategy(...)` or `register_conflict_strategy(...)` during startup. When you step
-outside the `PCCT` façade, always reuse the explicit `RuntimeContext` returned by
-`Runtime.activate()`—low-level helpers (`batch_insert`, `traverse_collect_scopes`, conflict graph
-builders, telemetry, etc.) all accept a `context` keyword and never consult global state.
+`register_traversal_strategy(...)` or `register_conflict_strategy(...)` during startup. Third-party
+packages can also expose plugins via setuptools entry points (`covertreex.traversal`,
+`covertreex.conflict`, `covertreex.metrics`); the CLI’s `pcct plugins` command reports which
+plugins loaded plus their origin modules. When you step outside the `PCCT` façade, always reuse the
+explicit `RuntimeContext` returned by `Runtime.activate()`—low-level helpers (`batch_insert`,
+`traverse_collect_scopes`, conflict graph builders, telemetry, etc.) all accept a `context` keyword
+and never consult global state.
 
 ## Command-line entrypoints
 
 All benchmark commands now live under `cli/` with compatibility shims in `benchmarks/`:
 
-- `python -m cli.queries …` replaces `benchmarks.queries`. The module handles dataset generation,
-  runtime activation, telemetry, and (optionally) baseline comparisons.
+- `python -m cli.pcct query …` replaces `benchmarks.queries`. The Typer app handles dataset
+  generation, runtime activation, telemetry, and (optionally) baseline comparisons. The legacy
+  `python -m cli.queries` runner now prints a warning before dispatching to the same command.
+- `python -m cli.pcct build …` constructs trees (batch or prefix mode) and can export them as `.npz`
+  artifacts for downstream consumption.
+- `python -m cli.pcct benchmark …` repeats query runs to gather aggregate latency/build summaries.
+- `python -m cli.pcct profile …` lists and describes runtime presets so scripts can adopt Stage 2
+  profiles without hand-parsing YAML.
+- `python -m cli.pcct doctor …` performs environment checks (Numba/JAX availability, artifact root
+  accessibility, thread settings) for the selected profile and can gate CI with `--fail-on-warning`.
 - `python -m cli.runtime_breakdown …` captures per-phase timings, CSV summaries, and plots.
 
 You can continue invoking `python -m benchmarks.queries` while downstream tooling migrates, but the

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Tuple
+from typing import Any, Callable, Mapping, Tuple
 
 import numpy as np
 from numpy.random import Generator, default_rng
@@ -15,6 +15,13 @@ from covertreex.telemetry import BenchmarkLogWriter, ResidualScopeCapRecorder
 from tests.utils.datasets import gaussian_points
 
 from .runtime import _resolve_backend
+
+
+def _ensure_context(context: cx_config.RuntimeContext | None) -> cx_config.RuntimeContext:
+    existing = context or cx_config.current_runtime_context()
+    if existing is not None:
+        return existing
+    return cx_config.runtime_context()
 
 
 @dataclass(frozen=True)
@@ -48,10 +55,13 @@ def _build_tree(
     log_writer: BenchmarkLogWriter | None = None,
     scope_cap_recorder: "ResidualScopeCapRecorder | None" = None,
     build_mode: str = "batch",
-    plan_callback: Callable[[Any, int, int], None] | None = None,
+    plan_callback: Callable[[Any, int, int], Mapping[str, Any] | None] | None = None,
+    context: cx_config.RuntimeContext | None = None,
 ) -> Tuple[PCCTree, np.ndarray, float]:
-    backend = _resolve_backend()
+    resolved_context = _ensure_context(context)
+    backend = _resolve_backend(context=resolved_context)
     tree = PCCTree.empty(dimension=dimension, backend=backend)
+    runtime = resolved_context.config
 
     if build_mode == "prefix":
         if prebuilt_points is not None:
@@ -67,9 +77,9 @@ def _build_tree(
             backend=backend,
             mis_seed=seed,
             shuffle_seed=seed,
+            context=resolved_context,
         )
         build_seconds = time.perf_counter() - start
-        runtime = cx_config.runtime_config()
         schedule = runtime.prefix_schedule
         for group_index, group in enumerate(prefix_result.groups):
             plan = group.plan
@@ -77,24 +87,27 @@ def _build_tree(
                 group_size = int(plan.traversal.parents.shape[0])
             else:
                 group_size = int(plan.traversal.levels.shape[0])
+            extra_payload: Mapping[str, Any] | None = None
+            if plan_callback is not None:
+                extra_payload = plan_callback(plan, group_index, group_size)
+            prefix_extra = {
+                "prefix_group_index": group_index,
+                "prefix_factor": float(group.prefix_factor or 0.0),
+                "prefix_domination_ratio": float(group.domination_ratio or 0.0),
+                "prefix_schedule": schedule,
+            }
+            if extra_payload:
+                prefix_extra.update(extra_payload)
             if log_writer is not None:
-                extra = {
-                    "prefix_group_index": group_index,
-                    "prefix_factor": float(group.prefix_factor or 0.0),
-                    "prefix_domination_ratio": float(group.domination_ratio or 0.0),
-                    "prefix_schedule": schedule,
-                }
                 log_writer.record_batch(
                     batch_index=group_index,
                     batch_size=group_size,
                     plan=plan,
-                    extra=extra,
+                    extra=prefix_extra,
                 )
             if scope_cap_recorder is not None:
                 scope_cap_recorder.capture(plan)
-            if plan_callback is not None:
-                plan_callback(plan, group_index, group_size)
-        return tree, points_np, build_seconds
+            return tree, points_np, build_seconds
 
     start = time.perf_counter()
     buffers: list[np.ndarray] = []
@@ -108,17 +121,24 @@ def _build_tree(
             end_idx = min(start_idx + batch_size, total)
             batch_np = points_np[start_idx:end_idx]
             batch = backend.asarray(batch_np, dtype=backend.default_float)
-            tree, plan = batch_insert(tree, batch, mis_seed=seed + idx)
+            tree, plan = batch_insert(
+                tree,
+                batch,
+                mis_seed=seed + idx,
+                context=resolved_context,
+            )
+            extra_payload: Mapping[str, Any] | None = None
+            if plan_callback is not None:
+                extra_payload = plan_callback(plan, idx, int(batch_np.shape[0]))
             if log_writer is not None:
                 log_writer.record_batch(
                     batch_index=idx,
                     batch_size=int(batch_np.shape[0]),
                     plan=plan,
+                    extra=extra_payload,
                 )
             if scope_cap_recorder is not None:
                 scope_cap_recorder.capture(plan)
-            if plan_callback is not None:
-                plan_callback(plan, idx, int(batch_np.shape[0]))
             buffers.append(np.asarray(batch))
             idx += 1
     else:
@@ -132,17 +152,24 @@ def _build_tree(
                 dimension,
                 backend=backend,
             )
-            tree, plan = batch_insert(tree, batch, mis_seed=seed + idx)
+            tree, plan = batch_insert(
+                tree,
+                batch,
+                mis_seed=seed + idx,
+                context=resolved_context,
+            )
+            extra_payload: Mapping[str, Any] | None = None
+            if plan_callback is not None:
+                extra_payload = plan_callback(plan, idx, current)
             if log_writer is not None:
                 log_writer.record_batch(
                     batch_index=idx,
                     batch_size=current,
                     plan=plan,
+                    extra=extra_payload,
                 )
             if scope_cap_recorder is not None:
                 scope_cap_recorder.capture(plan)
-            if plan_callback is not None:
-                plan_callback(plan, idx, current)
             buffers.append(np.asarray(batch))
             remaining -= current
             idx += 1
@@ -170,8 +197,10 @@ def benchmark_knn_latency(
     log_writer: BenchmarkLogWriter | None = None,
     scope_cap_recorder: "ResidualScopeCapRecorder | None" = None,
     build_mode: str = "batch",
-    plan_callback: Callable[[Any, int, int], None] | None = None,
+    plan_callback: Callable[[Any, int, int], Mapping[str, Any] | None] | None = None,
+    context: cx_config.RuntimeContext | None = None,
 ) -> Tuple[PCCTree, QueryBenchmarkResult]:
+    resolved_context = _ensure_context(context)
     tree_build_seconds: float | None = None
     if prebuilt_tree is None:
         tree, _, tree_build_seconds = _build_tree(
@@ -184,6 +213,7 @@ def benchmark_knn_latency(
             scope_cap_recorder=scope_cap_recorder,
             build_mode=build_mode,
             plan_callback=plan_callback,
+            context=resolved_context,
         )
     else:
         tree = prebuilt_tree
@@ -206,7 +236,7 @@ def benchmark_knn_latency(
             prebuilt_queries, dtype=backend.default_float
         )
     start = time.perf_counter()
-    knn(tree, queries, k=k)
+    knn(tree, queries, k=k, context=resolved_context)
     elapsed = time.perf_counter() - start
     qps = query_count / elapsed if elapsed > 0 else float("inf")
     latency = (elapsed / query_count) * 1e3 if query_count else 0.0

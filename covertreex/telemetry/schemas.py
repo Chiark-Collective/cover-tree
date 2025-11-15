@@ -1,22 +1,119 @@
 from __future__ import annotations
 
-from typing import Dict, Tuple
+from dataclasses import dataclass
+from typing import Any, Dict, Mapping, Tuple
 
-BENCHMARK_BATCH_SCHEMA_ID = "covertreex.benchmark_batch.v1"
-BENCHMARK_BATCH_SCHEMA: Dict[str, object] = {
+BENCHMARK_BATCH_SCHEMA_VERSION = 2
+BENCHMARK_BATCH_SCHEMA_ID = f"covertreex.benchmark_batch.v{BENCHMARK_BATCH_SCHEMA_VERSION}"
+BENCHMARK_BATCH_JSON_SCHEMA: Dict[str, Any] = {
     "id": BENCHMARK_BATCH_SCHEMA_ID,
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Per-batch PCCT telemetry emitted during benchmark runs.",
-    "required": (
+    "type": "object",
+    "required": [
         "schema_id",
+        "schema_version",
         "run_id",
+        "run_hash",
         "timestamp",
+        "batch_event_index",
         "batch_index",
         "batch_size",
-        "traversal_ms",
-        "conflict_graph_ms",
-        "mis_ms",
-    ),
+        "runtime",
+        "metadata",
+    ],
+    "properties": {
+        "schema_id": {"const": BENCHMARK_BATCH_SCHEMA_ID},
+        "schema_version": {"type": "integer", "minimum": 1},
+        "run_id": {"type": "string"},
+        "run_hash": {"type": "string"},
+        "runtime_digest": {"type": "string"},
+        "timestamp": {"type": "number"},
+        "batch_event_index": {"type": "integer", "minimum": 0},
+        "batch_index": {"type": "integer", "minimum": 0},
+        "batch_size": {"type": "integer", "minimum": 0},
+        "runtime": {"type": "object"},
+        "metadata": {"type": "object"},
+        "seed_pack": {"type": "object"},
+    },
+    "additionalProperties": True,
 }
+
+
+@dataclass(frozen=True)
+class BenchmarkBatchRecord:
+    """Typed representation of benchmark batch telemetry rows."""
+
+    schema_id: str
+    schema_version: int
+    run_id: str
+    run_hash: str
+    runtime_digest: str | None
+    timestamp: float
+    batch_event_index: int
+    batch_index: int
+    batch_size: int
+    runtime: Mapping[str, Any]
+    metadata: Mapping[str, Any]
+    seed_pack: Mapping[str, Any]
+    measurements: Mapping[str, Any]
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, Any]) -> "BenchmarkBatchRecord":
+        missing = [
+            field
+            for field in (
+                "schema_id",
+                "schema_version",
+                "run_id",
+                "run_hash",
+                "timestamp",
+                "batch_event_index",
+                "batch_index",
+                "batch_size",
+            )
+            if field not in payload
+        ]
+        if missing:
+            raise ValueError(f"Telemetry payload missing required fields: {missing}")
+        if payload["schema_id"] != BENCHMARK_BATCH_SCHEMA_ID:
+            raise ValueError(
+                "Unexpected schema id: {}".format(payload.get("schema_id"))
+            )
+        runtime = payload.get("runtime") or {}
+        metadata = payload.get("metadata") or {}
+        seed_pack = payload.get("seed_pack") or {}
+        runtime_digest = payload.get("runtime_digest")
+        reserved = {
+            "schema_id",
+            "schema_version",
+            "run_id",
+            "run_hash",
+            "runtime_digest",
+            "timestamp",
+            "batch_event_index",
+            "batch_index",
+            "batch_size",
+            "runtime",
+            "metadata",
+            "seed_pack",
+        }
+        measurements = {k: v for k, v in payload.items() if k not in reserved}
+        return cls(
+            schema_id=str(payload["schema_id"]),
+            schema_version=int(payload["schema_version"]),
+            run_id=str(payload["run_id"]),
+            run_hash=str(payload["run_hash"]),
+            runtime_digest=str(runtime_digest) if runtime_digest is not None else None,
+            timestamp=float(payload["timestamp"]),
+            batch_event_index=int(payload["batch_event_index"]),
+            batch_index=int(payload["batch_index"]),
+            batch_size=int(payload["batch_size"]),
+            runtime=dict(runtime),
+            metadata=dict(metadata),
+            seed_pack=dict(seed_pack),
+            measurements=measurements,
+        )
 
 RESIDUAL_SCOPE_CAP_SCHEMA_VERSION = 1
 RESIDUAL_SCOPE_CAP_SCHEMA_ID = "covertreex.residual_scope_cap_summary.v1"
@@ -130,8 +227,10 @@ BATCH_OPS_RESULT_SCHEMA: Dict[str, object] = {
 }
 
 __all__ = [
-    "BENCHMARK_BATCH_SCHEMA",
+    "BENCHMARK_BATCH_JSON_SCHEMA",
     "BENCHMARK_BATCH_SCHEMA_ID",
+    "BENCHMARK_BATCH_SCHEMA_VERSION",
+    "BenchmarkBatchRecord",
     "RESIDUAL_SCOPE_CAP_SCHEMA",
     "RESIDUAL_SCOPE_CAP_SCHEMA_ID",
     "RESIDUAL_SCOPE_CAP_SCHEMA_VERSION",

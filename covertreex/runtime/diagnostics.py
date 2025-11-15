@@ -25,7 +25,11 @@ class _ProcessSnapshot:
     gpu_total_bytes: Optional[int]
 
 
-def _now_snapshot(*, with_resources: bool) -> _ProcessSnapshot:
+def _now_snapshot(
+    *,
+    with_resources: bool,
+    runtime: cx_config.RuntimeConfig | None,
+) -> _ProcessSnapshot:
     wall = time.perf_counter()
     timestamp = time.time()
     if not with_resources:
@@ -43,7 +47,7 @@ def _now_snapshot(*, with_resources: bool) -> _ProcessSnapshot:
     usage = resource.getrusage(resource.RUSAGE_SELF)
     max_rss_bytes = int(usage.ru_maxrss * 1024) if usage.ru_maxrss else 0
     rss_bytes = _read_rss_bytes()
-    gpu_used, gpu_total = _query_gpu_memory()
+    gpu_used, gpu_total = _query_gpu_memory(runtime)
     return _ProcessSnapshot(
         timestamp=timestamp,
         wall=wall,
@@ -72,11 +76,14 @@ def _read_rss_bytes() -> Optional[int]:
 _GPU_FAILURE = False
 
 
-def _query_gpu_memory() -> tuple[Optional[int], Optional[int]]:
+def _query_gpu_memory(
+    runtime: cx_config.RuntimeConfig | None,
+) -> tuple[Optional[int], Optional[int]]:
     if _GPU_FAILURE:
         return None, None
 
-    runtime = cx_config.runtime_config()
+    if runtime is None:
+        return None, None
     device = next((dev for dev in runtime.devices if dev.startswith("gpu:")), None)
     if device is None:
         return None, None
@@ -152,6 +159,20 @@ def _max_optional(*values: Optional[int]) -> Optional[int]:
     return max(present)
 
 
+def _resolve_runtime_config(
+    runtime: cx_config.RuntimeConfig | None,
+    context: cx_config.RuntimeContext | None,
+) -> cx_config.RuntimeConfig:
+    if runtime is not None:
+        return runtime
+    if context is not None:
+        return context.config
+    active = cx_config.current_runtime_context()
+    if active is not None:
+        return active.config
+    return cx_config.RuntimeConfig.from_env()
+
+
 @dataclass
 class OperationMetrics:
     label: str
@@ -162,14 +183,24 @@ class OperationMetrics:
     _end: Optional[_ProcessSnapshot] = field(default=None, init=False)
     _error: Optional[BaseException] = field(default=None, init=False)
     collect_resources: bool = field(default=True, init=False)
+    runtime: cx_config.RuntimeConfig | None = None
+    context: cx_config.RuntimeContext | None = None
+    _resolved_runtime: cx_config.RuntimeConfig | None = field(default=None, init=False, repr=False)
 
     def __enter__(self) -> "OperationMetrics":
-        self.collect_resources = bool(cx_config.runtime_config().enable_diagnostics)
-        self._start = _now_snapshot(with_resources=self.collect_resources)
+        self._resolved_runtime = _resolve_runtime_config(self.runtime, self.context)
+        self.collect_resources = bool(self._resolved_runtime.enable_diagnostics)
+        self._start = _now_snapshot(
+            with_resources=self.collect_resources,
+            runtime=self._resolved_runtime if self.collect_resources else None,
+        )
         return self
 
     def __exit__(self, exc_type, exc, _tb) -> None:
-        self._end = _now_snapshot(with_resources=self.collect_resources)
+        self._end = _now_snapshot(
+            with_resources=self.collect_resources,
+            runtime=self._resolved_runtime if self.collect_resources else None,
+        )
         if exc is not None:
             self._error = exc
         self._emit()
@@ -241,10 +272,18 @@ def log_operation(
     label: str,
     *,
     level: int = logging.INFO,
+    runtime: cx_config.RuntimeConfig | None = None,
+    context: cx_config.RuntimeContext | None = None,
 ) -> Iterator[OperationMetrics]:
-    context = OperationMetrics(label=label, logger=logger, level=level)
-    with context:
-        yield context
+    metrics = OperationMetrics(
+        label=label,
+        logger=logger,
+        level=level,
+        runtime=runtime,
+        context=context,
+    )
+    with metrics:
+        yield metrics
 
 
 __all__ = ["OperationMetrics", "log_operation"]

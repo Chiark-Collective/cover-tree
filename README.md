@@ -17,15 +17,27 @@ The default backend is `numpy` (CPU). Optional acceleration hooks leverage `numb
 The Typer-powered benchmark CLI surfaces every runtime knob so runs are reproducible:
 
 ```bash
-python -m cli.queries --help
+python -m cli.pcct --help
 
 # Example residual sweep
-python -m cli.queries \
+python -m cli.pcct query \
   --metric residual --dimension 8 --tree-points 32768 --queries 1024 \
   --batch-size 512 --k 8 --baseline both
+
+# Build-only (no query phase)
+python -m cli.pcct build --dimension 8 --tree-points 65536 --batch-size 1024 --profile default
+
+# Aggregate multiple runs and summarise latency
+python -m cli.pcct benchmark --repeat 5 --dimension 8 --tree-points 8192 --queries 1024
+
+# Environment guardrails
+python -m cli.pcct doctor --profile default
 ```
 
-Every invocation writes JSONL telemetry under `artifacts/benchmarks/` unless `--no-log-file` is passed, making audits deterministic.
+`python -m cli.queries` remains available for one release and issues a compatibility warning
+before dispatching to `pcct query`. If you need the full legacy flag surface, run
+`python -m cli.pcct legacy-query ...`. Every invocation writes JSONL telemetry under
+`artifacts/benchmarks/` unless `--no-log-file` is passed, making audits deterministic.
 
 ## Runtime Controls
 
@@ -62,7 +74,7 @@ indices, distances = PCCT(rt, tree).knn([[0.25, 0.25]], k=2, return_distances=Tr
 
 ## Benchmarks
 
-Smoke benchmarks live under `benchmarks/` and the Typer CLI (`python -m cli.queries`) emits structured telemetry by default (`artifacts/benchmarks/*.jsonl`). Example:
+Smoke benchmarks live under `benchmarks/` and the Typer CLI (`python -m cli.pcct query`) emits structured telemetry by default (`artifacts/benchmarks/*.jsonl`). Example:
 
 ```bash
 UV_CACHE_DIR=$PWD/.uv-cache uv run python -m benchmarks.batch_ops insert --dimension 8 --batch-size 64 --batches 4
@@ -74,11 +86,15 @@ The k-NN benchmark supports baseline comparisons against both the in-repo sequen
 # Optional extras for the external baseline
 pip install -e '.[baseline]'
 
-UV_CACHE_DIR=$PWD/.uv-cache uv run python -m cli.queries \
+UV_CACHE_DIR=$PWD/.uv-cache uv run python -m cli.pcct query \
   --dimension 8 --tree-points 2048 --queries 512 --k 8 --baseline both
 ```
 
-Baseline outputs list build/query timings, throughput, and slowdown ratios alongside the PCCT measurements so you can quantify gains from the compressed parallel design. The legacy `python -m benchmarks.queries` shim still works, but the supported entrypoint now lives under `cli/` so scripts share one runtime configuration layer.
+Baseline outputs list build/query timings, throughput, and slowdown ratios alongside the PCCT
+measurements so you can quantify gains from the compressed parallel design. The legacy
+`python -m benchmarks.queries` shim still works, and `python -m cli.queries` now prints a
+compatibility notice before delegating to the Typer `pcct` subcommand so scripts share one runtime
+configuration layer.
 
 CLI documentation (flag reference, input/output description, telemetry schema) lives in `docs/CLI.md`.
 

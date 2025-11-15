@@ -21,6 +21,15 @@ from .arena import get_conflict_arena, get_scope_builder_arena
 from covertreex.core.tree import TreeBackend
 
 
+def _resolve_runtime_config(runtime: cx_config.RuntimeConfig | None) -> cx_config.RuntimeConfig:
+    if runtime is not None:
+        return runtime
+    active = cx_config.current_runtime_context()
+    if active is not None:
+        return active.config
+    return cx_config.RuntimeConfig.from_env()
+
+
 def block_until_ready(value: Any) -> None:
     blocker = getattr(value, "block_until_ready", None)
     if callable(blocker):
@@ -74,6 +83,7 @@ def build_dense_adjacency(
     radii: np.ndarray | None = None,
     residual_pairwise: np.ndarray | None = None,
     chunk_target_override: int | None = None,
+    runtime: cx_config.RuntimeConfig | None = None,
 ) -> AdjacencyBuild:
     xp = backend.xp
     membership_seconds = 0.0
@@ -108,16 +118,16 @@ def build_dense_adjacency(
     degree_pruned_pairs = 0
 
     if batch_size and scope_indices.size:
-        runtime = cx_config.runtime_config()
-        chunk_target = runtime.scope_chunk_target
+        cfg = _resolve_runtime_config(runtime)
+        chunk_target = cfg.scope_chunk_target
         if chunk_target_override is not None and chunk_target_override > 0:
             chunk_target = int(chunk_target_override)
-        degree_cap = int(runtime.conflict_degree_cap or 0)
+        degree_cap = int(cfg.conflict_degree_cap or 0)
         if degree_cap < 0:
             degree_cap = 0
         degree_cap_metric = degree_cap
         degree_pruned_pairs = 0
-        scope_arena = get_scope_builder_arena() if runtime.scope_conflict_buffer_reuse else None
+        scope_arena = get_scope_builder_arena() if cfg.scope_conflict_buffer_reuse else None
         arena_bytes = 0
         membership_start = time.perf_counter()
         scope_indptr_np = np.asarray(backend.to_numpy(scope_indptr), dtype=np.int64)
@@ -125,7 +135,7 @@ def build_dense_adjacency(
         membership_seconds = time.perf_counter() - membership_start
         bytes_d2h = int(scope_indptr_np.nbytes + scope_indices_np.nbytes)
 
-        if runtime.enable_numba and NUMBA_SCOPE_AVAILABLE:
+        if cfg.enable_numba and NUMBA_SCOPE_AVAILABLE:
             warmup_scope_builder()
             if pairwise is None and residual_pairwise is None or radii is None:
                 raise ValueError(
@@ -152,14 +162,14 @@ def build_dense_adjacency(
                 scope_indptr_np,
                 scope_indices_np,
                 batch_size,
-                segment_dedupe=runtime.scope_segment_dedupe,
+                segment_dedupe=cfg.scope_segment_dedupe,
                 chunk_target=chunk_target,
-                chunk_max_segments=runtime.scope_chunk_max_segments,
+                chunk_max_segments=cfg.scope_chunk_max_segments,
                 pairwise=pairwise_np,
                 radii=radii_np,
                 degree_cap=degree_cap,
                 scratch_pool=scope_arena,
-                pair_merge=runtime.scope_chunk_pair_merge,
+                pair_merge=cfg.scope_chunk_pair_merge,
             )
             numba_seconds = time.perf_counter() - numba_start
             sources = adjacency.sources.astype(np.int32, copy=False)
@@ -555,6 +565,7 @@ def build_residual_adjacency(
     radii: np.ndarray | None,
     residual_pairwise: np.ndarray,
     chunk_target_override: int | None = None,
+    runtime: cx_config.RuntimeConfig | None = None,
 ) -> AdjacencyBuild:
     return build_dense_adjacency(
         backend=backend,
@@ -565,6 +576,7 @@ def build_residual_adjacency(
         radii=radii,
         residual_pairwise=residual_pairwise,
         chunk_target_override=chunk_target_override,
+        runtime=runtime,
     )
 
 
@@ -576,6 +588,7 @@ def build_grid_adjacency(
     radii: Any,
     scope_indptr: Any,
     scope_indices: Any,
+    runtime: cx_config.RuntimeConfig | None = None,
 ) -> AdjacencyBuild:
     xp = backend.xp
     batch_np = np.asarray(backend.to_numpy(batch_points), dtype=np.float64)
@@ -599,11 +612,12 @@ def build_grid_adjacency(
     scope_chunk_emitted = scope_groups_unique
     scope_chunk_max_members = int(counts.max()) if counts.size else 0
 
-    runtime = cx_config.runtime_config()
-    seed = runtime.mis_seed or 0
+    cfg = _resolve_runtime_config(runtime)
+    seed_pack = cfg.seeds
+    seed = seed_pack.resolved("residual_grid", fallback=seed_pack.resolved("mis"))
 
     grid_start = time.perf_counter()
-    use_numba_grid = runtime.enable_numba and NUMBA_GRID_AVAILABLE
+    use_numba_grid = cfg.enable_numba and NUMBA_GRID_AVAILABLE
 
     if use_numba_grid:
         (

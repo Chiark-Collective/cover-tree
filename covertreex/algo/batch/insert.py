@@ -47,9 +47,11 @@ def plan_batch_insert(
     backend: Optional[TreeBackend] = None,
     mis_seed: int | None = None,
     apply_batch_order: bool = True,
+    context: cx_config.RuntimeContext | None = None,
 ) -> BatchInsertPlan:
     backend = backend or tree.backend
-    runtime = cx_config.runtime_config()
+    context = context or cx_config.runtime_context()
+    runtime = context.config
     batch_array, batch_permutation, batch_order_metrics = prepare_batch_points(
         backend=backend,
         batch_points=batch_points,
@@ -57,15 +59,21 @@ def plan_batch_insert(
         apply_batch_order=apply_batch_order,
     )
     start = time.perf_counter()
-    traversal = traverse_collect_scopes(tree, batch_array, backend=backend)
+    traversal = traverse_collect_scopes(tree, batch_array, backend=backend, context=context)
     traversal_seconds = time.perf_counter() - start
 
     start = time.perf_counter()
-    conflict_graph = build_conflict_graph(tree, traversal, batch_array, backend=backend)
+    conflict_graph = build_conflict_graph(
+        tree,
+        traversal,
+        batch_array,
+        backend=backend,
+        context=context,
+    )
     conflict_graph_seconds = time.perf_counter() - start
 
     start = time.perf_counter()
-    mis_result = run_mis(backend, conflict_graph, seed=mis_seed)
+    mis_result = run_mis(backend, conflict_graph, seed=mis_seed, runtime=runtime)
     mis_seconds = time.perf_counter() - start
     xp = backend.xp
     independent = mis_result.independent_set
@@ -132,9 +140,13 @@ def batch_insert(
     backend: Optional[TreeBackend] = None,
     mis_seed: int | None = None,
     apply_batch_order: bool | None = None,
+    context: cx_config.RuntimeContext | None = None,
 ) -> tuple[PCCTree, BatchInsertPlan]:
     backend = backend or tree.backend
-    with log_operation(LOGGER, "batch_insert") as op_log:
+    resolved_context = context or cx_config.current_runtime_context()
+    if resolved_context is None:
+        resolved_context = cx_config.runtime_context()
+    with log_operation(LOGGER, "batch_insert", context=resolved_context) as op_log:
         return _batch_insert_impl(
             op_log,
             tree,
@@ -142,6 +154,7 @@ def batch_insert(
             backend=backend,
             mis_seed=mis_seed,
             apply_batch_order=apply_batch_order,
+            context=resolved_context,
         )
 
 
@@ -153,8 +166,10 @@ def _batch_insert_impl(
     backend: TreeBackend,
     mis_seed: int | None,
     apply_batch_order: bool | None,
+    context: cx_config.RuntimeContext | None,
 ) -> tuple[PCCTree, BatchInsertPlan]:
-    runtime = cx_config.runtime_config()
+    context = context or cx_config.runtime_context()
+    runtime = context.config
     apply_order = True if apply_batch_order is None else bool(apply_batch_order)
     plan = plan_batch_insert(
         tree,
@@ -162,6 +177,7 @@ def _batch_insert_impl(
         backend=backend,
         mis_seed=mis_seed,
         apply_batch_order=apply_order,
+        context=context,
     )
 
     total_candidates = int(plan.traversal.parents.shape[0])
@@ -462,6 +478,7 @@ def _batch_insert_impl(
         tree,
         journal,
         backend=backend,
+        context=context,
     )
 
     stats = TreeLogStats(
@@ -484,6 +501,7 @@ def batch_insert_prefix_doubling(
     backend: Optional[TreeBackend] = None,
     mis_seed: int | None = None,
     shuffle_seed: int | None = None,
+    context: cx_config.RuntimeContext | None = None,
 ) -> tuple[PCCTree, PrefixBatchResult]:
     """Insert a batch using prefix-doubling sub-batches.
 
@@ -492,7 +510,8 @@ def batch_insert_prefix_doubling(
     tree together with the permutation metadata for downstream inspection."""
 
     backend = backend or tree.backend
-    runtime = cx_config.runtime_config()
+    context = context or cx_config.runtime_context()
+    runtime = context.config
     batch_np = np.asarray(backend.to_numpy(batch_points))
     batch_size = batch_np.shape[0]
     if batch_size == 0:
@@ -503,11 +522,11 @@ def batch_insert_prefix_doubling(
             order_strategy=runtime.batch_order_strategy,
             order_metrics={},
         )
-    order_seed = (
-        shuffle_seed
-        if shuffle_seed is not None
-        else runtime.batch_order_seed if runtime.batch_order_seed is not None else runtime.mis_seed
-    )
+    if shuffle_seed is not None:
+        order_seed = shuffle_seed
+    else:
+        seed_pack = runtime.seeds
+        order_seed = seed_pack.resolved("batch_order", fallback=seed_pack.resolved("mis"))
     order_points = np.asarray(batch_np, dtype=np.float64)
     order_result = compute_batch_order(
         order_points,
@@ -527,7 +546,11 @@ def batch_insert_prefix_doubling(
     schedule = runtime.prefix_schedule
     if schedule == "doubling":
         slices = prefix_slices(batch_size)
-        seeds: Tuple[int, ...] = batch_mis_seeds(len(slices), seed=mis_seed)
+        seeds: Tuple[int, ...] = batch_mis_seeds(
+            len(slices),
+            seed=mis_seed,
+            runtime=runtime,
+        )
         for idx, (start, end) in enumerate(slices):
             sub_batch = permuted[start:end]
             sub_seed: int | None
@@ -541,6 +564,7 @@ def batch_insert_prefix_doubling(
                 backend=backend,
                 mis_seed=sub_seed,
                 apply_batch_order=False,
+                context=context,
             )
             dom_ratio = float(plan.conflict_graph.timings.scope_domination_ratio)
             group_indices = permutation[start:end]
@@ -555,7 +579,11 @@ def batch_insert_prefix_doubling(
                 )
             )
     else:
-        seeds = batch_mis_seeds(batch_size, seed=mis_seed)
+        seeds = batch_mis_seeds(
+            batch_size,
+            seed=mis_seed,
+            runtime=runtime,
+        )
         seed_iter = iter(seeds)
         start = 0
         current_size = 1
@@ -569,6 +597,7 @@ def batch_insert_prefix_doubling(
                 backend=backend,
                 mis_seed=sub_seed,
                 apply_batch_order=False,
+                context=context,
             )
             dom_ratio = float(plan.conflict_graph.timings.scope_domination_ratio)
             factor = choose_prefix_factor(runtime, dom_ratio)

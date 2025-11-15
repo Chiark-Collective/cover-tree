@@ -1,0 +1,134 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+import numpy as np
+from numpy.random import default_rng
+
+from covertreex.metrics import build_residual_backend, configure_residual_correlation
+
+from cli.queries.baselines import run_baseline_comparisons
+from cli.queries.benchmark import QueryBenchmarkResult, benchmark_knn_latency
+from cli.queries.runtime import _emit_engine_banner, _gate_active_for_backend
+from tests.utils.datasets import gaussian_points
+
+from .execution import BenchmarkRun
+
+if TYPE_CHECKING:  # pragma: no cover
+    from cli.queries.app import QueryCLIOptions
+
+
+def _generate_datasets(options: "QueryCLIOptions") -> tuple[np.ndarray, np.ndarray]:
+    point_rng = default_rng(options.seed)
+    points = gaussian_points(point_rng, options.tree_points, options.dimension, dtype=np.float64)
+    query_rng = default_rng(options.seed + 1)
+    queries = gaussian_points(query_rng, options.queries, options.dimension, dtype=np.float64)
+    return points, queries
+
+
+def _run_residual_backend(options: "QueryCLIOptions", points: np.ndarray, *, context) -> tuple[str, bool]:
+    runtime_cfg = context.config
+    seed_pack = runtime_cfg.seeds
+    residual_seed = seed_pack.resolved("residual_grid", fallback=seed_pack.resolved("mis"))
+    residual_backend = build_residual_backend(
+        points,
+        seed=residual_seed,
+        inducing_count=options.residual_inducing,
+        variance=options.residual_variance,
+        lengthscale=options.residual_lengthscale,
+        chunk_size=options.residual_chunk_size,
+    )
+    configure_residual_correlation(residual_backend, context=context)
+    gate_active = _gate_active_for_backend(residual_backend)
+    engine_label = "residual_serial" if gate_active else "residual_parallel"
+    return engine_label, gate_active
+
+
+def _print_baseline_results(
+    options: "QueryCLIOptions",
+    points: np.ndarray,
+    queries: np.ndarray,
+    benchmark_result,
+) -> None:
+    baseline_results = run_baseline_comparisons(
+        points,
+        queries,
+        k=options.k,
+        mode=options.baseline,
+    )
+    for baseline in baseline_results:
+        slowdown = (
+            baseline.latency_ms / benchmark_result.latency_ms if benchmark_result.latency_ms else float("inf")
+        )
+        print(
+            f"baseline[{baseline.name}] | build={baseline.build_seconds:.4f}s "
+            f"time={baseline.elapsed_seconds:.4f}s "
+            f"latency={baseline.latency_ms:.4f}ms "
+            f"throughput={baseline.queries_per_second:,.1f} q/s "
+            f"slowdown={slowdown:.3f}x"
+        )
+
+
+def execute_query_benchmark(options: "QueryCLIOptions", run: BenchmarkRun) -> QueryBenchmarkResult:
+    """Run the k-NN benchmark with telemetry/baseline output."""
+
+    runtime_snapshot = run.runtime_snapshot
+    thread_snapshot = run.thread_snapshot
+    telemetry_view = run.telemetry_view
+    log_writer = run.log_writer
+    scope_cap_recorder = run.scope_cap_recorder
+    context = run.context
+
+    engine_label = "euclidean_dense"
+    gate_flag = False
+    if options.metric != "residual":
+        runtime_snapshot["runtime_traversal_engine"] = engine_label
+        runtime_snapshot["runtime_gate_active"] = gate_flag
+        _emit_engine_banner(engine_label, gate_flag, thread_snapshot)
+
+    points_np, queries_np = _generate_datasets(options)
+
+    if options.metric == "residual":
+        engine_label, gate_flag = _run_residual_backend(options, points_np, context=context)
+        runtime_snapshot["runtime_traversal_engine"] = engine_label
+        runtime_snapshot["runtime_gate_active"] = gate_flag
+        _emit_engine_banner(engine_label, gate_flag, thread_snapshot)
+    else:
+        runtime_snapshot.setdefault("runtime_traversal_engine", engine_label)
+        runtime_snapshot.setdefault("runtime_gate_active", gate_flag)
+
+    tree, result = benchmark_knn_latency(
+        dimension=options.dimension,
+        tree_points=options.tree_points,
+        query_count=options.queries,
+        k=options.k,
+        batch_size=options.batch_size,
+        seed=options.seed,
+        prebuilt_points=points_np,
+        prebuilt_queries=queries_np,
+        log_writer=log_writer,
+        scope_cap_recorder=scope_cap_recorder,
+        build_mode=options.build_mode,
+        plan_callback=telemetry_view.observe_plan if telemetry_view is not None else None,
+        context=context,
+    )
+
+    print(
+        f"pcct | build={result.build_seconds:.4f}s "
+        f"queries={result.queries} k={result.k} "
+        f"time={result.elapsed_seconds:.4f}s "
+        f"latency={result.latency_ms:.4f}ms "
+        f"throughput={result.queries_per_second:,.1f} q/s"
+    )
+
+    if options.baseline != "none":
+        _print_baseline_results(options, points_np, queries_np, result)
+
+    if telemetry_view is not None and telemetry_view.has_data:
+        for line in telemetry_view.render_summary():
+            print(line)
+
+    return result
+
+
+__all__ = ["execute_query_benchmark"]

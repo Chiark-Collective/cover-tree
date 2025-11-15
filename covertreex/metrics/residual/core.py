@@ -422,9 +422,9 @@ def compute_whitened_block(
 def _resolve_gate1_config(
     backend: ResidualCorrHostData,
     *,
-    policy: ResidualPolicy | None = None,
+    policy: ResidualPolicy,
 ) -> tuple[bool, float, float, float, bool, float, float, float, float]:
-    runtime_policy = policy or get_residual_policy()
+    runtime_policy = policy
 
     enabled = runtime_policy.gate1_enabled if backend.gate1_enabled is None else backend.gate1_enabled
     alpha = backend.gate1_alpha if backend.gate1_alpha is not None else runtime_policy.gate1_alpha
@@ -669,6 +669,7 @@ def compute_residual_distances_with_radius(
     lookup: ResidualGateLookup | None = (
         backend.gate_lookup if isinstance(getattr(backend, "gate_lookup", None), ResidualGateLookup) else None
     )
+    runtime_policy = get_residual_policy()
     (
         gate_enabled,
         gate_alpha,
@@ -679,7 +680,7 @@ def compute_residual_distances_with_radius(
         gate_band_eps,
         gate_keep_pct,
         gate_prune_pct,
-    ) = _resolve_gate1_config(backend)
+    ) = _resolve_gate1_config(backend, policy=runtime_policy)
     radius_value = float(radius)
     radius_cap = max(float(gate_radius_cap), 0.0)
     effective_radius = min(radius_value, radius_cap) if radius_cap > 0.0 else radius_value
@@ -881,17 +882,33 @@ def compute_residual_distance_single(
     return float(result[0, 0])
 
 
-def configure_residual_correlation(backend: ResidualCorrHostData) -> None:
+def configure_residual_correlation(
+    backend: ResidualCorrHostData,
+    *,
+    policy: ResidualPolicy | None = None,
+    runtime: cx_config.RuntimeConfig | None = None,
+    context: cx_config.RuntimeContext | None = None,
+) -> None:
     """Install residual-correlation kernels using the supplied backend."""
 
     from covertreex.core.metrics import configure_residual_metric
+
+    resolved_runtime = runtime
+    if resolved_runtime is None:
+        if context is not None:
+            resolved_runtime = context.config
+        else:
+            active = cx_config.current_runtime_context()
+            if active is not None:
+                resolved_runtime = active.config
+            else:
+                resolved_runtime = cx_config.RuntimeConfig.from_env()
 
     if backend.v_norm_sq is None:
         v_matrix = backend.v_matrix_view(np.float64)
         object.__setattr__(backend, "v_norm_sq", np.sum(v_matrix * v_matrix, axis=1))
 
-    policy = get_residual_policy()
-    runtime = cx_config.runtime_config()
+    runtime_policy = policy or get_residual_policy(resolved_runtime)
     (
         enabled,
         alpha,
@@ -902,15 +919,19 @@ def configure_residual_correlation(backend: ResidualCorrHostData) -> None:
         band_eps,
         keep_pct,
         prune_pct,
-    ) = _resolve_gate1_config(backend, policy=policy)
-    profile_path = backend.gate_profile_path or policy.gate1_profile_path
-    profile_bins = backend.gate_profile_bins or policy.gate1_profile_bins
-    lookup_path = backend.gate_lookup_path or policy.gate1_lookup_path
+    ) = _resolve_gate1_config(backend, policy=runtime_policy)
+    profile_path = backend.gate_profile_path or runtime_policy.gate1_profile_path
+    profile_bins = backend.gate_profile_bins or runtime_policy.gate1_profile_bins
+    lookup_path = backend.gate_lookup_path or runtime_policy.gate1_lookup_path
     lookup_margin = (
-        backend.gate_lookup_margin if backend.gate_lookup_margin is not None else policy.gate1_lookup_margin
+        backend.gate_lookup_margin
+        if backend.gate_lookup_margin is not None
+        else runtime_policy.gate1_lookup_margin
     )
-    grid_mode_requested = runtime.metric == "residual_correlation" and runtime.conflict_graph_impl == "grid"
-    grid_whiten_scale = float(getattr(runtime, "residual_grid_whiten_scale", 1.0))
+    grid_mode_requested = (
+        resolved_runtime.metric == "residual_correlation" and resolved_runtime.conflict_graph_impl == "grid"
+    )
+    grid_whiten_scale = float(getattr(resolved_runtime, "residual_grid_whiten_scale", 1.0))
     if grid_whiten_scale <= 0.0:
         grid_whiten_scale = 1.0
 
@@ -928,7 +949,7 @@ def configure_residual_correlation(backend: ResidualCorrHostData) -> None:
             bins=int(profile_bins),
             radius_max=float(radius_max_for_profile),
             path=profile_path,
-            radius_eps=policy.radius_floor,
+            radius_eps=runtime_policy.radius_floor,
             quantile_percentiles=profile_quantiles,
         )
 

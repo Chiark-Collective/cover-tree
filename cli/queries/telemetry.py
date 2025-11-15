@@ -16,6 +16,18 @@ from covertreex.telemetry import (
 from .runtime import _resolve_artifact_arg
 
 
+def _resolve_runtime_config(
+    *,
+    context: cx_config.RuntimeContext | None = None,
+) -> cx_config.RuntimeConfig:
+    if context is not None:
+        return context.config
+    active = cx_config.current_runtime_context()
+    if active is not None:
+        return active.config
+    return cx_config.RuntimeConfig.from_env()
+
+
 @dataclass
 class CLITelemetryHandles:
     log_path: Optional[str]
@@ -36,6 +48,7 @@ def initialise_cli_telemetry(
     run_id: str,
     runtime_snapshot: Mapping[str, Any],
     log_metadata: Mapping[str, Any],
+    context: cx_config.RuntimeContext | None = None,
 ) -> CLITelemetryHandles:
     if getattr(args, "no_log_file", False):
         log_path = None
@@ -61,7 +74,7 @@ def initialise_cli_telemetry(
     scope_cap_recorder: Optional[ResidualScopeCapRecorder] = None
     scope_cap_output = getattr(args, "residual_scope_cap_output", None)
     if getattr(args, "metric", None) == "residual" and scope_cap_output:
-        runtime_config = cx_config.runtime_config()
+        runtime_config = _resolve_runtime_config(context=context)
         resolved_output = str(_resolve_artifact_arg(scope_cap_output))
         scope_cap_recorder = ResidualScopeCapRecorder(
             output=resolved_output,
@@ -111,31 +124,37 @@ class ResidualTraversalTelemetry:
     def __init__(self) -> None:
         self._records: List[_ResidualBatchTelemetry] = []
 
-    def observe_plan(self, plan: Any, batch_index: int, batch_size: int) -> None:
+    def observe_plan(self, plan: Any, batch_index: int, batch_size: int) -> Dict[str, float] | None:
         traversal = getattr(plan, "traversal", None)
         if traversal is None:
-            return
+            return None
         timings = getattr(traversal, "timings", None)
         if timings is None:
-            return
+            return None
         conflict_graph = getattr(plan, "conflict_graph", None)
         conflict_timings = getattr(conflict_graph, "timings", None) if conflict_graph else None
         pairwise_flag = int(getattr(conflict_timings, "pairwise_reused", 1)) if conflict_timings else 1
         if pairwise_flag != 1:
             self._handle_pairwise_reuse_failure(batch_index, batch_size, pairwise_flag)
-        self._records.append(
-            _ResidualBatchTelemetry(
-                batch_index=batch_index,
-                batch_size=batch_size,
-                whitened_pairs=float(getattr(timings, "whitened_block_pairs", 0)),
-                whitened_ms=float(getattr(timings, "whitened_block_seconds", 0.0)),
-                whitened_calls=int(getattr(timings, "whitened_block_calls", 0)),
-                kernel_pairs=float(getattr(timings, "kernel_provider_pairs", 0)),
-                kernel_ms=float(getattr(timings, "kernel_provider_seconds", 0.0)),
-                kernel_calls=int(getattr(timings, "kernel_provider_calls", 0)),
-                pairwise_reused=bool(pairwise_flag),
-            )
+        record = _ResidualBatchTelemetry(
+            batch_index=batch_index,
+            batch_size=batch_size,
+            whitened_pairs=float(getattr(timings, "whitened_block_pairs", 0)),
+            whitened_ms=float(getattr(timings, "whitened_block_seconds", 0.0)),
+            whitened_calls=int(getattr(timings, "whitened_block_calls", 0)),
+            kernel_pairs=float(getattr(timings, "kernel_provider_pairs", 0)),
+            kernel_ms=float(getattr(timings, "kernel_provider_seconds", 0.0)),
+            kernel_calls=int(getattr(timings, "kernel_provider_calls", 0)),
+            pairwise_reused=bool(pairwise_flag),
         )
+        self._records.append(record)
+        extra_payload = {
+            "residual_batch_whitened_pair_share": _share_fraction(record.whitened_pairs, record.kernel_pairs),
+            "residual_batch_whitened_time_share": _share_fraction(record.whitened_ms, record.kernel_ms),
+            "residual_batch_whitened_pair_ratio": _ratio(record.whitened_pairs, record.kernel_pairs),
+            "residual_batch_whitened_time_ratio": _ratio(record.whitened_ms, record.kernel_ms),
+        }
+        return extra_payload
 
     @property
     def has_data(self) -> bool:
@@ -309,6 +328,21 @@ def _format_scaled(value: float, suffix: str) -> str:
     if abs_value >= 1e3:
         return f"{value / 1e3:.2f}K {suffix}"
     return f"{value:.0f} {suffix}"
+
+
+def _ratio(numerator: float, denominator: float) -> float:
+    if denominator > 0:
+        return numerator / denominator
+    if numerator > 0:
+        return float("inf")
+    return 0.0
+
+
+def _share_fraction(numerator: float, denominator: float) -> float:
+    total = numerator + denominator
+    if total <= 0:
+        return 0.0
+    return numerator / total
 
 
 __all__ = ["ResidualTraversalTelemetry"]

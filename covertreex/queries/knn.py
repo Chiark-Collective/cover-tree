@@ -169,9 +169,13 @@ def knn(
     k: int,
     return_distances: bool = False,
     backend: TreeBackend | None = None,
+    context: cx_config.RuntimeContext | None = None,
 ) -> Tuple[Any, Any] | Any:
     backend = backend or tree.backend
-    with log_operation(LOGGER, "knn_query") as op_log:
+    resolved_context = context or cx_config.current_runtime_context()
+    if resolved_context is None:
+        resolved_context = cx_config.runtime_context()
+    with log_operation(LOGGER, "knn_query", context=resolved_context) as op_log:
         return _knn_impl(
             op_log,
             tree,
@@ -179,6 +183,7 @@ def knn(
             k=k,
             return_distances=return_distances,
             backend=backend,
+            context=resolved_context,
         )
 
 
@@ -190,6 +195,7 @@ def _knn_impl(
     k: int,
     return_distances: bool,
     backend: TreeBackend,
+    context: cx_config.RuntimeContext | None,
 ) -> Tuple[Any, Any] | Any:
     if tree.is_empty():
         raise ValueError("Cannot query an empty tree.")
@@ -202,7 +208,8 @@ def _knn_impl(
     if batch.ndim == 1:
         batch = batch[None, :]
 
-    runtime = cx_config.runtime_config()
+    context = context or cx_config.runtime_context()
+    runtime = context.config
     use_numba = runtime.enable_numba and NUMBA_QUERY_AVAILABLE
 
     batch_np = _to_numpy_array(backend, batch, dtype=np.float64)
@@ -283,6 +290,7 @@ def nearest_neighbor(
     *,
     return_distances: bool = False,
     backend: TreeBackend | None = None,
+    context: cx_config.RuntimeContext | None = None,
 ) -> Tuple[Any, Any] | Any:
     return knn(
         tree,
@@ -290,4 +298,5 @@ def nearest_neighbor(
         k=1,
         return_distances=return_distances,
         backend=backend,
+        context=context,
     )

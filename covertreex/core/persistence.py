@@ -347,9 +347,11 @@ def apply_persistence_journal(
     journal: PersistenceJournal,
     *,
     backend: TreeBackend | None = None,
+    context: cx_config.RuntimeContext | None = None,
 ) -> PCCTree:
     backend = backend or tree.backend
-    runtime = cx_config.runtime_config()
+    context = context or cx_config.runtime_context()
+    runtime = context.config
 
     if backend.name == "numpy":
         if runtime.enable_numba and NUMBA_PERSISTENCE_AVAILABLE:

@@ -6,7 +6,6 @@ from pathlib import Path
 
 import numpy as np
 
-from covertreex import config as cx_config
 from covertreex.api import Residual as ApiResidual, Runtime as ApiRuntime
 from covertreex.core.metrics import reset_residual_metric
 from covertreex.metrics import build_residual_backend
@@ -101,19 +100,21 @@ def main() -> None:
     args = _parse_args()
     run_id = args.run_id or generate_run_id(prefix="residual-profile")
     output = resolve_artifact_path(args.output, category="profiles")
-    ApiRuntime(
+    runtime = ApiRuntime(
         metric="residual",
         backend="numpy",
         diagnostics=False,
         residual=ApiResidual(gate1_enabled=True),
-    ).activate()
+    )
+    context = runtime.activate()
     backend = _build_backend(args)
-    configure_residual_correlation(backend)
+    configure_residual_correlation(backend, context=context)
+    runtime_config = context.config
     profile = ResidualGateProfile.create(
         bins=int(args.bins),
         radius_max=1.0,
         path=str(output),
-        radius_eps=cx_config.runtime_config().residual_radius_floor,
+        radius_eps=runtime_config.residual_radius_floor,
         quantile_percentiles=[float(x.strip()) for x in args.quantiles.split(",") if x.strip()],
         quantile_sample_cap=int(args.quantile_sample_cap),
     )

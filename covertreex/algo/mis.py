@@ -19,6 +19,15 @@ _HASH_SHIFT_2 = np.uint32(17)
 _HASH_SHIFT_3 = np.uint32(5)
 
 
+def _resolve_runtime_config(runtime: cx_config.RuntimeConfig | None) -> cx_config.RuntimeConfig:
+    if runtime is not None:
+        return runtime
+    active = cx_config.current_runtime_context()
+    if active is not None:
+        return active.config
+    return cx_config.RuntimeConfig.from_env()
+
+
 def _block_until_ready(value: Any) -> None:
     """Synchronise on backends that execute asynchronously (e.g. JAX)."""
 
@@ -42,6 +51,7 @@ def batch_mis_seeds(
     count: int,
     *,
     seed: int | None = None,
+    runtime: cx_config.RuntimeConfig | None = None,
 ) -> Tuple[int, ...]:
     """Return a deterministic batch of MIS seeds derived from `seed` or runtime config."""
 
@@ -52,7 +62,8 @@ def batch_mis_seeds(
 
     runtime_seed = seed
     if runtime_seed is None:
-        runtime_seed = cx_config.runtime_config().mis_seed or 0
+        cfg = _resolve_runtime_config(runtime)
+        runtime_seed = cfg.seeds.resolved("mis")
 
     seed_sequence = np.random.SeedSequence(runtime_seed)
     spawned = seed_sequence.spawn(count)
@@ -64,6 +75,7 @@ def run_mis(
     graph: ConflictGraph,
     *,
     seed: int | None = None,
+    runtime: cx_config.RuntimeConfig | None = None,
 ) -> MISResult:
     """Luby-style MIS using JAX primitives."""
 
@@ -74,12 +86,12 @@ def run_mis(
         _block_until_ready(empty)
         return MISResult(independent_set=empty, iterations=0)
 
-    runtime = cx_config.runtime_config()
+    cfg = _resolve_runtime_config(runtime)
     runtime_seed = seed
     if runtime_seed is None:
-        runtime_seed = runtime.mis_seed or 0
+        runtime_seed = cfg.seeds.resolved("mis")
 
-    if runtime.enable_numba and NUMBA_AVAILABLE:
+    if cfg.enable_numba and NUMBA_AVAILABLE:
         indptr_np = np.asarray(
             backend.to_numpy(graph.indptr), dtype=np.int64
         )

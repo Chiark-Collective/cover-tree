@@ -35,7 +35,9 @@ class _DummyPlan:
 def test_summary_reports_pairwise_reuse_line() -> None:
     telemetry = ResidualTraversalTelemetry()
     plan = _DummyPlan(pairwise_reused=1)
-    telemetry.observe_plan(plan, batch_index=0, batch_size=10)
+    payload = telemetry.observe_plan(plan, batch_index=0, batch_size=10)
+    assert payload is not None
+    assert "residual_batch_whitened_pair_ratio" in payload
 
     lines = telemetry.render_summary()
 

@@ -3,8 +3,10 @@ from __future__ import annotations
 from .artifacts import artifact_root, generate_run_id, resolve_artifact_path, timestamped_artifact
 from .logs import BenchmarkLogWriter, ResidualScopeCapRecorder
 from .schemas import (
-    BENCHMARK_BATCH_SCHEMA,
+    BENCHMARK_BATCH_JSON_SCHEMA,
     BENCHMARK_BATCH_SCHEMA_ID,
+    BENCHMARK_BATCH_SCHEMA_VERSION,
+    BenchmarkBatchRecord,
     BATCH_OPS_RESULT_SCHEMA,
     BATCH_OPS_RESULT_SCHEMA_ID,
     RESIDUAL_SCOPE_CAP_SCHEMA,
@@ -24,8 +26,10 @@ __all__ = [
     "timestamped_artifact",
     "BenchmarkLogWriter",
     "ResidualScopeCapRecorder",
-    "BENCHMARK_BATCH_SCHEMA",
+    "BENCHMARK_BATCH_JSON_SCHEMA",
     "BENCHMARK_BATCH_SCHEMA_ID",
+    "BENCHMARK_BATCH_SCHEMA_VERSION",
+    "BenchmarkBatchRecord",
     "BATCH_OPS_RESULT_SCHEMA",
     "BATCH_OPS_RESULT_SCHEMA_ID",
     "RESIDUAL_SCOPE_CAP_SCHEMA",

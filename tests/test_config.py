@@ -1,10 +1,12 @@
 import os
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from covertreex import config as cx_config
+from covertreex.api import Residual, Runtime
 from cli.runtime import runtime_from_args
 
 
@@ -205,6 +207,40 @@ def test_conflict_graph_impl_override(monkeypatch: pytest.MonkeyPatch):
     assert runtime.conflict_graph_impl == "segmented"
 
 
+def test_runtime_context_manager_restores_previous(monkeypatch: pytest.MonkeyPatch):
+    _clear_env(monkeypatch)
+    cx_config.reset_runtime_context()
+    base_context = cx_config.runtime_context()
+    custom_config = replace(base_context.config, log_level="DEBUG")
+    context = cx_config.RuntimeContext(config=custom_config)
+
+    with context:
+        assert cx_config.runtime_context() is context
+        assert cx_config.runtime_config().log_level == "DEBUG"
+
+    assert cx_config.runtime_context() is base_context
+
+
+def test_runtime_activate_context_manager(monkeypatch: pytest.MonkeyPatch):
+    _clear_env(monkeypatch)
+    cx_config.reset_runtime_context()
+    base_context = cx_config.runtime_context()
+
+    runtime = Runtime(
+        backend="numpy",
+        precision="float64",
+        conflict_graph="dense",
+        diagnostics=False,
+        residual=Residual(gate1_enabled=False),
+    )
+
+    with runtime.activate() as context:
+        assert context is cx_config.runtime_context()
+        assert context is not base_context
+
+    assert cx_config.runtime_context() is base_context
+
+
 def test_conflict_graph_impl_grid(monkeypatch: pytest.MonkeyPatch):
     _clear_env(monkeypatch)
     monkeypatch.setenv("COVERTREEX_CONFLICT_GRAPH_IMPL", "grid")
@@ -255,6 +291,17 @@ def test_batch_order_override(monkeypatch: pytest.MonkeyPatch):
     runtime = cx_config.runtime_config()
     assert runtime.batch_order_strategy == "hilbert"
     assert runtime.batch_order_seed == 42
+
+
+def test_seed_pack_env_overrides(monkeypatch: pytest.MonkeyPatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("COVERTREEX_GLOBAL_SEED", "11")
+    monkeypatch.setenv("COVERTREEX_RESIDUAL_GRID_SEED", "17")
+    cx_config.reset_runtime_config_cache()
+
+    runtime = cx_config.runtime_config()
+    assert runtime.seeds.global_seed == 11
+    assert runtime.seeds.residual_grid == 17
 
 
 def test_prefix_schedule_override(monkeypatch: pytest.MonkeyPatch):
@@ -441,6 +488,32 @@ def test_runtime_from_args_degree_cap_override(monkeypatch: pytest.MonkeyPatch):
     config = runtime.to_config(cx_config.RuntimeConfig.from_env())
 
     assert config.conflict_degree_cap == 64
+
+
+def test_runtime_from_args_seed_pack_overrides(monkeypatch: pytest.MonkeyPatch):
+    _clear_env(monkeypatch)
+    cx_config.reset_runtime_config_cache()
+
+    args = SimpleNamespace(
+        metric="euclidean",
+        global_seed=99,
+        residual_grid_seed=55,
+    )
+    runtime = runtime_from_args(args)
+    config = runtime.to_config(cx_config.RuntimeConfig.from_env())
+
+    assert config.seeds.global_seed == 99
+    assert config.seeds.residual_grid == 55
+
+
+def test_runtime_extra_fields_feed_runtime_model(monkeypatch: pytest.MonkeyPatch):
+    _clear_env(monkeypatch)
+    cx_config.reset_runtime_config_cache()
+
+    runtime = Runtime(extra={"scope_budget_schedule": (128, 256)})
+    config = runtime.to_config()
+
+    assert config.scope_budget_schedule == (128, 256)
 
 
 def test_residual_gate1_env_overrides(monkeypatch: pytest.MonkeyPatch):

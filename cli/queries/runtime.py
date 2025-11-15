@@ -65,13 +65,32 @@ def _emit_engine_banner(engine: str, gate_active: bool, threads: Dict[str, str])
     )
 
 
-def _resolve_backend() -> TreeBackend:
-    runtime = cx_config.runtime_config()
-    if runtime.backend == "jax":
-        return TreeBackend.jax(precision=runtime.precision)
-    if runtime.backend == "numpy":
-        return TreeBackend.numpy(precision=runtime.precision)
-    raise NotImplementedError(f"Backend '{runtime.backend}' is not supported yet.")
+def _resolve_runtime_config(
+    *,
+    context: cx_config.RuntimeContext | None = None,
+    runtime: cx_config.RuntimeConfig | None = None,
+) -> cx_config.RuntimeConfig:
+    if runtime is not None:
+        return runtime
+    if context is not None:
+        return context.config
+    active = cx_config.current_runtime_context()
+    if active is not None:
+        return active.config
+    return cx_config.RuntimeConfig.from_env()
+
+
+def _resolve_backend(
+    *,
+    context: cx_config.RuntimeContext | None = None,
+    runtime: cx_config.RuntimeConfig | None = None,
+) -> TreeBackend:
+    cfg = _resolve_runtime_config(context=context, runtime=runtime)
+    if cfg.backend == "jax":
+        return TreeBackend.jax(precision=cfg.precision)
+    if cfg.backend == "numpy":
+        return TreeBackend.numpy(precision=cfg.precision)
+    raise NotImplementedError(f"Backend '{cfg.backend}' is not supported yet.")
 
 
 def _resolve_artifact_arg(path: str | None, *, category: str = "benchmarks") -> str | None:
@@ -95,6 +114,24 @@ def _resolve_artifact_arg(path: str | None, *, category: str = "benchmarks") -> 
     return str(resolved)
 
 
+def _validate_residual_runtime(snapshot: Dict[str, Any]) -> None:
+    errors = []
+    backend = snapshot.get("backend")
+    if backend != "numpy":
+        errors.append(f"expected backend 'numpy' but runtime selected {backend!r}")
+    if not snapshot.get("enable_numba"):
+        errors.append(
+            "Numba acceleration is required for residual traversal; enable it by leaving "
+            "COVERTREEX_ENABLE_NUMBA unset or passing --enable-numba=1."
+        )
+    if errors:
+        joined = "\n - ".join(errors)
+        raise RuntimeError(
+            "Residual metric requires the residual traversal engine; unable to satisfy the"
+            f" prerequisites:\n - {joined}"
+        )
+
+
 __all__ = [
     "_gate_active_for_backend",
     "_ensure_thread_env_defaults",
@@ -102,4 +139,5 @@ __all__ = [
     "_emit_engine_banner",
     "_resolve_backend",
     "_resolve_artifact_arg",
+    "_validate_residual_runtime",
 ]

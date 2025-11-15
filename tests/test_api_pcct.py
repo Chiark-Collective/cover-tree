@@ -1,3 +1,5 @@
+import importlib
+from typing import Any
 import numpy as np
 import pytest
 
@@ -59,3 +61,43 @@ def test_pcct_delete_returns_plan():
     assert isinstance(plan, BatchDeletePlan)
     assert new_tree.num_points == base_tree.num_points - 1
     assert int(plan.removed_indices.shape[0]) == 1
+
+
+def test_pcct_fit_uses_explicit_runtime_context(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("COVERTREEX_BATCH_ORDER", "natural")
+    points = np.asarray(
+        [
+            [0.0, 0.0],
+            [1.0, 1.0],
+            [2.0, 2.0],
+        ],
+        dtype=np.float64,
+    )
+    runtime = Runtime(batch_order="hilbert")
+
+    tree, plan = PCCT(runtime).fit(points, return_plan=True)
+
+    assert isinstance(plan, BatchInsertPlan)
+    assert plan.batch_order_strategy == "hilbert"
+    assert tree.num_points == points.shape[0]
+
+
+def test_pcct_delete_threads_runtime_context(monkeypatch: pytest.MonkeyPatch):
+    runtime = Runtime(mis_seed=77, residual=Residual(gate1_enabled=False))
+    base_tree = PCCT(runtime).fit([[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]])
+
+    captured: dict[str, Any] = {}
+
+    def _fake_batch_mis_seeds(count, *, seed=None, runtime=None):
+        captured["count"] = count
+        captured["seed"] = seed
+        captured["runtime"] = runtime
+        return tuple(range(count))
+
+    batch_delete_module = importlib.import_module("covertreex.algo.batch_delete")
+    monkeypatch.setattr(batch_delete_module, "batch_mis_seeds", _fake_batch_mis_seeds)
+
+    new_tree = PCCT(runtime, base_tree).delete([1])
+    assert new_tree.num_points == base_tree.num_points - 1
+    assert captured["runtime"] is not None
+    assert captured["runtime"].mis_seed == 77

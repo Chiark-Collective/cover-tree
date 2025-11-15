@@ -32,7 +32,10 @@ def prepare_batch_points(
     order_result = compute_batch_order(
         points_np,
         strategy=runtime.batch_order_strategy,
-        seed=runtime.batch_order_seed if runtime.batch_order_seed is not None else runtime.mis_seed,
+        seed=runtime.seeds.resolved(
+            "batch_order",
+            fallback=runtime.seeds.resolved("mis"),
+        ),
     )
     permutation = order_result.permutation
     metrics = dict(order_result.metrics)

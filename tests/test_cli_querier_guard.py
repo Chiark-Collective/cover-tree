@@ -4,7 +4,7 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from cli.queries.app import app
+from cli.queries.app import app, enable_legacy_entrypoint_warning
 
 
 def test_cli_allows_euclidean_with_gate_off(tmp_path: Path, monkeypatch) -> None:
@@ -16,6 +16,7 @@ def test_cli_allows_euclidean_with_gate_off(tmp_path: Path, monkeypatch) -> None
 
     monkeypatch.setattr("cli.queries.app.run_queries", fake_run_queries)
     log_file = tmp_path / "dummy.jsonl"
+    enable_legacy_entrypoint_warning()
     result = runner.invoke(
         app,
         [
@@ -41,3 +42,4 @@ def test_cli_allows_euclidean_with_gate_off(tmp_path: Path, monkeypatch) -> None
     )
     assert result.exit_code == 0
     assert invoked["metric"] == "euclidean"
+    assert "[compat]" in result.stderr

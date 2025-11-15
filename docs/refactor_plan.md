@@ -52,37 +52,33 @@ This is the living work plan for the “DX/UX refactor” described in `AUDIT.md
 **Why (AUDIT §2 “CLI surface → profiles + subcommands with Typer”):** The current `cli.queries` command is monolithic, hard to discover, and hides profile intent. A structured CLI with subcommands + nice help is central to the DX refactor.
 
 1. **Scaffold**
-   - [ ] Create `cli/pcct/__init__.py` and `cli/pcct/main.py` hosting the Typer root (`pcct`). Subcommands (subject to refinement):
-     - `pcct build` (tree construction / persistence)
-     - `pcct query` (knn runs, baseline comparisons)
-     - `pcct benchmark` (batch sweeps, telemetry on/off)
-     - `pcct profile` (list/describe/apply configs)
-     - `pcct doctor` (environment guardrails)
-   - [ ] Refactor logic currently in `cli/queries/app.py` into reusable modules so subcommands share the same runtime/profiles/telemetry glue.
+   - [x] Create `cli/pcct/__init__.py` and `cli/pcct/main.py` hosting the Typer root (`pcct`). `pcct query` now exposes the new profile-first command while `pcct legacy-query` re-exports the original firehose. `pcct profile`, `pcct build`, and `pcct benchmark` cover Stage 2 assets plus the core tree-construction/benchmark flows.
+   - [x] Refactor logic currently in `cli/queries/app.py` into reusable modules so subcommands share the same runtime/profiles/telemetry glue. `cli.pcct.execution.benchmark_run` centralises runtime/profile setup and `cli.pcct.query.execute_query_benchmark` now owns dataset generation, residual backend activation, and baseline printing for reuse beyond the legacy CLI.
+     - `pcct query` now exposes the full runtime/residual/gate knob surface (matching `docs/CLI.md`), and `pcct build`/`pcct benchmark` reuse those options so the legacy CLI can be retired without feature loss.
 
 2. **Compatibility Layer**
-   - [ ] Keep `python -m cli.queries` operational for at least one release: parse legacy flags, translate them to profile + overrides, and invoke the equivalent `pcct` subcommand (emit warning linking to migration doc).
-   - [ ] Update tests, README snippets, and docs to showcase `pcct` usage; add new CLI tests verifying subcommand help output.
+   - [x] Keep `python -m cli.queries` operational for at least one release: parse legacy flags, translate them to profile + overrides, and invoke the equivalent `pcct` subcommand (emit warning linking to migration doc).
+   - [x] Update tests, README snippets, and docs to showcase `pcct` usage; add new CLI tests verifying subcommand help output.
 
 3. **Runtime Visualization**
-   - [ ] Implement `pcct profile list` and `pcct profile describe NAME --format yaml|json` to increase discoverability (per “discoverable configuration” audit goal).
-   - [ ] Ensure every subcommand accepts `--profile` + `--set key=value` overrides wired through Stage 2 loader.
+   - [x] Implement `pcct profile list` and `pcct profile describe NAME --format yaml|json` to increase discoverability (per “discoverable configuration” audit goal).
+   - [x] Ensure `pcct query` (and future subcommands) accept `--profile` + `--set key=value` overrides via the Stage 2 loader so runtime behaviour stays consistent.
 
 4. **Doctor Command**
-   - [ ] Build `pcct doctor` that:
+   - [x] Build `pcct doctor` that:
      - Checks numba/JAX availability vs runtime config.
-     - Confirms artifact root is writable and logs warnings if telemetry is disabled (audit emphasises reproducible logs).
+     - Confirms artifact root is writable so telemetry remains enabled by default.
      - Reports CPU features, thread settings, and environment conflicts.
-   - [ ] Provide exit codes suitable for CI preflight.
+   - [x] Provide exit codes suitable for CI preflight (`--fail-on-warning` toggles warning severity).
 
 ## Stage 4 – Plugin Registries
 
 **Why (AUDIT §3 “Plugin registries”):** Current strategy selection hinges on import side effects. External teams can’t plug in new traversals/conflict builders without editing core modules, and tests can’t isolate strategies.
 
-- [ ] Promote `algo/traverse/strategies/registry` to a first-class plugin interface: expose `register_traversal_strategy` publicly and add `covertreex.plugins.traversal` module as the sanctioned import path.
-- [ ] Repeat for conflict graph strategies and metrics registry. Provide entry-point based auto-discovery (setuptools) so downstream packages can register without monkeypatching.
-- [ ] Add CLI support (`pcct plugins list`) to show active strategies, their predicates, and source module (useful for audits).
-- [ ] Write tests that:
+- [x] Promote `algo/traverse/strategies/registry` to a first-class plugin interface: expose `register_traversal_strategy` publicly and add `covertreex.plugins.traversal` module as the sanctioned import path.
+- [x] Repeat for conflict graph strategies and metrics registry. Provide entry-point based auto-discovery (setuptools) so downstream packages can register without monkeypatching.
+- [x] Add CLI support (`pcct plugins list`) to show active strategies, their predicates, and source module (useful for audits).
+- [x] Write tests that:
   - Register mock strategies via entry points.
   - Ensure predicates throwing exceptions do not break selection (current behaviour is logging + fallback).
   - Confirm deregistration works to keep tests isolated.
@@ -91,20 +87,20 @@ This is the living work plan for the “DX/UX refactor” described in `AUDIT.md
 
 **Why (AUDIT §7 “Telemetry schema consolidation”):** Today telemetry is JSONL without schema guarantees, and there’s no easy way to render results. The audit wants “one schema, one formatter, quick comparisons.”
 
-- [ ] Define a canonical schema (versioned) that covers batch-level metrics, runtime snapshot, seeds, and residual annotations. Provide JSON Schema + Python dataclass for validation.
-- [ ] Update `BenchmarkLogWriter` to emit `schema_id`, `schema_version`, and a deterministic `run_hash` computed from config + `SeedPack`. Include compatibility path for old logs.
-- [ ] Build `pcct telemetry render LOG.jsonl --format md|csv|json --show fields` to pretty-print telemetry without spreadsheets.
-- [ ] Refactor residual traversal telemetry to append structured records to the same schema (replace ad-hoc printouts once `render` exists).
-- [ ] Document the schema in `docs/telemetry.md` and provide sample output for each format.
+- [x] Define a canonical schema (versioned) that covers batch-level metrics, runtime snapshot, seeds, and residual annotations. Provide JSON Schema + Python dataclass for validation.
+- [x] Update `BenchmarkLogWriter` to emit `schema_id`, `schema_version`, and a deterministic `run_hash` computed from config + `SeedPack`. Include compatibility path for old logs.
+- [x] Build `pcct telemetry render LOG.jsonl --format md|csv|json --show fields` to pretty-print telemetry without spreadsheets.
+- [x] Refactor residual traversal telemetry to append structured records to the same schema (replace ad-hoc printouts once `render` exists).
+- [x] Document the schema in `docs/telemetry.md` and provide sample output for each format.
 
 ## Stage 6 – Determinism & Seed Packs
 
 **Why (AUDIT §9 “Determinism & seeds policy” + testing plan):** Without structured seed handling, small code changes can shift random sequences. We need a unified seed policy covering MIS, batch ordering, residual gates, and telemetry hashing.
 
-- [ ] Extend the runtime model with `SeedPack` (fields: `global_seed`, `mis`, `batch_order`, `residual_grid`, etc.) and propagate them through profiles + CLI.
-- [ ] Refactor `algo/mis.batch_mis_seeds`, `algo/order`, residual traversal caches, and telemetry to consume `SeedPack` instead of ad-hoc seeds/environment vars.
-- [ ] Include the seed pack (and config digest) in telemetry headers; use it to compute deterministic `run_hash`.
-- [ ] Add regression tests:
+- [x] Extend the runtime model with `SeedPack` (fields: `global_seed`, `mis`, `batch_order`, `residual_grid`, etc.) and propagate them through profiles + CLI.
+- [x] Refactor `algo/mis.batch_mis_seeds`, `algo/order`, residual traversal caches, and telemetry to consume `SeedPack` instead of ad-hoc seeds/environment vars.
+- [x] Include the seed pack (and config digest) in telemetry headers; use it to compute deterministic `run_hash`.
+- [x] Add regression tests:
   - `tests/test_determinism_runtime.py` (new) verifying identical PCCTrees/logs when rerunning with the same config/seeds.
   - CLI smoke test that runs `pcct query ... --set seeds.global=123` twice and compares telemetry hashes.
 

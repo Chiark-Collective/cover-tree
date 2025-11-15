@@ -90,6 +90,7 @@ class ConflictGraphTimings:
 @dataclass(frozen=True)
 class ConflictGraphContext:
     backend: TreeBackend
+    runtime: Any
     batch: Any
     batch_size: int
     scope_indptr: Any
