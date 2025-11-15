@@ -456,6 +456,32 @@ Setting `COVERTREEX_RESIDUAL_SCOPE_MEMBER_LIMIT=0` and `--residual-stream-tile 5
 
 Document every future run (4 k shakeout first, then 32 k) with the commands above so we can keep the audit trail continuous.
 
+### 2025-11-15 Verification Rerun
+
+- Replayed the documented Hilbert dense-streamer preset exactly as written earlier in this file (same environment variables and `cli.queries` flags). Command:
+
+  ```bash
+  COVERTREEX_BACKEND=numpy \
+  COVERTREEX_ENABLE_NUMBA=1 \
+  COVERTREEX_SCOPE_CHUNK_TARGET=0 \
+  COVERTREEX_ENABLE_SPARSE_TRAVERSAL=1 \
+  COVERTREEX_SCOPE_CHUNK_PAIR_MERGE=1 \
+  COVERTREEX_SCOPE_CONFLICT_BUFFER_REUSE=1 \
+  COVERTREEX_CONFLICT_GRAPH_IMPL=dense \
+  python -m cli.queries \
+    --metric residual --dimension 8 --tree-points 32768 \
+    --batch-size 512 --queries 1024 --k 8 \
+    --seed 42 --baseline none \
+    --residual-dense-scope-streamer \
+    --residual-scope-bitset \
+    --residual-level-cache-batching \
+    --residual-masked-scope-append \
+    --log-file artifacts/benchmarks/residual_dense_32768_dense_streamer_pairmerge_gold_cli_rerun3.jsonl
+  ```
+
+- `time` measured **25.877 s** wall (`pcct | build≈25.2 s`, throughput ≈34.5 k q/s). Telemetry: `run_id=pcct-20251115-195931-184755`, `run_hash=b39d86ceff4abac17b7284fe15117cb0032d6e507e023bb2b749282d13efae96`.
+- Artefacts: JSONL log above plus stdout `artifacts/benchmarks/residual_dense_32768_dense_streamer_pairmerge_gold_cli_rerun3.stdout`. Keep these alongside the original November 14 gold log for comparison; the reproduction instructions remain unchanged.
+
 ### 2025-11-13 Tooling & Correctness Coverage
 
 - **CLI surface area:** `python -m cli.queries` is now Typer-based, so every runtime/residual knob (scope caps, stream tiling, gate/prefilter presets, MIS toggles, etc.) is accessible via a flag with grouped help. Telemetry JSONL output is always on unless `--no-log-file` is passed, which keeps the audit trail consistent even for ad-hoc experiments.
