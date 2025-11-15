@@ -10,6 +10,7 @@ jnp = pytest.importorskip("jax.numpy")
 from covertreex.algo.conflict import ConflictGraph, build_conflict_graph
 from covertreex.algo.conflict import runner as conflict_runner
 from covertreex.algo.traverse import traverse_collect_scopes
+from covertreex.api import Residual, Runtime
 from covertreex.core.metrics import reset_residual_metric
 from covertreex.core.tree import PCCTree, TreeLogStats, get_runtime_backend
 from covertreex.algo import batch_insert
@@ -21,6 +22,13 @@ from covertreex.metrics.residual import (
 )
 from covertreex.exceptions import ResidualPairwiseCacheError
 from covertreex import config as cx_config
+
+
+@pytest.fixture(autouse=True)
+def reset_runtime_context() -> None:
+    cx_config.reset_runtime_context()
+    yield
+    cx_config.reset_runtime_context()
 
 
 def _sample_tree():
@@ -206,6 +214,49 @@ def test_chunked_conflict_graph_matches_dense(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("COVERTREEX_SCOPE_CHUNK_TARGET", raising=False)
     monkeypatch.delenv("COVERTREEX_ENABLE_NUMBA", raising=False)
     cx_config.reset_runtime_config_cache()
+
+
+def test_conflict_graph_prefers_explicit_context(monkeypatch: pytest.MonkeyPatch):
+    tree = _sample_tree()
+    batch_points = [[0.5, 0.5], [1.2, 1.3]]
+    captured: list[cx_config.RuntimeConfig] = []
+    original_select = conflict_runner.select_conflict_strategy
+
+    def _tracking_select(runtime, residual_mode, has_residual_distances):
+        captured.append(runtime)
+        return original_select(
+            runtime,
+            residual_mode=residual_mode,
+            has_residual_distances=has_residual_distances,
+        )
+
+    monkeypatch.setattr(
+        "covertreex.algo.conflict.runner.select_conflict_strategy",
+        _tracking_select,
+    )
+
+    default_context = Runtime(
+        backend="numpy",
+        precision="float64",
+        residual=Residual(gate1_enabled=False),
+        conflict_graph="dense",
+    ).activate()
+    override_context = Runtime(
+        backend="numpy",
+        precision="float64",
+        residual=Residual(gate1_enabled=False),
+        conflict_graph="segmented",
+    ).activate()
+
+    traversal_dense = traverse_collect_scopes(tree, batch_points, context=default_context)
+    traversal_segmented = traverse_collect_scopes(tree, batch_points, context=override_context)
+
+    build_conflict_graph(tree, traversal_dense, batch_points, context=default_context)
+    build_conflict_graph(tree, traversal_segmented, batch_points, context=override_context)
+
+    assert len(captured) >= 2
+    assert captured[0] is default_context.config
+    assert captured[1] is override_context.config
 
 
 def test_degree_cap_limits_conflict_edges(monkeypatch: pytest.MonkeyPatch):

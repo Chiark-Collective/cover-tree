@@ -21,6 +21,23 @@ python -m cli.queries \
   --baseline both
 ```
 
+### Runtime activation & contexts
+
+`cli.runtime.runtime_from_args()` mirrors `covertreex.api.Runtime`, so the CLI never mutates
+`os.environ`. Each invocation builds a `Runtime` from the flags, activates a `RuntimeContext` once,
+and threads that context through telemetry, residual helpers, and benchmarking utilities:
+
+```python
+cli_runtime = runtime_from_args(args)
+with cli_runtime.activate() as context:
+    telemetry = initialise_cli_telemetry(..., context=context)
+    benchmark_knn_latency(..., context=context)
+```
+
+Helper modules (`cli.queries.telemetry`, `cli.queries.benchmark`, tools under `tools/`) accept a
+`context` keyword for every operation so tests and scripts can opt in to explicit, isolated runtime
+configuration rather than relying on globals.
+
 ## Flag groups
 
 | Panel | Purpose | Highlights |

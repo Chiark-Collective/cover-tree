@@ -8,6 +8,8 @@ jnp = pytest.importorskip("jax.numpy")
 
 from covertreex import config as cx_config
 from covertreex.algo.traverse import TraversalResult, traverse_collect_scopes
+from covertreex.algo.traverse import runner as traverse_runner
+from covertreex.api import Residual, Runtime
 from covertreex.core.metrics import reset_residual_metric
 from covertreex.core.tree import PCCTree, TreeLogStats, get_runtime_backend
 from covertreex.metrics.residual import (
@@ -15,6 +17,13 @@ from covertreex.metrics.residual import (
     configure_residual_correlation,
     set_residual_backend,
 )
+
+
+@pytest.fixture(autouse=True)
+def reset_runtime_context() -> None:
+    cx_config.reset_runtime_context()
+    yield
+    cx_config.reset_runtime_context()
 
 
 def _sample_tree():
@@ -197,6 +206,41 @@ def test_sparse_traversal_matches_dense(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("COVERTREEX_ENABLE_SPARSE_TRAVERSAL", raising=False)
     monkeypatch.delenv("COVERTREEX_ENABLE_NUMBA", raising=False)
     cx_config.reset_runtime_config_cache()
+
+
+def test_traversal_prefers_explicit_context(monkeypatch: pytest.MonkeyPatch):
+    tree = _sample_tree()
+    batch_points = [[2.0, 2.0], [3.0, 3.0]]
+    captured: list[cx_config.RuntimeConfig] = []
+    original_select = traverse_runner.select_traversal_strategy
+
+    def _tracking_select(runtime, backend):
+        captured.append(runtime)
+        return original_select(runtime, backend)
+
+    monkeypatch.setattr(
+        "covertreex.algo.traverse.runner.select_traversal_strategy",
+        _tracking_select,
+    )
+
+    default_context = Runtime(
+        backend="numpy",
+        precision="float64",
+        residual=Residual(gate1_enabled=False),
+    ).activate()
+    override_context = Runtime(
+        backend="numpy",
+        precision="float64",
+        enable_sparse_traversal=True,
+        residual=Residual(gate1_enabled=False),
+    ).activate()
+
+    traverse_collect_scopes(tree, batch_points, context=default_context)
+    traverse_collect_scopes(tree, batch_points, context=override_context)
+
+    assert len(captured) >= 2
+    assert captured[0] is default_context.config
+    assert captured[1] is override_context.config
 
 
 def test_residual_scope_limit_applies_scope_chunk_target(monkeypatch: pytest.MonkeyPatch):
