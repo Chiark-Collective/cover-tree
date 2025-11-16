@@ -1643,6 +1643,10 @@ def _collect_residual(
     if si_cache_np.size:
         si_values[valid_mask] = si_cache_np[parents_np[valid_mask]]
     radii_np = np.maximum(base_radii, si_values)
+    radius_floor = float(getattr(runtime, "residual_radius_floor", 0.0) or 0.0)
+    if radius_floor > 0.0:
+        # Ensure the first scope probe always has a radius large enough for the gate
+        radii_np = np.maximum(radii_np, radius_floor)
     radii_initial_np = radii_np.copy()
 
     scope_cap_values: np.ndarray | None = None

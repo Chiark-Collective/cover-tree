@@ -668,11 +668,73 @@ def test_residual_gate_lookup_thresholds_monotonic(tmp_path):
         inclusion_mask=mask,
     )
     profile.dump()
-    lookup = ResidualGateLookup.load(str(profile_path), margin=0.01, keep_pct=95.0, prune_pct=99.9)
+    lookup = ResidualGateLookup.load(
+        str(profile_path),
+        margin=0.01,
+        keep_pct=95.0,
+        prune_pct=99.9,
+        fallback_alpha=4.0,
+    )
     keep_small, prune_small = lookup.thresholds(0.1)
     keep_large, prune_large = lookup.thresholds(0.7)
     assert keep_large >= keep_small
     assert prune_large >= prune_small
+
+
+def test_residual_gate_lookup_prefers_quantiles_over_ratio(tmp_path):
+    profile_path = tmp_path / "gate_profile_ratio.json"
+    profile = ResidualGateProfile.create(bins=4, radius_max=1.0, path=str(profile_path), radius_eps=1e-6)
+    residuals = np.array([0.4, 0.42, 0.45, 0.48], dtype=np.float64)
+    whitened = np.array([0.8, 0.82, 0.84, 0.86], dtype=np.float64)
+    mask = np.ones_like(residuals, dtype=np.uint8)
+    profile.record_chunk(
+        residual_distances=residuals,
+        whitened_distances=whitened,
+        inclusion_mask=mask,
+    )
+    profile.max_ratio[:] = 15.0
+    profile.dump()
+    lookup = ResidualGateLookup.load(
+        str(profile_path),
+        margin=0.0,
+        keep_pct=80.0,
+        prune_pct=95.0,
+        fallback_alpha=4.0,
+    )
+
+    target_radius = 0.55
+    clipped = np.clip(target_radius, 0.0, float(lookup.radius_bins[-1]))
+    idx = np.searchsorted(lookup.radius_bins, clipped, side="right")
+    if idx <= 0:
+        idx = 0
+    else:
+        idx = min(idx - 1, lookup.prune_thresholds.size - 1)
+    expected_prune = float(lookup.prune_ratios[idx]) * target_radius
+    _, prune_in_range = lookup.thresholds(target_radius)
+    assert prune_in_range == pytest.approx(expected_prune, rel=1e-6)
+
+    _, prune_unsampled = lookup.thresholds(0.95)
+    assert prune_unsampled > expected_prune
+
+    _, prune_far = lookup.thresholds(2.0)
+    assert prune_far > expected_prune
+
+
+def test_residual_gate_lookup_fallback_alpha(tmp_path):
+    profile_path = tmp_path / "gate_profile_empty.json"
+    profile = ResidualGateProfile.create(bins=2, radius_max=1.0, path=str(profile_path), radius_eps=1e-6)
+    profile.dump(force=True)
+    lookup = ResidualGateLookup.load(
+        str(profile_path),
+        margin=0.0,
+        keep_pct=80.0,
+        prune_pct=95.0,
+        fallback_alpha=5.0,
+    )
+
+    keep, prune = lookup.thresholds(0.2)
+    assert keep == pytest.approx(1.0, rel=1e-6)
+    assert prune == pytest.approx(1.0, rel=1e-6)
 
 
 def test_residual_correlation_helper_computes_distances():

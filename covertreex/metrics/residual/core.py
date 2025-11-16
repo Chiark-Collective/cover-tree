@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Optional, Protocol, Sequence, Tuple
@@ -22,6 +24,17 @@ from .policy import (
 
 ArrayLike = np.ndarray | Sequence[float] | Sequence[int]
 _EPS = RESIDUAL_EPS
+
+
+def _env_flag(name: str) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return False
+    return value.strip().lower() not in {"0", "false", "off", ""}
+
+
+_GATE_TRACE_ENABLED = _env_flag("COVERTREEX_RESIDUAL_GATE1_TRACE")
+_GATE_TRACE_LOGGER = logging.getLogger("covertreex.metrics.residual.gate")
 
 
 class KernelProvider(Protocol):
@@ -454,6 +467,30 @@ def _resolve_gate1_config(
     )
 
 
+def _trace_gate_thresholds(
+    *,
+    reason: str,
+    radius: float,
+    keep_threshold: float,
+    prune_threshold: float,
+    band_eps: float,
+    margin: float,
+    radius_cap: float,
+) -> None:
+    if not _GATE_TRACE_ENABLED:
+        return
+    _GATE_TRACE_LOGGER.info(
+        "gate trace: %s radius=%.6f keep=%.6f prune=%.6f band_eps=%.6f margin=%.6f radius_cap=%.6f",
+        reason,
+        radius,
+        keep_threshold,
+        prune_threshold,
+        band_eps,
+        margin,
+        radius_cap,
+    )
+
+
 def _audit_gate1_pruned(
     *,
     backend: ResidualCorrHostData,
@@ -716,6 +753,15 @@ def compute_residual_distances_with_radius(
         band_eps = max(float(gate_band_eps), 0.0)
         prune_cutoff = prune_threshold + band_eps
         if prune_cutoff <= 0.0:
+            _trace_gate_thresholds(
+                reason="prune_cutoff<=0",
+                radius=effective_radius,
+                keep_threshold=keep_threshold,
+                prune_threshold=prune_threshold,
+                band_eps=band_eps,
+                margin=gate_margin,
+                radius_cap=float(gate_radius_cap),
+            )
             gate_elapsed = time.perf_counter() - gate_start
             total = int(candidate_idx.size)
             backend.gate_stats.candidates += total
@@ -960,6 +1006,7 @@ def configure_residual_correlation(
             margin=float(lookup_margin),
             keep_pct=keep_pct,
             prune_pct=prune_pct,
+            fallback_alpha=float(alpha),
         )
 
     need_whitened = (

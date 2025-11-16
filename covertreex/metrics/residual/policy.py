@@ -262,7 +262,9 @@ class ResidualGateLookup:
     prune_thresholds: np.ndarray
     keep_ratios: np.ndarray
     prune_ratios: np.ndarray
+    bin_counts: np.ndarray
     margin: float
+    fallback_alpha: float
 
     @classmethod
     def from_payload(
@@ -272,6 +274,7 @@ class ResidualGateLookup:
         margin: float,
         keep_pct: float,
         prune_pct: float,
+        fallback_alpha: float,
     ) -> "ResidualGateLookup":
         edges = np.asarray(payload.get("radius_bin_edges", []), dtype=np.float64)
         maxima = np.asarray(payload.get("max_whitened", []), dtype=np.float64)
@@ -280,6 +283,14 @@ class ResidualGateLookup:
         bins = edges[1:]
         if maxima.size != bins.size:
             raise ValueError("Residual gate lookup file has mismatched 'max_whitened' length.")
+        raw_counts = payload.get("counts")
+        if raw_counts is None:
+            bin_counts = np.zeros_like(bins, dtype=np.int64)
+        else:
+            counts_arr = np.asarray(raw_counts, dtype=np.int64)
+            if counts_arr.size != bins.size:
+                raise ValueError("Residual gate lookup file has mismatched 'counts' length.")
+            bin_counts = counts_arr
         quantiles = payload.get("quantiles", {}) or {}
         quantile_map: Dict[float, np.ndarray] = {}
         for label, values in quantiles.items():
@@ -316,7 +327,9 @@ class ResidualGateLookup:
             prune_thresholds=np.maximum(prune_values, keep_values),
             keep_ratios=keep_ratio,
             prune_ratios=np.maximum(prune_ratio, keep_ratio),
+            bin_counts=bin_counts,
             margin=float(margin),
+            fallback_alpha=float(fallback_alpha),
         )
 
     @classmethod
@@ -327,15 +340,23 @@ class ResidualGateLookup:
         margin: float,
         keep_pct: float,
         prune_pct: float,
+        fallback_alpha: float,
     ) -> "ResidualGateLookup":
         target = Path(path).expanduser()
         payload = json.loads(target.read_text(encoding="utf-8"))
-        return cls.from_payload(payload, margin=margin, keep_pct=keep_pct, prune_pct=prune_pct)
+        return cls.from_payload(
+            payload,
+            margin=margin,
+            keep_pct=keep_pct,
+            prune_pct=prune_pct,
+            fallback_alpha=fallback_alpha,
+        )
 
     def thresholds(self, radius: float) -> tuple[float, float]:
         if self.radius_bins.size == 0:
             return 0.0, 0.0
-        clipped = np.clip(radius, 0.0, float(self.radius_bins[-1]))
+        radius_limit = float(self.radius_bins[-1])
+        clipped = np.clip(radius, 0.0, radius_limit)
         idx = np.searchsorted(self.radius_bins, clipped, side="right")
         if idx <= 0:
             idx = 0
@@ -346,8 +367,19 @@ class ResidualGateLookup:
         prune_ratio = float(self.prune_ratios[idx])
         keep_abs = float(self.keep_thresholds[idx])
         prune_abs = float(self.prune_thresholds[idx])
-        keep = keep_ratio * radius_value if keep_ratio > 0.0 else keep_abs
-        prune = prune_ratio * radius_value if prune_ratio > 0.0 else prune_abs
+        bin_samples = int(self.bin_counts[idx]) if self.bin_counts.size > idx else 0
+        has_samples = bin_samples > 0
+        fallback_alpha = max(self.fallback_alpha, 0.0) if not has_samples else 0.0
+        fallback_threshold = radius_value * fallback_alpha if fallback_alpha > 0.0 else 0.0
+
+        base_keep = keep_ratio * radius_value if keep_ratio > 0.0 else keep_abs
+        base_prune = prune_ratio * radius_value if prune_ratio > 0.0 else prune_abs
+        if base_keep <= 0.0 and fallback_threshold > 0.0:
+            base_keep = fallback_threshold
+        if base_prune <= 0.0 and fallback_threshold > 0.0:
+            base_prune = fallback_threshold
+        keep = base_keep
+        prune = max(base_prune, keep)
         clamp_margin = max(self.margin, 0.0)
         keep *= max(1.0 - clamp_margin, 0.0)
         prune *= 1.0 + clamp_margin
