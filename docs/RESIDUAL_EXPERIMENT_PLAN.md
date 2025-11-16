@@ -85,6 +85,14 @@ Each story below is additive; the order matters because later work assumes the t
 
 **Exit criteria.** Document the stream tile/chunk pair that minimises `traversal_kernel_provider_ms` without hurting memory. Highlight whether gains stack with Stories 1–2.
 
+**Status (2025-11-17).** Guardrail probes isolated the impact of `residual_stream_tile` (`64` baseline) and `residual_chunk_size` (`512` baseline). Running `tools/residual_guardrail_check.py` with `--residual-stream-tile {128,256,512}` and `--residual-chunk-size 1024` kept the scope/chunk telemetry unchanged (still saturating because Gate 1 is off), but kernel timings shifted:
+
+- `stream_tile=128` (`guardrail_kernel_stream128.jsonl`) lowered median `traversal_kernel_provider_ms` from **3.16 ms → 2.65 ms** (~16 % drop) and shaved `traversal_semisort_ms` to 22 ms, but total `traversal_ms` crept up (median 93 ms vs 72 ms) because conflict bookkeeping spent longer per batch.
+- `stream_tile=256/512` regressed kernel time (median 3.27 ms and 4.69 ms respectively) and inflated wall time without improving pair coverage, so we should cap tiles at ≤128 for the guardrail load.
+- `chunk_size=1024` (`guardrail_kernel_chunk1024.jsonl`) also helped kernel time (median 2.35 ms) but increased `traversal_ms` variance past 100 ms, likely because larger chunks amplify scope saturation when the gate is off.
+
+Because the gate and sparse traversal stories are still blocked, we do not yet have a 16k/32k replay to prove throughput wins translate beyond the guardrail. Parking this story after noting “stream_tile=128 + chunk_size=512” as the most promising combo so far; revisit once Gate 1 and scope budgets are healthy so the kernel savings reflect in end-to-end wall time.
+
 ### Story 4 — Batch Order + Prefix Schedule Experiments
 
 **Hypothesis.** Switching from `batch_order=natural` to Hilbert plus adaptive prefix scheduling reduces early batch variance, improving dominance onset and lowering total traversal work.
