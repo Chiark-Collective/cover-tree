@@ -260,6 +260,8 @@ class ResidualGateLookup:
     radius_bins: np.ndarray
     keep_thresholds: np.ndarray
     prune_thresholds: np.ndarray
+    keep_ratios: np.ndarray
+    prune_ratios: np.ndarray
     margin: float
 
     @classmethod
@@ -300,10 +302,20 @@ class ResidualGateLookup:
         base_prune = np.maximum.accumulate(maxima.astype(np.float64, copy=False))
         keep_values = _resolve(keep_pct, base_keep)
         prune_values = _resolve(prune_pct, base_prune)
+        radius_scale = np.maximum(bins, RESIDUAL_EPS)
+        keep_ratio = np.divide(keep_values, radius_scale, out=np.zeros_like(keep_values), where=radius_scale > 0)
+        prune_ratio = np.divide(prune_values, radius_scale, out=np.zeros_like(prune_values), where=radius_scale > 0)
+        ratio_payload = payload.get("max_ratio")
+        if ratio_payload is not None:
+            ratio_array = np.asarray(ratio_payload, dtype=np.float64)
+            if ratio_array.size == bins.size:
+                prune_ratio = np.maximum(prune_ratio, np.maximum.accumulate(ratio_array.astype(np.float64, copy=False)))
         return cls(
             radius_bins=bins,
             keep_thresholds=keep_values,
             prune_thresholds=np.maximum(prune_values, keep_values),
+            keep_ratios=keep_ratio,
+            prune_ratios=np.maximum(prune_ratio, keep_ratio),
             margin=float(margin),
         )
 
@@ -329,8 +341,17 @@ class ResidualGateLookup:
             idx = 0
         else:
             idx = min(idx - 1, self.keep_thresholds.size - 1)
-        keep = float(self.keep_thresholds[idx])
-        prune = float(self.prune_thresholds[idx])
+        radius_value = max(float(radius), RESIDUAL_EPS)
+        keep_ratio = float(self.keep_ratios[idx])
+        prune_ratio = float(self.prune_ratios[idx])
+        keep_abs = float(self.keep_thresholds[idx])
+        prune_abs = float(self.prune_thresholds[idx])
+        keep = keep_ratio * radius_value if keep_ratio > 0.0 else keep_abs
+        prune = prune_ratio * radius_value if prune_ratio > 0.0 else prune_abs
+        clamp_margin = max(self.margin, 0.0)
+        keep *= max(1.0 - clamp_margin, 0.0)
+        prune *= 1.0 + clamp_margin
+        prune = max(prune, keep)
         return keep, prune
 
 

@@ -51,6 +51,8 @@ Each story below is additive; the order matters because later work assumes the t
 
 **Exit criteria.** Achieve ≥7 % reduction in `traversal_kernel_provider_ms` at 16k and 32k with zero regression in `residual_batch_whitened_pair_share`. Document before/after logs and keep gate lookup disabled by default until the guardrail script reports success twice consecutively.
 
+**Status (2025-11-16).** Ratio-aware thresholds landed in `ResidualGateLookup` so new profiles can prune relative to the query radius, but the historical lookup (`docs/data/residual_gate_profile_32768_caps.json`) and the freshly captured guardrail profile both report zeros for radii below ≈0.6, so the gate still prunes nothing by default. Guardrail runs (`guardrail_residual_lookup_ratio*.jsonl`) confirm `traversal_gate1_pruned=0` and the audit still fires as soon as we tighten the thresholds. Next step is to regenerate lookup tables from guardrail data using the logged `max_ratio` values; once we have non-zero ratios for the radii that actually occur, rerun this story before escalating to the 8k/16k/32k sweeps.
+
 ### Story 2 — Sparse Traversal + Scope Caps
 
 **Hypothesis.** Enabling sparse traversal (`COVERTREEX_ENABLE_SPARSE_TRAVERSAL=1`) with tuned `scope_chunk_target` and pair-merge reuse reduces tile counts per batch once the residual gate is working, particularly beyond 32k.

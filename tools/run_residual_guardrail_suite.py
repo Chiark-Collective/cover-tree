@@ -161,7 +161,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.skip_run:
         cmd.append("--skip-run")
     if cli_args:
-        cmd.extend(["--extra-cli-args", "--", *cli_args])
+        cmd.extend(["--extra-cli-args", *cli_args])
 
     env_overrides = _parse_env_overrides(args.env)
     proc_env = os.environ.copy()
@@ -173,7 +173,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"[guardrail-suite] log={log_path} summary={summary_path}")
     print(f"[guardrail-suite] env overrides: {json.dumps(env_snapshot, indent=2)}")
     print(f"[guardrail-suite] running: {shlex.join(cmd)}")
-    subprocess.run(cmd, check=True, env=proc_env)
+    result = subprocess.run(cmd, env=proc_env)
+    return_code = result.returncode
 
     metadata = {
         "run_id": run_id,
@@ -198,10 +199,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             "skip_run": args.skip_run,
             "forward_cli_args": cli_args,
         },
+        "return_code": return_code,
     }
     metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     print(f"[guardrail-suite] metadata written to {metadata_path}")
-    return 0
+    if return_code != 0:
+        print(f"[guardrail-suite] guardrail script exited with {return_code}")
+    return return_code
 
 
 if __name__ == "__main__":

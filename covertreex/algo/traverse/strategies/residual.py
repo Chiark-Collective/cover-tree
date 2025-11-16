@@ -271,6 +271,9 @@ def _collect_residual_scopes_streaming_serial(
     telemetry: ResidualDistanceTelemetry | None = None,
     force_whitened: bool = False,
     bitset_enabled: bool = False,
+    dynamic_query_block: bool = False,
+    dense_scope_streamer: bool = False,
+    masked_scope_append: bool = True,
     level_cache_batching: bool = True,
 ) -> Tuple[
     np.ndarray,
