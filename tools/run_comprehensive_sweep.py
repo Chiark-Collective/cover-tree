@@ -74,8 +74,6 @@ class BenchmarkJob:
             "--log-file",
             str(log_path),
         ]
-        # For residual, we typically disable the "gate" for pure algo benchmarks unless specified
-        cmd.extend(["--residual-gate", "off"])
         return cmd
 
     def metadata(self) -> Dict[str, object]:
@@ -113,15 +111,16 @@ def _generate_jobs() -> Dict[str, BenchmarkJob]:
     
     for n in scales:
         for d in dimensions:
-            # PCCT Euclidean Sparse (Default if Numba) vs All Baselines
+            # PCCT Euclidean Sparse (Default if Numba) vs Fast Baselines
+            # Excludes "external" (PyPI covertree) as it is too slow.
             job_name = f"sweep_euclidean_n{n}_d{d}"
             jobs[job_name] = BenchmarkJob(
                 name=job_name,
                 metric="euclidean",
                 tree_points=n,
                 dimension=d,
-                baseline="all",
-                description=f"Euclidean N={n} D={d} PCCT vs All Baselines",
+                baseline="mlpack,sklearn,scipy",
+                description=f"Euclidean N={n} D={d} PCCT vs Fast Baselines",
                 # Force sparse traversal for PCCT just in case (though it's default now)
                 env={"COVERTREEX_ENABLE_SPARSE_TRAVERSAL": "1"}
             )
