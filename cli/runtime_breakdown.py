@@ -664,7 +664,7 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--metric",
-        choices=("euclidean", "residual"),
+        choices=("euclidean", "residual", "residual-lite"),
         default="euclidean",
         help="Metric to benchmark (residual currently unsupported).",
     )

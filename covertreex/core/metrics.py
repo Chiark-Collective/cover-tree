@@ -121,6 +121,7 @@ def _load_runtime_registry() -> MetricRegistry:
 
 _RESIDUAL_PAIRWISE_IMPL: Optional[PairwiseKernel] = None
 _RESIDUAL_POINTWISE_IMPL: Optional[PointwiseKernel] = None
+_RESIDUAL_LITE_EPS = 1e-12
 
 
 def _residual_pairwise(backend: "TreeBackend", lhs: ArrayLike, rhs: ArrayLike) -> ArrayLike:
@@ -158,12 +159,62 @@ def _residual_pointwise(backend: "TreeBackend", lhs: ArrayLike, rhs: ArrayLike) 
     return backend.device_put(diag)
 
 
+def _residual_lite_pairwise(backend: "TreeBackend", lhs: ArrayLike, rhs: ArrayLike) -> ArrayLike:
+    xp = backend.xp
+    lhs_arr = _ensure_2d(backend, lhs)
+    rhs_arr = _ensure_2d(backend, rhs)
+    if lhs_arr.size == 0 or rhs_arr.size == 0:
+        shape = (lhs_arr.shape[0], rhs_arr.shape[0])
+        return backend.device_put(xp.zeros(shape, dtype=backend.default_float))
+
+    lhs_centered = lhs_arr - xp.mean(lhs_arr, axis=-1, keepdims=True)
+    rhs_centered = rhs_arr - xp.mean(rhs_arr, axis=-1, keepdims=True)
+    lhs_norm = xp.sqrt(
+        xp.maximum(xp.sum(lhs_centered * lhs_centered, axis=-1, keepdims=True), _RESIDUAL_LITE_EPS)
+    )
+    rhs_norm = xp.sqrt(
+        xp.maximum(xp.sum(rhs_centered * rhs_centered, axis=-1, keepdims=True), _RESIDUAL_LITE_EPS)
+    )
+    denom = xp.maximum(lhs_norm * xp.swapaxes(rhs_norm, -1, -2), _RESIDUAL_LITE_EPS)
+    corr = (lhs_centered @ xp.swapaxes(rhs_centered, -1, -2)) / denom
+    corr = xp.clip(corr, -1.0, 1.0)
+    dist = 1.0 - corr
+    dist = xp.maximum(dist, 0.0)
+    return backend.device_put(dist)
+
+
+def _residual_lite_pointwise(backend: "TreeBackend", lhs: ArrayLike, rhs: ArrayLike) -> ArrayLike:
+    lhs_arr = backend.asarray(lhs, dtype=backend.default_float)
+    rhs_arr = backend.asarray(rhs, dtype=backend.default_float)
+    if lhs_arr.shape != rhs_arr.shape:
+        raise ValueError("Pointwise metric operands must have identical shapes.")
+    if lhs_arr.ndim == 1:
+        lhs_arr = lhs_arr[None, :]
+        rhs_arr = rhs_arr[None, :]
+    pairwise_vals = _residual_lite_pairwise(backend, lhs_arr, rhs_arr)
+    pairwise_vals = backend.asarray(pairwise_vals, dtype=backend.default_float)
+    xp = backend.xp
+    if pairwise_vals.ndim == 0:
+        return backend.device_put(pairwise_vals)
+    if pairwise_vals.ndim == 1:
+        return backend.device_put(pairwise_vals)
+    diag = xp.diagonal(pairwise_vals)
+    return backend.device_put(diag)
+
+
 _REGISTRY = _load_runtime_registry()
 _REGISTRY.register(
     Metric(
         name="residual_correlation",
         pairwise_kernel=_residual_pairwise,
         pointwise_kernel=_residual_pointwise,
+    )
+)
+_REGISTRY.register(
+    Metric(
+        name="residual_correlation_lite",
+        pairwise_kernel=_residual_lite_pairwise,
+        pointwise_kernel=_residual_lite_pointwise,
     )
 )
 

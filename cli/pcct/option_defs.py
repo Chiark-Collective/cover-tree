@@ -91,7 +91,7 @@ SetOverrideOption = Annotated[
     ),
 ]
 MetricOption = Annotated[
-    Literal["auto", "euclidean", "residual"],
+    Literal["auto", "euclidean", "residual", "residual-lite"],
     typer.Option(
         "--metric",
         help="Force a specific metric or infer it from the profile when set to 'auto'.",

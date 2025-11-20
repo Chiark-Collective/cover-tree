@@ -405,7 +405,7 @@ register_traversal_strategy(
     predicate=lambda runtime, backend: (
         runtime.enable_sparse_traversal
         and runtime.enable_numba
-        and runtime.metric == "euclidean"
+        and runtime.metric in {"euclidean", "residual_correlation_lite"}
         and NUMBA_SPARSE_TRAVERSAL_AVAILABLE
         and backend.name == "numpy"
     ),
@@ -415,7 +415,7 @@ register_traversal_strategy(
 
 register_traversal_strategy(
     "euclidean_dense",
-    predicate=lambda runtime, backend: runtime.metric == "euclidean",
+    predicate=lambda runtime, backend: runtime.metric in {"euclidean", "residual_correlation_lite"},
     factory=_EuclideanDenseTraversal,
 )
 

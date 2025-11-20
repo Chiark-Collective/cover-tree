@@ -65,7 +65,12 @@ def _measure(func):
 
 def _activate_runtime(profile: str, metric: str) -> cx_config.RuntimeContext:
     runtime = Runtime.from_profile(profile)
-    resolved_metric = "residual_correlation" if metric == "residual" else metric
+    if metric == "residual":
+        resolved_metric = "residual_correlation"
+    elif metric == "residual-lite":
+        resolved_metric = "residual_correlation_lite"
+    else:
+        resolved_metric = metric
     if resolved_metric:
         runtime = runtime.with_updates(metric=resolved_metric)
     return runtime.activate()
@@ -152,7 +157,7 @@ def parse_args() -> argparse.Namespace:
         "--metric",
         dest="metrics",
         action="append",
-        choices=("euclidean", "residual"),
+        choices=("euclidean", "residual", "residual-lite"),
         help="Metric(s) to benchmark (repeatable).",
     )
     parser.add_argument(
@@ -214,7 +219,11 @@ def main() -> None:
     with output_path.open("a", encoding="utf-8") as handle:
         for metric, dimension, tree_points, k_value, repeat_id in scenarios:
             baseline_mode = args.baseline_mode
-            profile = args.profile or ("residual-gold" if metric == "residual" else "default")
+            if metric == "residual":
+                default_profile = "residual-gold"
+            else:
+                default_profile = "default"
+            profile = args.profile or default_profile
             print(
                 f"[baseline-matrix] metric={metric} dim={dimension} points={tree_points} "
                 f"k={k_value} repeat={repeat_id} baseline={baseline_mode} profile={profile}"

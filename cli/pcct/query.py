@@ -81,7 +81,12 @@ def execute_query_benchmark(options: "QueryCLIOptions", run: BenchmarkRun) -> Qu
 
     engine_label = "euclidean_dense"
     gate_flag = False
-    if options.metric != "residual":
+    if options.metric == "residual-lite":
+        engine_label = "residual_lite"
+        runtime_snapshot["runtime_traversal_engine"] = engine_label
+        runtime_snapshot["runtime_gate_active"] = gate_flag
+        _emit_engine_banner(engine_label, gate_flag, thread_snapshot)
+    elif options.metric != "residual":
         runtime_snapshot["runtime_traversal_engine"] = engine_label
         runtime_snapshot["runtime_gate_active"] = gate_flag
         _emit_engine_banner(engine_label, gate_flag, thread_snapshot)
@@ -93,7 +98,7 @@ def execute_query_benchmark(options: "QueryCLIOptions", run: BenchmarkRun) -> Qu
         runtime_snapshot["runtime_traversal_engine"] = engine_label
         runtime_snapshot["runtime_gate_active"] = gate_flag
         _emit_engine_banner(engine_label, gate_flag, thread_snapshot)
-    else:
+    elif options.metric != "residual-lite":
         runtime_snapshot.setdefault("runtime_traversal_engine", engine_label)
         runtime_snapshot.setdefault("runtime_gate_active", gate_flag)
 

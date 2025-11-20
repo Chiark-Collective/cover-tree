@@ -2,6 +2,11 @@
 
 _Status snapshot (2025-11-17)._ Dense Hilbert 32 k residual builds now complete in **≈17.8 s** wall time using the pair-count shard-merging + buffer-reuse defaults (`pcct-20251114-214845-7df1be`, log `artifacts/benchmarks/residual_dense_32768_dense_streamer_pairmerge_gold.jsonl`, `median traversal_semisort_ms≈36 ms`, p90 ≈59 ms). The previous level-cache log (`pcct-20251114-215010-fa37f4`, `artifacts/benchmarks/residual_dense_32768_gold_best5_run4.jsonl`) still serves as the regression control (best run 18.65 s). The 4 k guardrail (`pcct-20251114-105559-b7f965`, log `artifacts/benchmarks/residual_phase05_hilbert_4k_dense_streamer_gold.jsonl`) stays under the `<1 s` requirement (`median traversal_semisort_ms≈41.7 ms`) but still records `whitened_block_pairs_sum=0` / `traversal_gate1_pruned=0`, so rerun once the lookup + whitening path is re-enabled. Use `--no-residual-*`, `--no-scope-chunk-pair-merge`, or `--no-scope-conflict-buffer-reuse` only when you need to reproduce historical telemetry.
 
+Need a simple fallback without Vecchia backends or gate plumbing? Pass `--metric residual-lite` (or set
+`metric=residual-lite` when constructing a runtime) to use the pure distance-function version. It registers
+`residual_correlation_lite` in the metric registry, computes correlation distances directly from payloads,
+and deliberately skips all of the caches described below.
+
 > Historical log entries that used to live in this file are now indexed under [`docs/journal/2025-11.md`](journal/2025-11.md). Keep the high-level guidance here current and push dated telemetry into the journal.
 
 **Telemetry playbook (Phase 5).**

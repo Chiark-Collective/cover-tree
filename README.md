@@ -125,7 +125,10 @@ Additional profile-driven walkthroughs live in `docs/examples/profile_workflows.
 notes for legacy scripts are in `docs/migrations/runtime_v_next.md`. When you run with `--metric residual`
 and omit `--profile`, the CLI automatically loads the dense `residual-gold` preset that matches
 `benchmarks/run_residual_gold_standard.sh`. Pass `--profile residual-fast` (or another residual profile)
-only when you explicitly need the throughput/sparse variants.
+only when you explicitly need the throughput/sparse variants. If you just want a pure distance-function
+variant without Vecchia backends or gate/whitening plumbing, opt into `--metric residual-lite`. That mode
+maps to the registered `residual_correlation_lite` metric and simply computes correlation distances from
+the payload vectors, so it stays self-contained and strictly opt-in.
 
 For larger sweeps (or to exercise mlpack on a toy problem) use the automated runner in `tools/baseline_matrix.py`.
 It shells out to `cli.pcct query`, samples CPU/RAM via `psutil`, and appends JSONL rows under `artifacts/`. To compare

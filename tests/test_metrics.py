@@ -95,6 +95,52 @@ def test_available_metrics_contains_euclidean():
     names = available_metrics()
     assert "euclidean" in names
     assert "residual_correlation" in names
+    assert "residual_correlation_lite" in names
+
+
+def _manual_correlation_distance(lhs: np.ndarray, rhs: np.ndarray) -> float:
+    lhs_centered = lhs - np.mean(lhs)
+    rhs_centered = rhs - np.mean(rhs)
+    lhs_norm = np.linalg.norm(lhs_centered)
+    rhs_norm = np.linalg.norm(rhs_centered)
+    if lhs_norm == 0.0 or rhs_norm == 0.0:
+        return 1.0
+    corr = float(lhs_centered @ rhs_centered / (lhs_norm * rhs_norm))
+    corr = max(-1.0, min(1.0, corr))
+    return max(0.0, 1.0 - corr)
+
+
+def test_residual_lite_metric_matches_manual_correlations():
+    backend = get_runtime_backend()
+    metric = get_metric("residual_correlation_lite")
+    lhs = backend.asarray([[1.0, 2.0, 3.0], [3.0, -1.0, 0.0]], dtype=backend.default_float)
+    rhs = backend.asarray([[1.0, 0.0, 1.0], [2.0, 2.0, 2.0]], dtype=backend.default_float)
+
+    distances = metric.pairwise(backend, lhs, rhs)
+    lhs_np = np.asarray(lhs)
+    rhs_np = np.asarray(rhs)
+    expected = np.empty((lhs_np.shape[0], rhs_np.shape[0]), dtype=np.float64)
+    for i in range(lhs_np.shape[0]):
+        for j in range(rhs_np.shape[0]):
+            expected[i, j] = _manual_correlation_distance(lhs_np[i], rhs_np[j])
+
+    assert distances.shape == expected.shape
+    assert np.allclose(np.asarray(distances), expected, atol=1e-9)
+
+
+def test_residual_lite_pointwise_handles_vectors():
+    backend = get_runtime_backend()
+    metric = get_metric("residual_correlation_lite")
+    lhs = backend.asarray([1.0, 2.0, 3.0], dtype=backend.default_float)
+    rhs = backend.asarray([3.0, 1.0, 0.0], dtype=backend.default_float)
+
+    value = metric.pointwise(backend, lhs, rhs)
+    expected = _manual_correlation_distance(np.asarray(lhs), np.asarray(rhs))
+    if value.shape == ():
+        assert np.allclose(float(value), expected, atol=1e-9)
+    else:
+        assert value.size == 1
+        assert np.allclose(float(value[0]), expected, atol=1e-9)
 
 
 def test_residual_metric_requires_configuration():

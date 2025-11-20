@@ -79,7 +79,11 @@ def runtime_from_args(
 
     metric = _get_arg(args, "metric", default_metric) or default_metric
     runtime_kwargs: dict[str, Any] = {
-        "metric": "residual_correlation" if metric == "residual" else metric,
+        "metric": (
+            "residual_correlation"
+            if metric == "residual"
+            else "residual_correlation_lite" if metric == "residual-lite" else metric
+        ),
     }
     backend = _get_arg(args, "backend")
     if backend:
