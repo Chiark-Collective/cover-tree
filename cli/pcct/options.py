@@ -1,10 +1,101 @@
 from __future__ import annotations
 
-from typing import List, Literal, Optional
+from dataclasses import dataclass
+from typing import Any, List, Literal, Optional, Tuple
 
 from covertreex.api import Runtime as ApiRuntime
 from profiles.loader import ProfileError
 from profiles.overrides import OverrideError
+
+
+@dataclass
+class QueryCLIOptions:
+    dimension: int = 8
+    tree_points: int = 16_384
+    batch_size: int = 512
+    queries: int = 1_024
+    k: int = 8
+    seed: int = 0
+    run_id: str | None = None
+    profile: str | None = None
+    set_override: list[str] | None = None
+    metric: str = "euclidean"
+    backend: str | None = None
+    precision: str | None = None
+    devices: Tuple[str, ...] | None = None
+    enable_numba: bool | None = None
+    enable_sparse_traversal: bool | None = None
+    diagnostics: bool | None = None
+    log_level: str | None = None
+    global_seed: int | None = None
+    mis_seed: int | None = None
+    conflict_graph: str | None = None
+    scope_segment_dedupe: bool | None = None
+    scope_chunk_target: int | None = None
+    scope_chunk_max_segments: int | None = None
+    scope_chunk_pair_merge: bool | None = None
+    scope_conflict_buffer_reuse: bool | None = None
+    degree_cap: int | None = None
+    batch_order: str | None = None
+    batch_order_seed: int | None = None
+    residual_grid_seed: int | None = None
+    prefix_schedule: str | None = None
+    prefix_density_low: float | None = None
+    prefix_density_high: float | None = None
+    prefix_growth_small: float | None = None
+    prefix_growth_mid: float | None = None
+    prefix_growth_large: float | None = None
+    residual_lengthscale: float = 1.0
+    residual_variance: float = 1.0
+    residual_inducing: int = 512
+    residual_chunk_size: int = 512
+    residual_stream_tile: int | None = 64
+    residual_force_whitened: bool | None = None
+    residual_scope_member_limit: int | None = None
+    residual_scope_bitset: bool | None = None
+    residual_dynamic_query_block: bool | None = None
+    residual_dense_scope_streamer: bool | None = None
+    residual_masked_scope_append: bool | None = None
+    residual_level_cache_batching: bool | None = True
+    residual_gate: str | None = "off"
+    residual_gate_lookup_path: str = "docs/data/residual_gate_profile_diag0.json"
+    residual_gate_margin: float = 0.02
+    residual_gate_cap: float = 0.0
+    residual_gate_alpha: float | None = None
+    residual_gate_eps: float | None = None
+    residual_gate_band_eps: float | None = None
+    residual_gate_keep_pct: float | None = None
+    residual_gate_prune_pct: float | None = None
+    residual_gate_audit: bool | None = None
+    residual_gate_profile_path: str | None = None
+    residual_gate_profile_bins: int = 512
+    residual_gate_profile_log: str | None = None
+    residual_scope_caps: str | None = None
+    residual_scope_cap_default: float | None = None
+    residual_scope_cap_output: str | None = None
+    residual_scope_cap_percentile: float = 0.5
+    residual_scope_cap_margin: float = 0.05
+    residual_radius_floor: float | None = None
+    residual_prefilter: bool | None = None
+    residual_prefilter_lookup_path: str | None = None
+    residual_prefilter_margin: float | None = None
+    residual_prefilter_radius_cap: float | None = None
+    residual_prefilter_audit: bool | None = None
+    baseline: str = "none"
+    log_file: str | None = None
+    no_log_file: bool = False
+    build_mode: str = "batch"
+
+    @classmethod
+    def from_namespace(cls, namespace: Any) -> "QueryCLIOptions":
+        values = {}
+        for field in cls.__dataclass_fields__:
+            if hasattr(namespace, field):
+                value = getattr(namespace, field)
+                if field == "devices" and value:
+                    value = tuple(value)
+                values[field] = value
+        return cls(**values)
 
 
 def resolve_metric_flag(

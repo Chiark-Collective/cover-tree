@@ -7,15 +7,15 @@ from numpy.random import default_rng
 
 from covertreex.metrics import build_residual_backend, configure_residual_correlation
 
-from cli.queries.baselines import run_baseline_comparisons
-from cli.queries.benchmark import QueryBenchmarkResult, benchmark_knn_latency
-from cli.queries.runtime import _emit_engine_banner, _gate_active_for_backend
+from .support.baseline_utils import run_baseline_comparisons
+from .support.benchmark_utils import QueryBenchmarkResult, benchmark_knn_latency
+from .support.runtime_utils import emit_engine_banner as _emit_engine_banner, gate_active_for_backend as _gate_active_for_backend
 from tests.utils.datasets import gaussian_points
 
 from .execution import BenchmarkRun
 
 if TYPE_CHECKING:  # pragma: no cover
-    from cli.queries.app import QueryCLIOptions
+    from .options import QueryCLIOptions
 
 
 def _generate_datasets(options: "QueryCLIOptions") -> tuple[np.ndarray, np.ndarray]:

@@ -7,7 +7,7 @@ import pytest
 
 from covertreex import config as cx_config
 
-from cli.queries.telemetry import (
+from cli.pcct.support.telemetry_utils import (
     CLITelemetryHandles,
     ResidualTraversalTelemetry,
     initialise_cli_telemetry,

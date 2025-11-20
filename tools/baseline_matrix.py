@@ -16,8 +16,8 @@ import psutil
 from covertreex import config as cx_config
 from covertreex.api import Runtime
 from covertreex.metrics import build_residual_backend, configure_residual_correlation
-from cli.queries.baselines import run_baseline_comparisons
-from cli.queries.benchmark import benchmark_knn_latency
+from cli.pcct.support.baseline_utils import run_baseline_comparisons
+from cli.pcct.support.benchmark_utils import benchmark_knn_latency
 from tests.utils.datasets import gaussian_points
 
 logging.getLogger("covertreex").setLevel(logging.WARNING)

@@ -4,11 +4,10 @@ from types import SimpleNamespace
 
 import typer
 
-from cli.queries.app import QueryCLIOptions
-from cli.pcct.execution import benchmark_run
-from cli.pcct.query import execute_query_benchmark
 from . import option_defs as opts
-from .options import resolve_metric_flag
+from .execution import benchmark_run
+from .options import QueryCLIOptions, resolve_metric_flag
+from .query import execute_query_benchmark
 
 query_app = typer.Typer(
     add_completion=False,

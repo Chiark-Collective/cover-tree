@@ -24,7 +24,7 @@ if [[ -n "$GRID_WHITEN_SCALE" ]]; then
   echo "[run_residual_gold_standard] using COVERTREEX_RESIDUAL_GRID_WHITEN_SCALE=$GRID_WHITEN_SCALE"
 fi
 
-python "$ROOT_DIR/benchmarks/queries.py" \
+python -m cli.pcct query \
   --dimension 3 \
   --tree-points 32768 \
   --batch-size 512 \

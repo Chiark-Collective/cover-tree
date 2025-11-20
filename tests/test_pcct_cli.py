@@ -7,8 +7,7 @@ import json
 from typer.testing import CliRunner
 
 from cli.pcct import app as pcct_app
-from cli.queries.app import disable_legacy_entrypoint_warning, enable_legacy_entrypoint_warning
-from cli.queries.benchmark import QueryBenchmarkResult
+from cli.pcct.support.benchmark_utils import QueryBenchmarkResult
 
 
 class _DummyRun:
@@ -31,37 +30,17 @@ def _fake_benchmark_run():
 
 def test_pcct_profile_list_displays_profiles() -> None:
     runner = CliRunner()
-    disable_legacy_entrypoint_warning()
     result = runner.invoke(pcct_app, ["profile", "list"])
     assert result.exit_code == 0
     assert "default" in result.stdout
-    assert "[compat]" not in result.stderr
 
 
 def test_pcct_profile_describe_outputs_json() -> None:
     runner = CliRunner()
-    disable_legacy_entrypoint_warning()
     result = runner.invoke(pcct_app, ["profile", "describe", "default", "--format", "json"])
     assert result.exit_code == 0
     assert '"metadata"' in result.stdout
     assert '"runtime"' in result.stdout
-
-
-def test_pcct_query_subcommand_suppresses_legacy_warning(monkeypatch) -> None:
-    runner = CliRunner()
-    enable_legacy_entrypoint_warning()
-
-    invoked = {}
-
-    def fake_run_queries(options) -> None:  # type: ignore[override]
-        invoked["metric"] = options.metric
-
-    monkeypatch.setattr("cli.queries.app.run_queries", fake_run_queries)
-    result = runner.invoke(pcct_app, ["legacy-query", "--dimension", "4"])
-    assert result.exit_code == 0
-    assert invoked["metric"] == "euclidean"
-    assert "[compat]" not in result.stderr
-    disable_legacy_entrypoint_warning()
 
 
 def test_pcct_doctor_reports_environment(tmp_path) -> None:
@@ -295,7 +274,6 @@ def test_pcct_telemetry_render_command(tmp_path) -> None:
 
 def test_pcct_query_seeds_override_produces_stable_hash(tmp_path) -> None:
     runner = CliRunner()
-    disable_legacy_entrypoint_warning()
     log_one = tmp_path / "run_one.jsonl"
     log_two = tmp_path / "run_two.jsonl"
     common_args = [

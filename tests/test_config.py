@@ -7,7 +7,7 @@ import pytest
 
 from covertreex import config as cx_config
 from covertreex.api import Residual, Runtime
-from cli.runtime import runtime_from_args
+from cli.pcct.runtime_config import runtime_from_args
 
 
 def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:

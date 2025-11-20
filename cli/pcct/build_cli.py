@@ -5,14 +5,13 @@ from types import SimpleNamespace
 import numpy as np
 import typer
 
-from cli.queries.app import QueryCLIOptions
-from cli.queries.benchmark import _build_tree
-from cli.queries.runtime import _resolve_artifact_arg
+from .support.benchmark_utils import build_tree as _build_tree
+from .support.runtime_utils import resolve_artifact_arg as _resolve_artifact_arg
 from covertreex.core.tree import PCCTree
 
 from . import option_defs as opts
 from .execution import benchmark_run
-from .options import resolve_metric_flag
+from .options import QueryCLIOptions, resolve_metric_flag
 
 build_app = typer.Typer(
     add_completion=False,

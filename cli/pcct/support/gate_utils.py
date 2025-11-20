@@ -7,7 +7,7 @@ from typing import Any, Dict
 from covertreex.telemetry.schemas import RESIDUAL_GATE_PROFILE_SCHEMA_ID
 
 
-def _append_gate_profile_log(
+def append_gate_profile_log(
     *,
     profile_json_path: str | None,
     profile_log_path: str | None,
@@ -50,4 +50,4 @@ def _append_gate_profile_log(
     print(f"[queries] appended gate profile snapshot to {log_path}")
 
 
-__all__ = ["_append_gate_profile_log"]
+__all__ = ["append_gate_profile_log"]

@@ -16,7 +16,7 @@ def test_query_job_build_command(tmp_path: Path) -> None:
     )
     log_path = tmp_path / "unit.jsonl"
     cmd = job.build_command(log_path, python_executable="/usr/bin/python")
-    assert cmd[:4] == ["/usr/bin/python", "-m", "cli.queries", "--metric"]
+    assert cmd[:5] == ["/usr/bin/python", "-m", "cli.pcct", "query", "--metric"]
     assert "--batch-order" in cmd
     assert "--residual-gate" in cmd
     assert str(log_path) in cmd

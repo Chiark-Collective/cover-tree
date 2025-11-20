@@ -81,7 +81,8 @@ def _run_size(size: int, args: argparse.Namespace) -> Path:
     cli_cmd = [
         sys.executable,
         "-m",
-        "cli.queries",
+        "cli.pcct",
+        "query",
         "--metric",
         "residual",
         "--dimension",

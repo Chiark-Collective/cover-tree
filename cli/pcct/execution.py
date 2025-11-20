@@ -8,15 +8,15 @@ from covertreex import config as cx_config, reset_residual_metric
 from covertreex.api import Runtime as ApiRuntime
 from covertreex.telemetry import generate_run_id, timestamped_artifact
 
-from cli.runtime import runtime_from_args
-from cli.queries.gate import _append_gate_profile_log
-from cli.queries.runtime import (
-    _ensure_thread_env_defaults,
-    _thread_env_snapshot,
-    _resolve_artifact_arg,
-    _validate_residual_runtime,
+from .runtime_config import runtime_from_args
+from .support.gate_utils import append_gate_profile_log as _append_gate_profile_log
+from .support.runtime_utils import (
+    ensure_thread_env_defaults as _ensure_thread_env_defaults,
+    thread_env_snapshot as _thread_env_snapshot,
+    resolve_artifact_arg as _resolve_artifact_arg,
+    validate_residual_runtime as _validate_residual_runtime,
 )
-from cli.queries.telemetry import CLITelemetryHandles, initialise_cli_telemetry
+from .support.telemetry_utils import CLITelemetryHandles, initialise_cli_telemetry
 
 
 @dataclass

@@ -14,7 +14,7 @@ from covertreex.queries.knn import knn
 from covertreex.telemetry import BenchmarkLogWriter, ResidualScopeCapRecorder
 from tests.utils.datasets import gaussian_points
 
-from .runtime import _resolve_backend
+from .runtime_utils import resolve_backend
 
 
 def _ensure_context(context: cx_config.RuntimeContext | None) -> cx_config.RuntimeContext:
@@ -45,7 +45,7 @@ def _generate_backend_points(
     return backend.asarray(samples, dtype=backend.default_float)
 
 
-def _build_tree(
+def build_tree(
     *,
     dimension: int,
     tree_points: int,
@@ -59,7 +59,7 @@ def _build_tree(
     context: cx_config.RuntimeContext | None = None,
 ) -> Tuple[PCCTree, np.ndarray, float]:
     resolved_context = _ensure_context(context)
-    backend = _resolve_backend(context=resolved_context)
+    backend = resolve_backend(context=resolved_context)
     tree = PCCTree.empty(dimension=dimension, backend=backend)
     runtime = resolved_context.config
 
@@ -203,7 +203,7 @@ def benchmark_knn_latency(
     resolved_context = _ensure_context(context)
     tree_build_seconds: float | None = None
     if prebuilt_tree is None:
-        tree, _, tree_build_seconds = _build_tree(
+        tree, _, tree_build_seconds = build_tree(
             dimension=dimension,
             tree_points=tree_points,
             batch_size=batch_size,
@@ -252,6 +252,6 @@ def benchmark_knn_latency(
 
 __all__ = [
     "QueryBenchmarkResult",
-    "_build_tree",
+    "build_tree",
     "benchmark_knn_latency",
 ]

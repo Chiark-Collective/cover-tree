@@ -84,7 +84,8 @@ def run_configuration(dimension: int, tree_points: int, k: int) -> Dict[str, obj
         cmd = [
             "python",
             "-m",
-            "cli.queries",
+            "cli.pcct",
+            "query",
             "--metric",
             "residual",
             "--dimension",

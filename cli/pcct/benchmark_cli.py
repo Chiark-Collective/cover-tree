@@ -7,11 +7,9 @@ from typing import List, Optional
 
 import typer
 
-from cli.queries.app import QueryCLIOptions
-
 from . import option_defs as opts
 from .execution import benchmark_run
-from .options import resolve_metric_flag
+from .options import QueryCLIOptions, resolve_metric_flag
 from .query import execute_query_benchmark
 
 benchmark_app = typer.Typer(

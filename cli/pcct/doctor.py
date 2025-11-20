@@ -14,7 +14,7 @@ from covertreex.telemetry import artifact_root
 from profiles.loader import ProfileError
 from profiles.overrides import OverrideError
 
-from cli.queries.runtime import _thread_env_snapshot
+from .support.runtime_utils import thread_env_snapshot as _thread_env_snapshot
 
 try:  # pragma: no cover - optional dependency
     import numba  # type: ignore

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable, List, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 import numpy as np
 import sys
@@ -13,7 +13,7 @@ from covertreex.telemetry import (
     timestamped_artifact,
 )
 
-from .runtime import _resolve_artifact_arg
+from .runtime_utils import resolve_artifact_arg
 
 
 def _resolve_runtime_config(
@@ -53,7 +53,7 @@ def initialise_cli_telemetry(
     if getattr(args, "no_log_file", False):
         log_path = None
     elif getattr(args, "log_file", None):
-        log_path = str(_resolve_artifact_arg(args.log_file))
+        log_path = str(resolve_artifact_arg(args.log_file))
     else:
         log_path = str(
             timestamped_artifact(
@@ -75,7 +75,7 @@ def initialise_cli_telemetry(
     scope_cap_output = getattr(args, "residual_scope_cap_output", None)
     if getattr(args, "metric", None) == "residual" and scope_cap_output:
         runtime_config = _resolve_runtime_config(context=context)
-        resolved_output = str(_resolve_artifact_arg(scope_cap_output))
+        resolved_output = str(resolve_artifact_arg(scope_cap_output))
         scope_cap_recorder = ResidualScopeCapRecorder(
             output=resolved_output,
             percentile=getattr(args, "residual_scope_cap_percentile", 0.5),
@@ -345,4 +345,4 @@ def _share_fraction(numerator: float, denominator: float) -> float:
     return numerator / total
 
 
-__all__ = ["ResidualTraversalTelemetry"]
+__all__ = ["CLITelemetryHandles", "ResidualTraversalTelemetry", "initialise_cli_telemetry"]

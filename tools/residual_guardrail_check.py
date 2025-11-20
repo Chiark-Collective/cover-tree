@@ -6,10 +6,10 @@ Usage examples:
     # Run the default 4k Hilbert preset and verify thresholds
     python tools/residual_guardrail_check.py
 
-    # Reuse an existing log file (skip rerunning cli.queries)
+    # Reuse an existing log file (skip rerunning cli.pcct query)
     python tools/residual_guardrail_check.py --skip-run --log-file artifacts/benchmarks/guardrails/latest.jsonl
 
-    # Forward additional cli.queries arguments after "--"
+    # Forward additional cli.pcct arguments after "--"
     python tools/residual_guardrail_check.py --extra-cli-args -- --residual-scope-bitset
 """
 from __future__ import annotations
@@ -58,7 +58,8 @@ def _build_cli_command(args: argparse.Namespace, log_path: Path) -> List[str]:
     cmd: List[str] = [
         sys.executable,
         "-m",
-        "cli.queries",
+        "cli.pcct",
+        "query",
         "--metric",
         "residual",
         "--dimension",
@@ -175,7 +176,7 @@ def _write_summary(path: Path, metrics: GuardrailMetrics) -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--log-file", type=Path, help="Telemetry output (defaults under artifacts/benchmarks)")
-    parser.add_argument("--skip-run", action="store_true", help="Do not run cli.queries, only validate the log")
+    parser.add_argument("--skip-run", action="store_true", help="Do not run cli.pcct query, only validate the log")
     parser.add_argument("--tree-points", type=int, default=4096)
     parser.add_argument("--dimension", type=int, default=8)
     parser.add_argument("--queries", type=int, default=1024)
@@ -187,7 +188,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--extra-cli-args",
         nargs=argparse.REMAINDER,
         default=[],
-        help="Additional arguments forwarded to cli.queries (prefix with '--' to terminate parser options)",
+        help="Additional arguments forwarded to cli.pcct query (prefix with '--' to terminate parser options)",
     )
     parser.add_argument(
         "--min-whitened-coverage",
@@ -232,7 +233,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise FileNotFoundError(f"--skip-run set but log file not found: {log_path}")
     else:
         cli_cmd = _build_cli_command(args, log_path)
-        print(f"[guardrail] running cli.queries -> {' '.join(cli_cmd)}")
+        print(f"[guardrail] running cli.pcct query -> {' '.join(cli_cmd)}")
         subprocess.run(cli_cmd, check=True)
 
     metrics = parse_guardrail_metrics(log_path)

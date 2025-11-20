@@ -9,7 +9,7 @@ from covertreex.core.tree import TreeBackend
 from covertreex.telemetry import artifact_root, resolve_artifact_path
 
 
-def _gate_active_for_backend(host_backend: Any | None) -> bool:
+def gate_active_for_backend(host_backend: Any | None) -> bool:
     if host_backend is None:
         return False
     if not bool(getattr(host_backend, "gate1_enabled", False)):
@@ -22,7 +22,7 @@ def _gate_active_for_backend(host_backend: Any | None) -> bool:
     return gate_vectors is not None or lookup is not None
 
 
-def _ensure_thread_env_defaults() -> Dict[str, str]:
+def ensure_thread_env_defaults() -> Dict[str, str]:
     cores = max(1, os.cpu_count() or 1)
     defaults = {
         "MKL_NUM_THREADS": str(cores),
@@ -41,7 +41,7 @@ def _ensure_thread_env_defaults() -> Dict[str, str]:
     return applied
 
 
-def _thread_env_snapshot() -> Dict[str, str]:
+def thread_env_snapshot() -> Dict[str, str]:
     def _value(*names: str) -> str:
         for name in names:
             val = os.environ.get(name)
@@ -55,7 +55,7 @@ def _thread_env_snapshot() -> Dict[str, str]:
     }
 
 
-def _emit_engine_banner(engine: str, gate_active: bool, threads: Dict[str, str]) -> None:
+def emit_engine_banner(engine: str, gate_active: bool, threads: Dict[str, str]) -> None:
     gate_state = "on" if gate_active else "off"
     blas_val = threads.get("blas_threads", "auto")
     numba_val = threads.get("numba_threads", "auto")
@@ -65,8 +65,8 @@ def _emit_engine_banner(engine: str, gate_active: bool, threads: Dict[str, str])
     )
 
 
-def _resolve_runtime_config(
-    *,
+def resolve_runtime_config(
+    *, 
     context: cx_config.RuntimeContext | None = None,
     runtime: cx_config.RuntimeConfig | None = None,
 ) -> cx_config.RuntimeConfig:
@@ -80,12 +80,12 @@ def _resolve_runtime_config(
     return cx_config.RuntimeConfig.from_env()
 
 
-def _resolve_backend(
-    *,
+def resolve_backend(
+    *, 
     context: cx_config.RuntimeContext | None = None,
     runtime: cx_config.RuntimeConfig | None = None,
 ) -> TreeBackend:
-    cfg = _resolve_runtime_config(context=context, runtime=runtime)
+    cfg = resolve_runtime_config(context=context, runtime=runtime)
     if cfg.backend == "jax":
         return TreeBackend.jax(precision=cfg.precision)
     if cfg.backend == "numpy":
@@ -93,7 +93,7 @@ def _resolve_backend(
     raise NotImplementedError(f"Backend '{cfg.backend}' is not supported yet.")
 
 
-def _resolve_artifact_arg(path: str | None, *, category: str = "benchmarks") -> str | None:
+def resolve_artifact_arg(path: str | None, *, category: str = "benchmarks") -> str | None:
     if not path:
         return None
     raw = Path(path).expanduser()
@@ -114,7 +114,7 @@ def _resolve_artifact_arg(path: str | None, *, category: str = "benchmarks") -> 
     return str(resolved)
 
 
-def _validate_residual_runtime(snapshot: Dict[str, Any]) -> None:
+def validate_residual_runtime(snapshot: Dict[str, Any]) -> None:
     errors = []
     backend = snapshot.get("backend")
     if backend != "numpy":
@@ -130,14 +130,3 @@ def _validate_residual_runtime(snapshot: Dict[str, Any]) -> None:
             "Residual metric requires the residual traversal engine; unable to satisfy the"
             f" prerequisites:\n - {joined}"
         )
-
-
-__all__ = [
-    "_gate_active_for_backend",
-    "_ensure_thread_env_defaults",
-    "_thread_env_snapshot",
-    "_emit_engine_banner",
-    "_resolve_backend",
-    "_resolve_artifact_arg",
-    "_validate_residual_runtime",
-]

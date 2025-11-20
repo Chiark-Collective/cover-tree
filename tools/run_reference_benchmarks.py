@@ -63,7 +63,8 @@ class BenchmarkJob:
         cmd = [
             python_executable,
             "-m",
-            "cli.queries",
+            "cli.pcct",
+            "query",
             "--metric",
             self.metric,
             "--dimension",

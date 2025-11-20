@@ -101,7 +101,7 @@ def _aggregate(records: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Aggregate cli.queries telemetry JSONL files into a CSV summary."
+        description="Aggregate cli.pcct query telemetry JSONL files into a CSV summary."
     )
     parser.add_argument("--output", required=True, help="Destination CSV path")
     parser.add_argument("paths", nargs="+", help="Telemetry JSONL files to aggregate")

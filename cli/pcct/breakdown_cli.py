@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import contextlib
 import csv
 import os
@@ -8,12 +7,14 @@ import resource
 import time
 from dataclasses import dataclass, field, replace
 from statistics import mean, median
+from types import SimpleNamespace
 from typing import Dict, List, Optional
 
 import numpy as np
+import typer
 from numpy.random import default_rng
 
-from cli.runtime import runtime_from_args
+from .runtime_config import runtime_from_args
 from covertreex import config as cx_config
 from covertreex.algo import batch_insert
 from covertreex.algo.mis import NUMBA_AVAILABLE
@@ -35,15 +36,20 @@ from covertreex.telemetry import (
     timestamped_artifact,
 )
 from tests.utils.datasets import gaussian_dataset
+from . import option_defs as opts
 
+
+breakdown_app = typer.Typer(
+    add_completion=False,
+    pretty_exceptions_enable=False,
+    invoke_without_command=True,
+    help="Generate runtime breakdown plots for cover tree implementations.",
+)
 
 try:  # pragma: no cover - plotting exercised in manual workflows
     import matplotlib.pyplot as plt
-except ImportError as exc:  # pragma: no cover - guarded runtime path
-    raise SystemExit(
-        "matplotlib is required for runtime breakdown plots. "
-        "Install it with `pip install matplotlib`."
-    ) from exc
+except ImportError:  # pragma: no cover - guarded runtime path
+    plt = None
 
 
 @dataclass(frozen=True)
@@ -470,6 +476,10 @@ def _run_sequential_baseline(
 
 
 def _plot_results(results: List[ImplementationResult], *, output: Optional[str], show: bool) -> None:
+    if plt is None:
+        typer.echo("matplotlib is required for plotting. Install it with `pip install matplotlib`.", err=True)
+        return
+
     segment_order = [
         "pairwise",
         "mask",
@@ -567,124 +577,62 @@ def _plot_results(results: List[ImplementationResult], *, output: Optional[str],
         plt.close(fig)
 
 
-def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Generate runtime breakdown plots for cover tree implementations."
-    )
-    parser.add_argument("--dimension", type=int, default=8, help="Dimensionality of points.")
-    parser.add_argument("--tree-points", type=int, default=2048, help="Number of points to insert.")
-    parser.add_argument("--batch-size", type=int, default=128, help="Batch size for PCCT insertions.")
-    parser.add_argument("--queries", type=int, default=512, help="Number of query points.")
-    parser.add_argument("--k", type=int, default=8, help="Number of neighbours for k-NN.")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed used across runs.")
-    parser.add_argument(
-        "--run-id",
-        type=str,
-        default=None,
-        help="Optional run identifier embedded in telemetry outputs.",
-    )
-    parser.add_argument(
-        "--output",
-        type=str,
-        default="runtime_breakdown.png",
-        help="Path to save the generated plot (set to '' to skip saving).",
-    )
-    parser.add_argument(
-        "--show",
-        action="store_true",
-        help="Display the plot interactively.",
-    )
-    parser.add_argument(
-        "--skip-numba",
-        action="store_true",
-        help="Skip the Numba-enabled PCCT run.",
-    )
-    parser.add_argument(
-        "--skip-jax",
-        action="store_true",
-        help="Skip the JAX-backed PCCT run.",
-    )
-    parser.add_argument(
-        "--skip-external",
-        action="store_true",
-        default=True,
-        help="Skip the external cover tree baseline if installed (default: skipped).",
-    )
-    parser.add_argument(
-        "--include-external",
-        action="store_false",
-        dest="skip_external",
-        help="Include the external cover tree baseline.",
-    )
-    parser.add_argument(
-        "--skip-gpboost",
-        action="store_true",
-        help="Skip the GPBoost cover tree baseline if numba is installed.",
-    )
-    parser.add_argument(
-        "--skip-sequential",
-        action="store_true",
-        default=True,
-        help="Skip the sequential cover tree baseline (default: skipped).",
-    )
-    parser.add_argument(
-        "--include-sequential",
-        action="store_false",
-        dest="skip_sequential",
-        help="Include the sequential cover tree baseline.",
-    )
-    parser.add_argument(
-        "--csv-output",
-        type=str,
-        default="",
-        help="Optional path to write warm-up vs steady-state metrics as CSV.",
-    )
-    parser.add_argument(
-        "--no-csv-output",
-        action="store_true",
-        help="Disable CSV telemetry emission (enabled by default).",
-    )
-    parser.add_argument(
-        "--runs",
-        type=int,
-        default=1,
-        help="Number of repeated benchmark runs (default: 1).",
-    )
-    parser.add_argument(
-        "--backend",
-        choices=("jax", "numpy"),
-        default="jax",
-        help="Runtime backend to activate before benchmarking.",
-    )
-    parser.add_argument(
-        "--precision",
-        choices=("float32", "float64"),
-        default="float64",
-        help="Floating-point precision for runtime computations.",
-    )
-    parser.add_argument(
-        "--metric",
-        choices=("euclidean", "residual", "residual-lite"),
-        default="euclidean",
-        help="Metric to benchmark (residual currently unsupported).",
-    )
-    return parser.parse_args()
+@breakdown_app.callback()
+def breakdown(
+    ctx: typer.Context,
+    dimension: opts.DimensionOption = 8,
+    tree_points: opts.TreePointsOption = 2048,
+    batch_size: opts.BatchSizeOption = 128,
+    queries: opts.QueriesOption = 512,
+    k: opts.KOption = 8,
+    seed: opts.SeedOption = 42,
+    run_id: opts.RunIdOption = None,
+    output: str = typer.Option("runtime_breakdown.png", help="Path to save the generated plot."),
+    show: bool = typer.Option(False, help="Display the plot interactively."),
+    skip_numba: bool = typer.Option(False, help="Skip the Numba-enabled PCCT run."),
+    skip_jax: bool = typer.Option(False, help="Skip the JAX-backed PCCT run."),
+    skip_external: bool = typer.Option(True, help="Skip the external cover tree baseline."),
+    include_external: bool = typer.Option(False, help="Include the external cover tree baseline."),
+    skip_gpboost: bool = typer.Option(False, help="Skip the GPBoost cover tree baseline if numba is installed."),
+    skip_sequential: bool = typer.Option(True, help="Skip the sequential cover tree baseline."),
+    include_sequential: bool = typer.Option(False, help="Include the sequential cover tree baseline."),
+    csv_output: str = typer.Option("", help="Optional path to write metrics as CSV."),
+    no_csv_output: bool = typer.Option(False, help="Disable CSV telemetry emission."),
+    runs: int = typer.Option(1, help="Number of repeated benchmark runs."),
+    backend: opts.BackendOption = "jax",
+    precision: opts.PrecisionOption = "float64",
+    metric: opts.MetricOption = "euclidean",
+) -> None:
+    if metric == "residual":
+        raise typer.BadParameter("runtime_breakdown currently supports only the euclidean metric.")
 
+    # Handle mutually exclusive flags manually
+    if include_external:
+        skip_external = False
+    if include_sequential:
+        skip_sequential = False
 
-def main() -> None:
-    args = _parse_args()
-    if args.metric == "residual":
-        raise ValueError("runtime_breakdown currently supports only the euclidean metric.")
-    run_id = args.run_id or generate_run_id(prefix="runtime")
-    runtime_from_args(args).activate()
-    print(f"[runtime_breakdown] run_id={run_id}")
-    plot_output = str(resolve_artifact_path(args.output, category="benchmarks")) if args.output else None
-    if args.no_csv_output:
-        csv_output = None
-    elif args.csv_output:
-        csv_output = str(resolve_artifact_path(args.csv_output, category="benchmarks"))
+    run_id = run_id or generate_run_id(prefix="runtime")
+
+    # Construct args for runtime_from_args (which expects an object with attributes)
+    # We only pass what runtime_from_args needs
+    runtime_args = SimpleNamespace(
+        metric=metric,
+        backend=backend,
+        precision=precision,
+        # Add other runtime options as needed if defaults aren't sufficient
+    )
+
+    runtime_from_args(runtime_args).activate()
+    print(f"[breakdown] run_id={run_id}")
+
+    plot_output = str(resolve_artifact_path(output, category="benchmarks")) if output else None
+    if no_csv_output:
+        final_csv_output = None
+    elif csv_output:
+        final_csv_output = str(resolve_artifact_path(csv_output, category="benchmarks"))
     else:
-        csv_output = str(
+        final_csv_output = str(
             timestamped_artifact(
                 category="benchmarks",
                 prefix=f"runtime_breakdown_{run_id}",
@@ -693,84 +641,84 @@ def main() -> None:
         )
 
     points_np, queries_np = _generate_dataset(
-        dimension=args.dimension,
-        tree_points=args.tree_points,
-        queries=args.queries,
-        seed=args.seed,
+        dimension=dimension,
+        tree_points=tree_points,
+        queries=queries,
+        seed=seed,
     )
 
-    runs = max(1, args.runs)
+    runs_count = max(1, runs)
     all_results: List[List[ImplementationResult]] = []
 
-    for run_idx in range(runs):
-        if runs > 1:
-            print(f"=== Run {run_idx + 1}/{runs} ===")
-        run_seed = args.seed + run_idx
+    for run_idx in range(runs_count):
+        if runs_count > 1:
+            print(f"=== Run {run_idx + 1}/{runs_count} ===")
+        run_seed = seed + run_idx
         run_results: List[ImplementationResult] = []
 
-        backend = get_runtime_backend()
-        if not args.skip_jax and backend.name == "jax":
+        current_backend = get_runtime_backend()
+        if not skip_jax and current_backend.name == "jax":
             run_results.append(
                 _run_pcct_variant(
                     label="PCCT (JAX)",
                     points=points_np,
                     queries=queries_np,
-                    batch_size=args.batch_size,
-                    k=args.k,
+                    batch_size=batch_size,
+                    k=k,
                     seed=run_seed,
                     enable_numba=False,
                 )
             )
 
-        if not args.skip_numba:
+        if not skip_numba:
             run_results.append(
                 _run_pcct_variant(
                     label="PCCT (Numba)",
                     points=points_np,
                     queries=queries_np,
-                    batch_size=args.batch_size,
-                    k=args.k,
+                    batch_size=batch_size,
+                    k=k,
                     seed=run_seed,
                     enable_numba=True,
                 )
             )
 
-        if not args.skip_sequential:
+        if not skip_sequential:
             run_results.append(
                 _run_sequential_baseline(
                     label="Sequential Baseline",
                     points=points_np,
                     queries=queries_np,
-                    k=args.k,
+                    k=k,
                     constructor=BaselineCoverTree,
                 )
             )
 
-        if not args.skip_gpboost:
+        if not skip_gpboost:
             if has_gpboost_cover_tree():
                 run_results.append(
                     _run_sequential_baseline(
                         label="GPBoost CoverTree",
                         points=points_np,
                         queries=queries_np,
-                        k=args.k,
+                        k=k,
                         constructor=GPBoostCoverTreeBaseline,
                     )
                 )
             elif run_idx == 0:
                 print("GPBoost cover tree baseline unavailable; skipping.")
 
-        if not args.skip_external and has_external_cover_tree():
+        if not skip_external and has_external_cover_tree():
             run_results.append(
                 _run_sequential_baseline(
                     label="External CoverTree",
                     points=points_np,
                     queries=queries_np,
-                    k=args.k,
+                    k=k,
                     constructor=ExternalCoverTreeBaseline,
                 )
             )
-        elif (not args.skip_external) and run_idx == 0:
+        elif (not skip_external) and run_idx == 0:
             print("External cover tree baseline unavailable; skipping.")
 
         for res in run_results:
@@ -789,13 +737,13 @@ def main() -> None:
     # Use the last run for plotting to keep behaviour predictable
     results = all_results[-1] if all_results else []
 
-    _plot_results(results, output=plot_output, show=args.show)
+    _plot_results(results, output=plot_output, show=show)
 
-    if csv_output:
-        print(f"[runtime_breakdown] writing CSV metrics to {csv_output}")
+    if final_csv_output:
+        print(f"[breakdown] writing CSV metrics to {final_csv_output}")
         chunk_fieldnames = list(RUNTIME_BREAKDOWN_CHUNK_FIELDS)
         fieldnames = list(runtime_breakdown_fieldnames())
-        with open(csv_output, "w", newline="") as csv_file:
+        with open(final_csv_output, "w", newline="") as csv_file:
             writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
             writer.writeheader()
             for run_idx, run in enumerate(all_results, start=1):
@@ -831,12 +779,8 @@ def main() -> None:
                         row[chunk_field] = res.chunk_metrics.get(chunk_field, "")
                     writer.writerow(row)
 
-    if runs > 1:
+    if runs_count > 1:
         _print_multi_run_summary(all_results)
 
 
-__all__ = ["main"]
-
-
-if __name__ == "__main__":
-    main()
+__all__ = ["breakdown_app"]
