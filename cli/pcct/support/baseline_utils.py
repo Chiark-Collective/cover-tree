@@ -11,9 +11,13 @@ from covertreex.baseline import (
     ExternalCoverTreeBaseline,
     GPBoostCoverTreeBaseline,
     MlpackCoverTreeBaseline,
+    ScikitLearnBaseline,
+    ScipyBaseline,
     has_external_cover_tree,
     has_gpboost_cover_tree,
     has_mlpack_cover_tree,
+    has_sklearn_baseline,
+    has_scipy_baseline,
 )
 
 
@@ -108,6 +112,50 @@ def _run_mlpack_baseline(points: np.ndarray, queries: np.ndarray, *, k: int) -> 
     )
 
 
+def _run_sklearn_baseline(points: np.ndarray, queries: np.ndarray, *, k: int) -> BaselineComparison:
+    if not has_sklearn_baseline():
+        raise RuntimeError(
+            "scikit-learn baseline requested but scikit-learn is not installed."
+        )
+    start_build = time.perf_counter()
+    tree = ScikitLearnBaseline.from_points(points, algorithm="ball_tree")
+    build_seconds = time.perf_counter() - start_build
+    start = time.perf_counter()
+    tree.knn(queries, k=k, return_distances=False)
+    elapsed = time.perf_counter() - start
+    qps = queries.shape[0] / elapsed if elapsed > 0 else float("inf")
+    latency = (elapsed / queries.shape[0]) * 1e3 if queries.shape[0] else 0.0
+    return BaselineComparison(
+        name="sklearn_balltree",
+        build_seconds=build_seconds,
+        elapsed_seconds=elapsed,
+        latency_ms=latency,
+        queries_per_second=qps,
+    )
+
+
+def _run_scipy_baseline(points: np.ndarray, queries: np.ndarray, *, k: int) -> BaselineComparison:
+    if not has_scipy_baseline():
+        raise RuntimeError(
+            "scipy baseline requested but scipy is not installed."
+        )
+    start_build = time.perf_counter()
+    tree = ScipyBaseline.from_points(points)
+    build_seconds = time.perf_counter() - start_build
+    start = time.perf_counter()
+    tree.knn(queries, k=k, return_distances=False)
+    elapsed = time.perf_counter() - start
+    qps = queries.shape[0] / elapsed if elapsed > 0 else float("inf")
+    latency = (elapsed / queries.shape[0]) * 1e3 if queries.shape[0] else 0.0
+    return BaselineComparison(
+        name="scipy_ckdtree",
+        build_seconds=build_seconds,
+        elapsed_seconds=elapsed,
+        latency_ms=latency,
+        queries_per_second=qps,
+    )
+
+
 def run_baseline_comparisons(
     points: np.ndarray,
     queries: np.ndarray,
@@ -127,6 +175,10 @@ def run_baseline_comparisons(
         results.append(_run_mlpack_baseline(points, queries, k=k))
     if mode in ("external", "both", "cover", "all"):
         results.append(_run_external_baseline(points, queries, k=k))
+    if mode in ("sklearn", "all"):
+        results.append(_run_sklearn_baseline(points, queries, k=k))
+    if mode in ("scipy", "all"):
+        results.append(_run_scipy_baseline(points, queries, k=k))
     return results
 
 

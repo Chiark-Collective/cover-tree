@@ -35,6 +35,23 @@ except Exception:  # pragma: no cover - mlpack is not installed
     mlpack = Any  # type: ignore[assignment]
     _HAS_MLPACK = False
 
+try:  # pragma: no cover - optional dependency gate for scikit-learn baseline
+    from sklearn.neighbors import BallTree as _SklearnBallTree, KDTree as _SklearnKDTree
+
+    _HAS_SKLEARN = True
+except ImportError:  # pragma: no cover - sklearn is not installed
+    _SklearnBallTree = Any  # type: ignore[assignment]
+    _SklearnKDTree = Any  # type: ignore[assignment]
+    _HAS_SKLEARN = False
+
+try:  # pragma: no cover - optional dependency gate for scipy baseline
+    from scipy.spatial import cKDTree as _ScipyCKDTree
+
+    _HAS_SCIPY = True
+except ImportError:  # pragma: no cover - scipy is not installed
+    _ScipyCKDTree = Any  # type: ignore[assignment]
+    _HAS_SCIPY = False
+
 if _HAS_NUMBA:
 
     @njit(parallel=True, fastmath=True)
@@ -676,6 +693,156 @@ class GPBoostCoverTreeBaseline:
         return indices_arr, distances_arr
 
 
+class ScikitLearnBaseline:
+    """Adapter for scikit-learn's BallTree/KDTree."""
+
+    def __init__(self, tree: Any, algorithm: str) -> None:
+        if not _HAS_SKLEARN:
+            raise ImportError("scikit-learn is not available.")
+        self._tree = tree
+        self.algorithm = algorithm
+
+    @classmethod
+    def from_points(
+        cls,
+        points: Sequence[Sequence[float]],
+        *,
+        algorithm: str = "ball_tree",
+        leaf_size: int = 40,
+    ) -> "ScikitLearnBaseline":
+        if not _HAS_SKLEARN:
+            raise ImportError("scikit-learn is not available.")
+        pts = np.asarray(points, dtype=float)
+        if pts.ndim == 1:
+            pts = pts.reshape(-1, 1)
+        
+        if algorithm == "kd_tree":
+            tree = _SklearnKDTree(pts, leaf_size=leaf_size)
+        else:
+            tree = _SklearnBallTree(pts, leaf_size=leaf_size)
+        
+        return cls(tree, algorithm)
+
+    @property
+    def num_points(self) -> int:
+        # Access internal data if possible, or store points
+        return int(self._tree.data.shape[0])
+
+    def nearest(self, query: Sequence[float]) -> Tuple[int, float]:
+        query_arr = np.asarray(query, dtype=float).reshape(1, -1)
+        dist, idx = self._tree.query(query_arr, k=1)
+        return int(idx[0, 0]), float(dist[0, 0])
+
+    def knn(
+        self,
+        queries: Sequence[Sequence[float]] | Sequence[float],
+        k: int,
+        *,
+        return_distances: bool = False,
+    ) -> Tuple[np.ndarray, np.ndarray] | np.ndarray:
+        if not _HAS_SKLEARN:
+            raise ImportError("scikit-learn is not available.")
+        
+        query_arr = np.asarray(queries, dtype=float)
+        squeeze = False
+        if query_arr.ndim == 1:
+            query_arr = query_arr[None, :]
+            squeeze = True
+            
+        dist, idx = self._tree.query(query_arr, k=k)
+        
+        if squeeze:
+            idx = idx[0]
+            dist = dist[0]
+            if k == 1 and idx.ndim == 0:
+                pass # scalar
+            
+        if not return_distances:
+            return idx
+        return idx, dist
+
+
+class ScipyBaseline:
+    """Adapter for scipy.spatial.cKDTree."""
+
+    def __init__(self, tree: Any) -> None:
+        if not _HAS_SCIPY:
+            raise ImportError("scipy is not available.")
+        self._tree = tree
+
+    @classmethod
+    def from_points(
+        cls,
+        points: Sequence[Sequence[float]],
+        *,
+        leafsize: int = 16,
+    ) -> "ScipyBaseline":
+        if not _HAS_SCIPY:
+            raise ImportError("scipy is not available.")
+        pts = np.asarray(points, dtype=float)
+        if pts.ndim == 1:
+            pts = pts.reshape(-1, 1)
+        tree = _ScipyCKDTree(pts, leafsize=leafsize)
+        return cls(tree)
+
+    @property
+    def num_points(self) -> int:
+        return int(self._tree.n)
+
+    def nearest(self, query: Sequence[float]) -> Tuple[int, float]:
+        dist, idx = self._tree.query(query, k=1)
+        return int(idx), float(dist)
+
+    def knn(
+        self,
+        queries: Sequence[Sequence[float]] | Sequence[float],
+        k: int,
+        *,
+        return_distances: bool = False,
+    ) -> Tuple[np.ndarray, np.ndarray] | np.ndarray:
+        if not _HAS_SCIPY:
+            raise ImportError("scipy is not available.")
+        
+        query_arr = np.asarray(queries, dtype=float)
+        # scipy cKDTree handles squeeze implicitly usually, but let's be explicit if needed
+        # cKDTree.query returns (dist, idx). If k=1, shapes are (n_queries,). If k>1, (n_queries, k).
+        
+        dist, idx = self._tree.query(query_arr, k=k)
+        
+        # Align shapes with expectations (integers/floats for single query/k=1, arrays otherwise)
+        # But the baseline interface generally expects arrays.
+        
+        # cKDTree query returns tuple.
+        # If queries is 1D, result is (dist, idx) scalars or (k,) arrays.
+        # If queries is 2D, result is (n, k) arrays.
+        
+        # The interface requires:
+        # squeeze=True -> (k,) or scalar
+        # squeeze=False -> (n, k)
+        
+        # Let's check how query_arr was formed.
+        squeeze = False
+        if query_arr.ndim == 1:
+            squeeze = True # Input was single point
+        
+        # If squeeze is True, cKDTree returns 1D arrays (for k>1) or scalars (for k=1).
+        # If squeeze is False, cKDTree returns 2D arrays (n, k) or 1D (n,) for k=1.
+        
+        # The `knn` signature implies we return numpy arrays mostly.
+        
+        if return_distances:
+            return idx, dist
+        return idx
+
+
+def has_sklearn_baseline() -> bool:
+    return _HAS_SKLEARN
+
+
+def has_scipy_baseline() -> bool:
+    return _HAS_SCIPY
+
+
 def has_gpboost_cover_tree() -> bool:
     return _HAS_NUMBA
 
@@ -690,7 +857,11 @@ __all__ = [
     "ExternalCoverTreeBaseline",
     "GPBoostCoverTreeBaseline",
     "MlpackCoverTreeBaseline",
+    "ScikitLearnBaseline",
+    "ScipyBaseline",
     "has_external_cover_tree",
     "has_gpboost_cover_tree",
     "has_mlpack_cover_tree",
+    "has_sklearn_baseline",
+    "has_scipy_baseline",
 ]
