@@ -15,6 +15,12 @@ try:  # pragma: no cover - exercised indirectly in tests
 except ModuleNotFoundError:  # pragma: no cover - depends on environment
     jax = None  # type: ignore
 
+try:
+    import numba  # type: ignore
+    _NUMBA_AVAILABLE = True
+except ImportError:
+    _NUMBA_AVAILABLE = False
+
 _LOGGER = logging.getLogger("covertreex")
 _FALLBACK_CPU_DEVICE = ("cpu:0",)
 
@@ -475,7 +481,9 @@ class RuntimeModel(BaseModel):
         precision = _normalise_precision(_infer_precision_from_env(source))
         requested_devices = _parse_devices(source.get("COVERTREEX_DEVICE"))
         devices = _resolve_jax_devices(requested_devices) if backend == "jax" else ()
-        enable_numba = _bool_from_env(source.get("COVERTREEX_ENABLE_NUMBA"), default=False)
+        enable_numba = _bool_from_env(
+            source.get("COVERTREEX_ENABLE_NUMBA"), default=_NUMBA_AVAILABLE
+        )
         enable_sparse_traversal = _bool_from_env(
             source.get("COVERTREEX_ENABLE_SPARSE_TRAVERSAL"), default=False
         )

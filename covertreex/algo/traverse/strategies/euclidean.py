@@ -27,6 +27,11 @@ from ..base import (
 )
 from .common import _collect_next_chain
 from .registry import register_traversal_strategy
+from covertreex.queries._knn_numba import (
+    knn_numba,
+    materialise_tree_view_cached,
+    NUMBA_QUERY_AVAILABLE,
+)
 
 LOGGER = get_logger("algo.traverse.euclidean")
 
@@ -62,6 +67,23 @@ def _collect_euclidean_dense(
     backend: TreeBackend,
     runtime: Any,
 ) -> TraversalResult:
+    # Optimization: Automatically upgrade to Sparse Traversal (O(N log N)) if Numba is available.
+    # This avoids the catastrophic O(N^2) scaling of the dense flat scan for large datasets.
+    
+    enable_numba = getattr(runtime, "enable_numba", True)
+    force_dense = getattr(runtime, "force_dense_euclidean", False)
+    
+    use_fast_path = (
+        NUMBA_SPARSE_TRAVERSAL_AVAILABLE
+        and NUMBA_QUERY_AVAILABLE
+        and backend.name == "numpy"
+        and enable_numba
+        and not force_dense
+    )
+    
+    if use_fast_path:
+        return _collect_euclidean_sparse(tree, batch, backend=backend, runtime=runtime)
+
     xp = backend.xp
     batch_size = int(batch.shape[0]) if batch.size else 0
 
