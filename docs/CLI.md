@@ -143,7 +143,7 @@ Seed overrides feed the `SeedPack` channels directly (`seeds.global`, `seeds.mis
 | Panel | Purpose | Highlights |
 | --- | --- | --- |
 | **Benchmark shape** | Controls dataset geometry and build style. | `--dimension`, `--tree-points`, `--batch-size`, `--queries`, `--k`, `--seed`, `--build-mode`. |
-| **Runtime controls** | Mirrors `covertreex.api.Runtime` knobs. | `--profile`, `--set PATH=VALUE`, `--backend`, `--precision`, `--device/-d`, `--enable-numba/--disable-numba`, `--conflict-graph`, `--scope-chunk-target`, `--batch-order`, `--prefix-*`, `--global-seed`, `--mis-seed`, `--residual-grid-seed`. |
+| **Runtime controls** | Mirrors `covertreex.api.Runtime` knobs. | `--profile`, `--set PATH=VALUE`, `--backend`, `--precision`, `--device/-d`, `--enable-numba/--disable-numba`, `--enable-rust/--disable-rust`, `--conflict-graph`, `--scope-chunk-target`, `--batch-order`, `--prefix-*`, `--global-seed`, `--mis-seed`, `--residual-grid-seed`. |
 | **Residual metric** | Synthetic backend + traversal caps. | `--residual-lengthscale`, `--residual-variance`, `--residual-inducing`, `--residual-stream-tile`, `--residual-scope-member-limit`, `--residual-scope-caps`, `--residual-scope-cap-output`, `--residual-force-whitened`. |
 | **Telemetry & baselines** | Output paths + comparisons. | `--log-file`, `--no-log-file`, `--baseline` (none/sequential/gpboost/external/both/all). |
 

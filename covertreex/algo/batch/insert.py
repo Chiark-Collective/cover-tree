@@ -146,6 +146,21 @@ def batch_insert(
     resolved_context = context or cx_config.current_runtime_context()
     if resolved_context is None:
         resolved_context = cx_config.runtime_context()
+        
+    if resolved_context.config.enable_rust:
+        try:
+            return _rust_batch_insert(
+                tree,
+                batch_points,
+                backend=backend,
+                context=resolved_context,
+            )
+        except ImportError:
+            # Fallback if rust not available despite config?
+            # Or just fail. Config said enable_rust=True.
+            # If default is auto, we should check avail.
+            pass
+            
     with log_operation(LOGGER, "batch_insert", context=resolved_context) as op_log:
         return _batch_insert_impl(
             op_log,
@@ -156,6 +171,100 @@ def batch_insert(
             apply_batch_order=apply_batch_order,
             context=resolved_context,
         )
+
+def _create_dummy_plan(backend: TreeBackend) -> BatchInsertPlan:
+    from covertreex.algo.types import BatchInsertPlan, BatchInsertTimings
+    from covertreex.algo.traverse import TraversalResult, TraversalTimings
+    from covertreex.algo.conflict import ConflictGraph, ConflictGraphTimings
+    from covertreex.algo.mis import MISResult, MISTimings
+    
+    empty = backend.asarray([])
+    timings = BatchInsertTimings(0.0, 0.0, 0.0)
+    t_timings = TraversalTimings(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    c_timings = ConflictGraphTimings(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    m_timings = MISTimings(0.0, 0.0, 0.0, 0.0)
+    
+    return BatchInsertPlan(
+        traversal=TraversalResult(empty, empty, empty, empty, empty, t_timings),
+        conflict_graph=ConflictGraph(empty, empty, empty, empty, None, None, c_timings),
+        mis_result=MISResult(empty, 0, m_timings),
+        selected_indices=empty,
+        dominated_indices=empty,
+        level_summaries=(),
+        timings=timings,
+        batch_permutation=None,
+        batch_order_strategy="rust",
+        batch_order_metrics={},
+    )
+
+def _rust_batch_insert(
+    tree: PCCTree,
+    batch_points: Any,
+    *,
+    backend: TreeBackend,
+    context: cx_config.RuntimeContext,
+) -> tuple[PCCTree, BatchInsertPlan]:
+    import covertreex_backend
+    from covertreex.queries.utils import to_numpy_array
+    from covertreex.metrics.residual.core import get_residual_backend
+    
+    batch_np = to_numpy_array(backend, batch_points, dtype=np.float32)
+    points_np = to_numpy_array(backend, tree.points, dtype=np.float32)
+    parents_np = to_numpy_array(backend, tree.parents, dtype=np.int64)
+    children_np = to_numpy_array(backend, tree.children, dtype=np.int64)
+    next_np = to_numpy_array(backend, tree.next_cache, dtype=np.int64)
+    levels_np = to_numpy_array(backend, tree.top_levels, dtype=np.int32)
+    
+    min_level = int(tree.min_scale) if tree.min_scale is not None else -100
+    max_level = int(tree.max_scale) if tree.max_scale is not None else 100
+    
+    wrapper = covertreex_backend.CoverTreeWrapper(
+        points_np, parents_np, children_np, next_np, levels_np, min_level, max_level
+    )
+    
+    if context.config.metric == "residual_correlation":
+        host_backend = get_residual_backend()
+        v_matrix = host_backend.v_matrix
+        p_diag = host_backend.p_diag
+        coords = host_backend.kernel_points_f32
+        rbf_var = float(getattr(host_backend, "rbf_variance", 1.0))
+        rbf_ls = getattr(host_backend, "rbf_lengthscale", 1.0)
+        if np.ndim(rbf_ls) == 0:
+            dim = coords.shape[1]
+            rbf_ls = np.full(dim, float(rbf_ls), dtype=np.float32)
+        else:
+            rbf_ls = np.asarray(rbf_ls, dtype=np.float32)
+            
+        wrapper.insert_residual(batch_np, v_matrix, p_diag, coords, rbf_var, rbf_ls)
+    else:
+        wrapper.insert(batch_np)
+        
+    new_points = wrapper.get_points()
+    new_parents = wrapper.get_parents()
+    new_children = wrapper.get_children()
+    new_next = wrapper.get_next_node()
+    new_levels = wrapper.get_levels()
+    new_min = wrapper.get_min_level()
+    new_max = wrapper.get_max_level()
+    new_si = np.power(2.0, new_levels.astype(np.float64) + 1.0)
+    
+    # Construct result
+    new_tree = PCCTree(
+        backend=backend,
+        dimension=tree.dimension,
+        points=backend.asarray(new_points),
+        parents=backend.asarray(new_parents),
+        children=backend.asarray(new_children),
+        top_levels=backend.asarray(new_levels),
+        next_cache=backend.asarray(new_next),
+        si_cache=backend.asarray(new_si),
+        level_offsets=backend.asarray(np.zeros(1)), 
+        min_scale=new_min,
+        max_scale=new_max,
+        stats=tree.stats, 
+    )
+    
+    return new_tree, _create_dummy_plan(backend)
 
 
 def _batch_insert_impl(

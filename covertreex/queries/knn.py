@@ -168,6 +168,19 @@ def _knn_impl(
     context = context or cx_config.runtime_context()
     runtime = context.config
     
+    if runtime.enable_rust:
+        try:
+            return _rust_knn_query(
+                tree, 
+                batch, 
+                k=k, 
+                return_distances=return_distances, 
+                backend=backend, 
+                context=context
+            )
+        except ImportError:
+            pass
+    
     if runtime.residual_use_static_euclidean_tree:
         return residual_knn_query(
             tree,
@@ -179,11 +192,12 @@ def _knn_impl(
         )
 
     use_numba = runtime.enable_numba and NUMBA_QUERY_AVAILABLE
-
+    
     batch_np = to_numpy_array(backend, batch, dtype=np.float64)
     num_queries = batch_np.shape[0]
 
     if use_numba:
+        # ... existing numba logic ...
         view = materialise_tree_view_cached(tree)
         numba_indices, numba_distances = _knn_numba(
             view,
@@ -198,6 +212,7 @@ def _knn_impl(
             numba_distances if numba_distances.ndim > 1 else numba_distances[None, :]
         )
     else:
+        # ... existing python logic ...
         points_np = to_numpy_array(backend, tree.points, dtype=np.float64)
         parents_np = to_numpy_array(backend, tree.parents, dtype=np.int64)
         children_np = to_numpy_array(backend, tree.children, dtype=np.int64)
@@ -243,6 +258,99 @@ def _knn_impl(
         return sorted_indices
 
     sorted_distances = backend.asarray(distances_arr, dtype=backend.default_float)
+    if sorted_indices.shape[0] == 1:
+        squeezed_idx = sorted_indices[0]
+        squeezed_dist = sorted_distances[0]
+        if squeezed_idx.shape[0] == 1:
+            return squeezed_idx[0], squeezed_dist[0]
+        return squeezed_idx, squeezed_dist
+    return sorted_indices, sorted_distances
+
+
+def _rust_knn_query(
+    tree: PCCTree,
+    batch: Any,
+    *,
+    k: int,
+    return_distances: bool,
+    backend: TreeBackend,
+    context: cx_config.RuntimeContext,
+) -> Any:
+    import covertreex_backend
+    from covertreex.metrics.residual.core import get_residual_backend, decode_indices
+    
+    points_np = to_numpy_array(backend, tree.points, dtype=np.float32)
+    parents_np = to_numpy_array(backend, tree.parents, dtype=np.int64)
+    children_np = to_numpy_array(backend, tree.children, dtype=np.int64)
+    next_np = to_numpy_array(backend, tree.next_cache, dtype=np.int64)
+    levels_np = to_numpy_array(backend, tree.top_levels, dtype=np.int32)
+    
+    min_level = int(tree.min_scale) if tree.min_scale is not None else -100
+    max_level = int(tree.max_scale) if tree.max_scale is not None else 100
+    
+    wrapper = covertreex_backend.CoverTreeWrapper(
+        points_np, parents_np, children_np, next_np, levels_np, min_level, max_level
+    )
+    
+    queries_np = to_numpy_array(backend, batch, dtype=np.float32)
+    
+    is_residual = (
+        context.config.metric == "residual_correlation" 
+        or context.config.residual_use_static_euclidean_tree
+    )
+    
+    if is_residual:
+        host_backend = get_residual_backend()
+        
+        # For residual query, queries_np must be decodable to indices
+        query_indices = decode_indices(host_backend, queries_np)
+        
+        # For residual query on Static Tree, we need node_to_dataset mapping.
+        # Try decode tree points
+        try:
+            tree_indices = decode_indices(host_backend, points_np)
+        except ValueError:
+            # Fallback: Identity
+            if points_np.shape[0] == host_backend.num_points:
+                tree_indices = np.arange(host_backend.num_points, dtype=np.int64)
+            else:
+                raise RuntimeError("Cannot map tree nodes to dataset indices for residual query.")
+        
+        node_to_dataset = tree_indices.tolist()
+        
+        v_matrix = host_backend.v_matrix
+        p_diag = host_backend.p_diag
+        coords = host_backend.kernel_points_f32
+        rbf_var = float(getattr(host_backend, "rbf_variance", 1.0))
+        rbf_ls = getattr(host_backend, "rbf_lengthscale", 1.0)
+        if np.ndim(rbf_ls) == 0:
+            dim = coords.shape[1]
+            rbf_ls = np.full(dim, float(rbf_ls), dtype=np.float32)
+        else:
+            rbf_ls = np.asarray(rbf_ls, dtype=np.float32)
+            
+        indices, dists = wrapper.knn_query_residual(
+            query_indices,
+            node_to_dataset,
+            v_matrix,
+            p_diag,
+            coords,
+            rbf_var,
+            rbf_ls,
+            k
+        )
+    else:
+        indices, dists = wrapper.knn_query(queries_np, k)
+        
+    sorted_indices = backend.asarray(indices, dtype=backend.default_int)
+    sorted_distances = backend.asarray(dists, dtype=backend.default_float)
+    
+    if not return_distances:
+        if sorted_indices.shape[0] == 1:
+            squeezed = sorted_indices[0]
+            return squeezed if squeezed.shape[0] > 1 else squeezed[0]
+        return sorted_indices
+
     if sorted_indices.shape[0] == 1:
         squeezed_idx = sorted_indices[0]
         squeezed_dist = sorted_distances[0]

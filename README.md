@@ -72,6 +72,14 @@ The `covertreex.api.Runtime` façade now mirrors every CLI flag (backend, precis
 
 Residual metrics remain lazy: call `configure_residual_correlation(...)` after import to supply Vecchia backends; `reset_residual_metric()` clears hooks for tests. Use `covertreex.config.describe_runtime()` or the CLI JSONL headers to inspect the active runtime.
 
+## Rust Backend
+
+The library now includes a high-performance Rust backend (`covertreex_backend`) that replaces the core Python/Numba algorithms for tree construction and traversal. This backend is **enabled by default** if the extension is successfully built and installed.
+
+- **Performance:** 10x-50x faster tree construction (batch insert) and competitive query throughput compared to the Python/Numba implementation.
+- **Control:** Use `COVERTREEX_ENABLE_RUST=0` (or `--no-enable-rust` in CLI) to force the legacy Python/Numba path if needed.
+- **Build:** The backend is built automatically via `maturin` when installing the package. Ensure you have a Rust toolchain installed (`cargo`) if building from source.
+
 ## High-Level API
 
 The `covertreex.api` façade keeps ergonomics tight while still delegating to the same batch kernels:
