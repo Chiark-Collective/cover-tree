@@ -255,6 +255,13 @@ Until those traversal improvements ship, keep the residual grid in place for det
 
 - Residual mode requires `backend.name == "numpy"` (NumPy backend) until the GPU/JAX kernels are ported.
 - The decoder must map tree payloads to dataset indices; if trees store transformed buffers, supply a custom `point_decoder` when creating `ResidualCorrHostData`.
+
+## Residual-only Rust path vs PCCT (Euclidean) build
+
+- PCCT CLI path (Hilbert + conflict graph on Euclidean coords) builds a Euclidean tree, then overlays the residual metric; it enables telemetry/gating and uses batch ordering but pays ~30–35 s to build 50 k×3 trees.
+- Rust “index tree” path (`CoverTreeWrapper.insert_residual`) stores only dataset ids (dimension = 1) and uses the residual metric for both build and query. It skips Hilbert ordering and the Python telemetry surface. On commit `5c63111` this built 50 k points in ~1.5 s (rust query ~6.2 s, residual) versus the ~31–33 s PCCT build.
+- The Rust builder still runs per-level conflict detection (Rayon-parallel filtering + greedy MIS). For true residual distances this pairwise step can dominate; there is no prefix scheduling or gate logic here. Query dispatch is parallelised across queries.
+- Use the index-tree path when you only need residual correlation and want the fastest possible build; keep using the PCCT/Hilbert path when you need telemetry, gating, or to reuse the Euclidean tree.
 - The chunk kernel honours `chunk_size`; tune it to balance host-side streaming vs. cache reuse.
 - `COVERTREEX_RESIDUAL_STREAM_TILE` (CLI `--residual-stream-tile`) caps the dense streamer’s tile size. The runtime now defaults to `min(scope_limit, backend.chunk_size)` (64 entries when Gate‑1 is off), and the override lets auditors reproduce the historical 512-entry scans or probe smaller tiles without code edits.
 - Setting `COVERTREEX_ENABLE_SPARSE_TRAVERSAL=1` now engages residual streaming automatically when the metric is residual-correlation; otherwise, traversal falls back to the dense mask path.

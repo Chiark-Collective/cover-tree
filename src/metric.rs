@@ -60,7 +60,7 @@ where
             inv_ls.push(T::one() / safe);
         }
 
-        let mut scaled_coords = coords.to_owned();
+        let mut scaled_coords = coords.as_standard_layout().to_owned();
         for mut row in scaled_coords.outer_iter_mut() {
             for (val, inv) in row.iter_mut().zip(inv_ls.iter()) {
                 *val = *val * *inv;
