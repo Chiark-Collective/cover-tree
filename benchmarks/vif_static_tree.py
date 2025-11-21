@@ -9,64 +9,74 @@ from covertreex.metrics.residual import (
 )
 
 def generate_synthetic_data(n_points, d=3, rank=16, seed=42):
-    """Generate synthetic data: Coordinates X and Latent Factors V."""
+    """Generate synthetic data consistent with RBF prior."""
     rng = np.random.default_rng(seed)
     X = rng.normal(size=(n_points, d)).astype(np.float32)
     
-    # Generate random V matrix (N, Rank) simulating L^{-1} K(X, U)
-    V = rng.normal(size=(n_points, rank)).astype(np.float32)
+    # K_true(x, y) = 1.0 * exp(-dist^2 / (2 * 0.5)) = exp(-dist^2)
+    # Let's use ls=sqrt(0.5) -> 2*ls^2 = 1.
+    # K_true = exp(-|x-y|^2).
     
-    # Diagonal variances (simulated)
-    # p_i = K(x,x) - ||v_i||^2. Let's just make it positive random.
-    p_diag = rng.uniform(0.1, 1.0, size=n_points).astype(np.float32)
+    # V matrix (Inducing point approximation)
+    # V = random
+    V = rng.normal(size=(n_points, rank)).astype(np.float32) * 0.1
     
-    # Kernel Diagonal (K(x,x))
-    kernel_diag = np.sum(V**2, axis=1) + p_diag
+    # P diag = diag(K_true - V V').
+    # We need K_true diagonal. K(x,x) = 1.0.
+    # p_i = 1.0 - ||v_i||^2.
+    # Ensure positive.
+    v_norms = np.sum(V**2, axis=1)
+    p_diag = (1.0 - v_norms).astype(np.float32)
+    p_diag[p_diag < 0.1] = 0.1 # clip
+    
+    # Kernel Diagonal
+    kernel_diag = np.ones(n_points, dtype=np.float32)
     
     return X, V, p_diag, kernel_diag
 
 def mock_kernel_provider(row_idx, col_idx):
-    """Slow mock kernel provider for fallback/verification."""
-    # In a real scenario, this computes K(X_i, X_j).
-    # Here we just return identity or random for simplicity, 
-    # BUT since VIF uses (K - VV')/sqrt(...), we need consistency.
-    # Let's assume we don't use the kernel_provider for the V-matrix path
-    # except for the 'distance_block_no_gate' check which usually needs it?
-    # Actually, `compute_residual_distances` uses kernel provider for the exact residual distance.
-    # d = sqrt(1 - |rho|). rho = (K - v.v') / sqrt(sig*sig)
-    # So we need a consistent K.
-    # Let's fake K such that K_ij = (v_i . v_j) + delta_ij * p_i + small_noise
-    # This implies rho = small_noise / sqrt... ~= 0.
-    # To make it interesting, let's make K_ij = (v_i . v_j) + random_correlation.
-    
-    # This is slow for large N, but fine for small blocks.
-    # Global arrays hack
-    global _GLOBAL_V, _GLOBAL_P
-    v_rows = _GLOBAL_V[row_idx]
-    v_cols = _GLOBAL_V[col_idx]
-    dot = v_rows @ v_cols.T
-    
-    # Add some spatial correlation based on X?
-    # For the benchmark, let's just say K = V@V.T + diag(P) + random_structure
-    # The 'residual' is just the 'random_structure'.
-    # Let's make the residual correlated with spatial distance to test the "Static Tree" hypothesis.
-    # Residual Covariance R_ij = exp(-dist(X_i, X_j)) * scale.
-    # Then K_ij = V_i V_j^T + R_ij.
-    
+    """RBF Kernel Provider (Python Reference)."""
     global _GLOBAL_X
     x_rows = _GLOBAL_X[row_idx]
     x_cols = _GLOBAL_X[col_idx]
     
-    # Simple RBF on X for residual
-    # Ensure 2D
     if x_rows.ndim == 1: x_rows = x_rows[None, :]
     if x_cols.ndim == 1: x_cols = x_cols[None, :]
     
     diff = x_rows[:, None, :] - x_cols[None, :, :]
     dist_sq = np.sum(diff**2, axis=-1)
-    residual_cov = 0.5 * np.exp(-dist_sq) # Strong spatial correlation
+    # K = 1.0 * exp(-dist_sq / 1.0) (ls^2 = 0.5? No, previous was 0.5 * exp(-d^2))
+    # Let's stick to simple: K = exp(-dist_sq).
+    # Var=1.0, ls=1/sqrt(2) approx 0.707.
     
-    return dot.astype(np.float64) + residual_cov
+    k_val = np.exp(-dist_sq)
+    return k_val.astype(np.float64)
+
+def evaluate_correlation(host_data, N, num_samples=1000):
+    """Evaluate correlation between Euclidean and Residual distances."""
+    print("Evaluating Metric Correlation...")
+    rng = np.random.default_rng(42)
+    idx1 = rng.integers(0, N, size=num_samples)
+    idx2 = rng.integers(0, N, size=num_samples)
+    
+    # Compute Euclidean
+    # Need coords. host_data.kernel_points_f32
+    X = host_data.kernel_points_f32
+    diff = X[idx1] - X[idx2]
+    d_euc = np.linalg.norm(diff, axis=1)
+    
+    # Compute Residual
+    from covertreex.metrics.residual import compute_residual_distances
+    # compute_residual_distances returns matrix (lhs, rhs)
+    d_res_matrix = compute_residual_distances(host_data, idx1, idx2)
+    d_res = np.diagonal(d_res_matrix)
+    
+    from scipy.stats import pearsonr, spearmanr
+    p_r, _ = pearsonr(d_euc, d_res)
+    s_r, _ = spearmanr(d_euc, d_res)
+    
+    print(f"Correlation (Euclidean vs Residual): Pearson={p_r:.4f}, Spearman={s_r:.4f}")
+    return p_r
 
 def run_benchmark():
     N = 10_000 # Small enough for brute force comparison
@@ -90,7 +100,16 @@ def run_benchmark():
         kernel_provider=mock_kernel_provider,
         chunk_size=512
     )
+    
+    # Inject RBF params for Numba Fast Path
+    object.__setattr__(host_data, "rbf_variance", 1.0)
+    object.__setattr__(host_data, "rbf_lengthscale", 0.70710678) # sqrt(0.5)
+    object.__setattr__(host_data, "kernel_points_f32", X.astype(np.float32)) # Coords
+    
     configure_residual_correlation(host_data)
+    
+    # Evaluate Correlation
+    evaluate_correlation(host_data, N)
     
     # 2. Build PCCT (Euclidean)
     print("Building PCCT (Euclidean)...")

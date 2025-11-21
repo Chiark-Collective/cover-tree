@@ -15,7 +15,7 @@ from covertreex.metrics.residual.core import (
     ResidualCorrHostData,
 )
 from covertreex.queries.utils import to_numpy_array, ChildChainCache
-
+from covertreex.queries._residual_knn_numba import residual_knn_search_numba
 
 def _batch_residual_distances(
     backend: ResidualCorrHostData,
@@ -88,7 +88,19 @@ def residual_knn_query(
     query_indices = decode_indices(host_backend, queries_np)
     
     points_np = to_numpy_array(backend, tree.points, dtype=np.float64)
-    tree_indices = decode_indices(host_backend, points_np)
+    try:
+        tree_indices = decode_indices(host_backend, points_np)
+    except ValueError:
+        # Fallback for Static Tree mode:
+        # If the tree was built on Coordinates (floats), decode_indices fails.
+        # If the tree size matches the backend dataset size, assume 1:1 mapping (Identity).
+        if (
+            context.config.residual_use_static_euclidean_tree
+            and points_np.shape[0] == host_backend.num_points
+        ):
+            tree_indices = np.arange(host_backend.num_points, dtype=np.int64)
+        else:
+            raise
     
     parents_np = to_numpy_array(backend, tree.parents, dtype=np.int64)
     children_np = to_numpy_array(backend, tree.children, dtype=np.int64)
@@ -105,18 +117,107 @@ def residual_knn_query(
     results_distances = []
     
     # For each query, perform search
-    for q_idx, q_dataset_idx in enumerate(query_indices):
-        indices, dists = _single_query_residual_knn(
-            q_dataset_idx,
-            tree_indices=tree_indices,
-            si_cache=si_cache_np,
-            child_cache=child_cache,
-            root_indices=root_candidates,
-            k=k,
-            host_backend=host_backend,
-        )
-        results_indices.append(indices)
-        results_distances.append(dists)
+    
+    # Check for Numba RBF Fast Path
+    # We look for 'rbf_variance' and 'rbf_lengthscale' on the host backend
+    # This is a convention for the VIF application to enable the fast path.
+    rbf_var = getattr(host_backend, "rbf_variance", None)
+    rbf_ls = getattr(host_backend, "rbf_lengthscale", None)
+    kernel_coords = host_backend.kernel_points_f32
+    
+    use_numba = (
+        context.config.enable_numba 
+        and rbf_var is not None 
+        and rbf_ls is not None 
+        and kernel_coords is not None
+    )
+    
+    if use_numba:
+        # Pre-allocate Numba Scratchpads
+        # Max heap size: Number of nodes in tree? Or dynamic?
+        # Our heap implementation uses fixed size array?
+        # _push_min_heap takes an array. We need it large enough.
+        # For a Cover Tree, the queue size can be large but bounded by O(N).
+        # Let's allocate reasonable scratchpad.
+        max_heap_size = 1024 * 64 # 64k nodes queue?
+        heap_keys = np.empty(max_heap_size, dtype=np.float64)
+        heap_vals = np.empty(max_heap_size, dtype=np.int64)
+        heap_extras = np.empty(max_heap_size, dtype=np.int64)
+        
+        knn_keys = np.empty(k, dtype=np.float64)
+        knn_indices = np.empty(k, dtype=np.int64)
+        
+        # Bitset for visited
+        n_nodes = parents_np.shape[0]
+        n_words = (n_nodes + 63) // 64
+        visited_bitset = np.empty(n_words, dtype=np.int64)
+        
+        # Map Node Index -> Dataset Index (Identity or Mapping)
+        # tree_indices is the mapping.
+        node_to_dataset = tree_indices
+        
+        # Prepare Residual Arrays (ensure float32/64 compat)
+        # The Numba kernel expects float64?
+        # _compute_residual_dist_rbf_batch uses `v_matrix[q_idx]` which is float32.
+        # It promotes to float64 in calc.
+        
+        v_matrix = host_backend.v_matrix
+        p_diag = host_backend.p_diag
+        v_norm_sq = host_backend.v_norm_sq
+        
+        for q_idx, q_dataset_idx in enumerate(query_indices):
+            # Numba Call
+            indices, dists = residual_knn_search_numba(
+                children_np,
+                next_cache_np,
+                parents_np,
+                node_to_dataset,
+                v_matrix,
+                p_diag,
+                v_norm_sq,
+                kernel_coords,
+                float(rbf_var),
+                float(rbf_ls),
+                int(q_dataset_idx),
+                int(k),
+                heap_keys,
+                heap_vals,
+                heap_extras,
+                knn_keys,
+                knn_indices,
+                visited_bitset
+            )
+            # Result indices are Node Indices?
+            # Wait, `_update_knn_sorted` stores `node_idx`.
+            # But standard KNN returns DATASET indices usually?
+            # No, `knn` usually returns indices into the tree?
+            # The standard `_knn_impl` returns `indices_arr`. `_single_query_knn` returns `indices` from `best_heap`.
+            # `best_heap` stores `node_idx`.
+            # So we return Node Indices.
+            # BUT, standard `knn` wrapper returns `sorted_indices`.
+            # Users usually expect indices into the dataset if tree.points corresponds to dataset.
+            # If `residual_knn_search_numba` returns node indices, we are consistent with standard `knn`.
+            # But wait, `residual_knn_query` in Python returned `batch_nodes` which were node indices?
+            # No, `_single_query_residual_knn` pushed `int(root)` (node idx) to heap.
+            # And returned `indices` from heap. So yes, Node Indices.
+            # OK.
+            results_indices.append(indices.copy())
+            results_distances.append(dists.copy())
+            
+    else:
+        # Python Fallback
+        for q_idx, q_dataset_idx in enumerate(query_indices):
+            indices, dists = _single_query_residual_knn(
+                q_dataset_idx,
+                tree_indices=tree_indices,
+                si_cache=si_cache_np,
+                child_cache=child_cache,
+                root_indices=root_candidates,
+                k=k,
+                host_backend=host_backend,
+            )
+            results_indices.append(indices)
+            results_distances.append(dists)
         
     indices_arr = np.stack(results_indices, axis=0)
     distances_arr = np.stack(results_distances, axis=0)
