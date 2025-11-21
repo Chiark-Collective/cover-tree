@@ -1,4 +1,4 @@
-use ndarray::ArrayView2;
+use ndarray::{Array2, ArrayView2};
 use num_traits::Float;
 use std::fmt::Debug;
 
@@ -10,8 +10,9 @@ pub trait Metric<T>: Sync + Send {
 #[derive(Copy, Clone)]
 pub struct Euclidean;
 
-impl<T> Metric<T> for Euclidean 
-where T: Float + Debug + Send + Sync + std::iter::Sum
+impl<T> Metric<T> for Euclidean
+where
+    T: Float + Debug + Send + Sync + std::iter::Sum,
 {
     fn distance(&self, p1: &[T], p2: &[T]) -> T {
         self.distance_sq(p1, p2).sqrt()
@@ -29,56 +30,94 @@ where T: Float + Debug + Send + Sync + std::iter::Sum
 }
 
 // Residual Metric operates on INDICES into the V-Matrix and Coords
-#[derive(Copy, Clone)]
 pub struct ResidualMetric<'a, T> {
     pub v_matrix: ArrayView2<'a, T>,
     pub p_diag: &'a [T],
-    pub coords: ArrayView2<'a, T>,
     pub rbf_var: T,
-    pub rbf_ls_sq: &'a [T],
+    pub scaled_coords: Array2<T>,
+    pub scaled_norms: Vec<T>,
+    pub neg_half: T,
 }
 
-impl<'a, T> ResidualMetric<'a, T> 
-where T: Float + Debug + Send + Sync + std::iter::Sum + 'a
+impl<'a, T> ResidualMetric<'a, T>
+where
+    T: Float + Debug + Send + Sync + std::iter::Sum + 'a,
 {
-    pub fn distance_idx(&self, idx_1: usize, idx_2: usize) -> T {
-        let x_view = self.coords.row(idx_1);
-        let x = x_view.as_slice().unwrap();
-        
-        let y_view = self.coords.row(idx_2);
-        let y = y_view.as_slice().unwrap();
-        
-        let d2: T = x.iter()
-            .zip(y.iter())
-            .zip(self.rbf_ls_sq.iter())
-            .map(|((&xi, &yi), &ls_sq)| {
-                let diff = xi - yi;
-                (diff * diff) / ls_sq
-            })
-            .sum();
-        
-        let _two = T::from(2.0).unwrap();
+    pub fn new(
+        v_matrix: ArrayView2<'a, T>,
+        p_diag: &'a [T],
+        coords: ArrayView2<'a, T>,
+        rbf_var: T,
+        rbf_ls: &'a [T],
+    ) -> Self {
+        let dim = coords.ncols();
+        let eps = T::from(1e-6).unwrap();
+        let fallback_ls = *rbf_ls.get(0).unwrap_or(&T::one());
+        let mut inv_ls: Vec<T> = Vec::with_capacity(dim);
+        for i in 0..dim {
+            let raw = *rbf_ls.get(i).unwrap_or(&fallback_ls);
+            let safe = if raw.abs() < eps { eps } else { raw };
+            inv_ls.push(T::one() / safe);
+        }
+
+        let mut scaled_coords = coords.to_owned();
+        for mut row in scaled_coords.outer_iter_mut() {
+            for (val, inv) in row.iter_mut().zip(inv_ls.iter()) {
+                *val = *val * *inv;
+            }
+        }
+
+        let mut scaled_norms: Vec<T> = Vec::with_capacity(scaled_coords.nrows());
+        for row in scaled_coords.outer_iter() {
+            let norm: T = row.iter().map(|v| *v * *v).sum();
+            scaled_norms.push(norm);
+        }
+
         let neg_half = T::from(-0.5).unwrap();
-        let k_val = self.rbf_var * (neg_half * d2).exp();
-        
+
+        ResidualMetric {
+            v_matrix,
+            p_diag,
+            rbf_var,
+            scaled_coords,
+            scaled_norms,
+            neg_half,
+        }
+    }
+
+    pub fn distance_idx(&self, idx_1: usize, idx_2: usize) -> T {
+        let x_view = self.scaled_coords.row(idx_1);
+        let x = x_view.as_slice().unwrap();
+
+        let y_view = self.scaled_coords.row(idx_2);
+        let y = y_view.as_slice().unwrap();
+
+        let dot_scaled: T = x.iter().zip(y.iter()).map(|(&xi, &yi)| xi * yi).sum();
+
+        let two = T::from(2.0).unwrap();
+        let mut d2 = self.scaled_norms[idx_1] + self.scaled_norms[idx_2] - two * dot_scaled;
+        if d2 < T::zero() {
+            d2 = T::zero();
+        }
+
+        let k_val = self.rbf_var * (self.neg_half * d2).exp();
+
         let v1_view = self.v_matrix.row(idx_1);
-        let v1 = v1_view.as_slice().unwrap();
-        
         let v2_view = self.v_matrix.row(idx_2);
-        let v2 = v2_view.as_slice().unwrap();
-        
-        let dot: T = v1.iter()
-            .zip(v2.iter())
+
+        let dot: T = v1_view
+            .iter()
+            .zip(v2_view.iter())
             .map(|(&a, &b)| a * b)
             .sum();
-        
+
         let denom = (self.p_diag[idx_1] * self.p_diag[idx_2]).sqrt();
         let eps = T::from(1e-9).unwrap();
-        
+
         if denom < eps {
-            return T::one(); 
+            return T::one();
         }
-        
+
         let rho = (k_val - dot) / denom;
         let one = T::one();
         let neg_one = -one;
@@ -87,8 +126,9 @@ where T: Float + Debug + Send + Sync + std::iter::Sum + 'a
     }
 }
 
-impl<'a, T> Metric<T> for ResidualMetric<'a, T> 
-where T: Float + Debug + Send + Sync + std::iter::Sum + 'a
+impl<'a, T> Metric<T> for ResidualMetric<'a, T>
+where
+    T: Float + Debug + Send + Sync + std::iter::Sum + 'a,
 {
     fn distance(&self, p1: &[T], p2: &[T]) -> T {
         // Assume points are 1D arrays containing a single value which is the index
@@ -96,7 +136,7 @@ where T: Float + Debug + Send + Sync + std::iter::Sum + 'a
         let idx2 = p2[0].to_usize().unwrap();
         self.distance_idx(idx1, idx2)
     }
-    
+
     fn distance_sq(&self, p1: &[T], p2: &[T]) -> T {
         let d = self.distance(p1, p2);
         d * d

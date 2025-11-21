@@ -161,12 +161,17 @@ def _knn_impl(
     if k > tree.num_points:
         raise ValueError("k cannot exceed the number of points in the tree.")
 
-    batch = backend.asarray(query_points, dtype=backend.default_float)
-    if batch.ndim == 1:
-        batch = batch[None, :]
-
     context = context or cx_config.runtime_context()
     runtime = context.config
+    query_array = np.asarray(query_points)
+    use_index_payload = (
+        (runtime.metric == "residual_correlation" or runtime.residual_use_static_euclidean_tree)
+        and query_array.dtype.kind in {"i", "u"}
+    )
+    batch_dtype = backend.default_int if use_index_payload else backend.default_float
+    batch = backend.asarray(query_points, dtype=batch_dtype)
+    if batch.ndim == 1:
+        batch = batch.reshape(-1, 1) if use_index_payload else batch[None, :]
     
     if runtime.enable_rust:
         try:

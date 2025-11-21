@@ -276,6 +276,11 @@ def benchmark_knn_latency(
     from covertreex.queries.knn import knn
     
     resolved_context = _ensure_context(context)
+    runtime = resolved_context.config
+    is_residual = (
+        runtime.metric == "residual_correlation"
+        or runtime.residual_use_static_euclidean_tree
+    )
     tree_build_seconds: float | None = None
     if prebuilt_tree is None:
         tree, _, tree_build_seconds = build_tree(
@@ -300,16 +305,28 @@ def benchmark_knn_latency(
     backend = tree.backend
     if prebuilt_queries is None:
         query_rng = default_rng(seed + 1)
-        queries = _generate_backend_points(
-            query_rng,
-            query_count,
-            dimension,
-            backend=backend,
-        )
+        if is_residual:
+            indices = query_rng.integers(
+                0,
+                tree.num_points,
+                size=query_count,
+                endpoint=False,
+                dtype=np.int64,
+            ).reshape(-1, 1)
+            queries = backend.asarray(indices, dtype=backend.default_int)
+        else:
+            queries = _generate_backend_points(
+                query_rng,
+                query_count,
+                dimension,
+                backend=backend,
+            )
     else:
-        queries = backend.asarray(
-            prebuilt_queries, dtype=backend.default_float
-        )
+        qp = np.asarray(prebuilt_queries)
+        if is_residual and qp.dtype.kind in {"i", "u"}:
+            queries = backend.asarray(qp, dtype=backend.default_int)
+        else:
+            queries = backend.asarray(prebuilt_queries, dtype=backend.default_float)
     
     with measure_resources() as query_stats:
         knn(tree, queries, k=k, context=resolved_context)

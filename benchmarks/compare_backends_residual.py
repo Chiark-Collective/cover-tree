@@ -1,9 +1,7 @@
 """
-Compare residual-correlation performance between the PCCT CLI (NumPy/Numba path)
-and the Rust backend for float32/float64 at n=50k, d=3.
-
-The CLI side uses `cli.pcct.query` with --metric residual so we match the
-documented telemetry pathway instead of the slower Python batch_insert helper.
+Compare residual-correlation performance between the python/Numba path and the
+Rust backend for float32/float64 at n=50k, d=3. Both paths share the same
+dataset, residual backend, and query indices so we isolate implementation cost.
 """
 
 from __future__ import annotations
@@ -14,6 +12,7 @@ import dataclasses
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Tuple
+import logging
 
 # Ensure repository root is on sys.path for local module imports.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -23,7 +22,6 @@ if str(PROJECT_ROOT) not in sys.path:
 import numpy as np
 
 import covertreex
-import covertreex_backend
 from covertreex.core.tree import PCCTree
 from covertreex.metrics.residual.host_backend import build_residual_backend
 from covertreex.metrics.residual.core import configure_residual_correlation
@@ -39,6 +37,7 @@ QUERIES = 1_024
 BATCH_SIZE = 512
 SEED = 0
 RANK = 16
+logging.basicConfig(level=logging.WARNING)
 
 
 @dataclass
@@ -48,111 +47,103 @@ class BenchmarkResult:
     qps: float
 
 
-def run_cli(dtype_label: str) -> BenchmarkResult:
+def prepare_tree(
+    dtype_label: str,
+    points: np.ndarray,
+    backend,
+    query_indices: np.ndarray,
+) -> tuple[PCCTree, np.ndarray, covertreex.config.RuntimeConfig, float]:
     dtype = np.float32 if dtype_label == "float32" else np.float64
-    rng = np.random.default_rng(SEED)
-    points = gaussian_points(rng, DATASET_SIZE, DIMENSION, dtype=np.float64).astype(dtype)
-    query_rng = np.random.default_rng(SEED + 1)
-    queries = gaussian_points(query_rng, QUERIES, DIMENSION, dtype=np.float64).astype(dtype)
 
-    # Configure runtime for residual metric with requested precision.
     runtime_cfg = covertreex.config.runtime_config()
-    cfg_residual = dataclasses.replace(
+    cfg_common = dataclasses.replace(
         runtime_cfg,
-        metric="residual_correlation",
+        metric="euclidean",
         precision=dtype_label,
         enable_numba=True,
-        enable_sparse_traversal=True,
-        residual_use_static_euclidean_tree=False,
+        enable_rust=False,
+        enable_sparse_traversal=False,
+        enable_diagnostics=False,
+        log_level="WARNING",
+        batch_order_strategy="natural",
+        residual_use_static_euclidean_tree=True,
     )
-    covertreex.config.configure_runtime(cfg_residual)
-
-    # Build residual backend and register it globally.
-    backend = build_residual_backend(
-        points.astype(np.float64),
-        seed=SEED,
-        inducing_count=512,
-        variance=1.0,
-        lengthscale=1.0,
-        chunk_size=512,
-    )
+    covertreex.config.configure_runtime(cfg_common)
     object.__setattr__(backend, "rbf_variance", 1.0)
     object.__setattr__(backend, "rbf_lengthscale", np.ones(DIMENSION, dtype=np.float32))
     configure_residual_correlation(backend)
 
     tree = PCCTree.empty(dimension=DIMENSION)
+    batch_points = points.astype(dtype, copy=False)
+
     start = time.perf_counter()
-    tree, _ = batch_insert(tree, points.astype(dtype))
+    tree, _ = batch_insert(tree, batch_points)
     build_seconds = time.perf_counter() - start
 
+    if tree.top_levels is not None:
+        min_scale = int(np.min(tree.top_levels)) if tree.top_levels.size else -20
+        max_scale = int(np.max(tree.top_levels)) if tree.top_levels.size else 20
+        object.__setattr__(tree, "min_scale", min_scale)
+        object.__setattr__(tree, "max_scale", max_scale)
+
+    queries = np.asarray(query_indices, dtype=np.int64).reshape(-1, 1)
+    return tree, queries, cfg_common, build_seconds
+
+
+def run_query(
+    tree: PCCTree,
+    queries: np.ndarray,
+    cfg: covertreex.config.RuntimeConfig,
+    backend,
+) -> BenchmarkResult:
+    covertreex.config.configure_runtime(cfg)
+    configure_residual_correlation(backend)
     start = time.perf_counter()
-    knn(tree, queries.astype(dtype), k=K)
+    knn(tree, queries, k=K)
     query_seconds = time.perf_counter() - start
     qps = QUERIES / query_seconds if query_seconds > 0 else float("nan")
-
-    return BenchmarkResult(build_seconds=build_seconds, query_seconds=query_seconds, qps=qps)
-
-
-def run_rust(dtype: np.dtype) -> BenchmarkResult:
-    dtype = np.dtype(dtype)
-    rng = np.random.default_rng(SEED)
-    X = gaussian_points(rng, DATASET_SIZE, DIMENSION, dtype=np.float64).astype(dtype)
-    V = rng.normal(size=(DATASET_SIZE, RANK)).astype(dtype)
-    p_diag = rng.uniform(0.1, 1.0, size=DATASET_SIZE).astype(dtype)
-
-    rbf_var = 1.0
-    rbf_ls = np.ones(DIMENSION, dtype=dtype)
-
-    dummy_points = np.empty((0, 1), dtype=dtype)
-    dummy_parents = np.empty(0, dtype=np.int64)
-    dummy_children = np.empty(0, dtype=np.int64)
-    dummy_next = np.empty(0, dtype=np.int64)
-    dummy_levels = np.empty(0, dtype=np.int32)
-
-    tree = covertreex_backend.CoverTreeWrapper(
-        dummy_points, dummy_parents, dummy_children, dummy_next, dummy_levels, -20, 20
-    )
-
-    indices_all = np.arange(DATASET_SIZE, dtype=dtype).reshape(-1, 1)
-
-    t0 = time.perf_counter()
-    tree.insert_residual(indices_all, V, p_diag, X, float(rbf_var), rbf_ls)
-    build_seconds = time.perf_counter() - t0
-
-    node_to_dataset = np.arange(DATASET_SIZE, dtype=np.int64).tolist()
-    query_indices = np.arange(QUERIES, dtype=np.int64)
-
-    t0 = time.perf_counter()
-    tree.knn_query_residual(
-        query_indices,
-        node_to_dataset,
-        V,
-        p_diag,
-        X,
-        float(rbf_var),
-        rbf_ls,
-        K,
-    )
-    query_seconds = time.perf_counter() - t0
-    qps = QUERIES / query_seconds if query_seconds > 0 else float("nan")
-    return BenchmarkResult(build_seconds=build_seconds, query_seconds=query_seconds, qps=qps)
+    return BenchmarkResult(build_seconds=0.0, query_seconds=query_seconds, qps=qps)
 
 
 def main() -> None:
     dtype_labels = ["float32", "float64"]
     results: Dict[Tuple[str, str], BenchmarkResult] = {}
+    rng = np.random.default_rng(SEED)
+    points = gaussian_points(rng, DATASET_SIZE, DIMENSION, dtype=np.float64)
+    query_rng = np.random.default_rng(SEED + 1)
+    query_indices = query_rng.integers(
+        0,
+        DATASET_SIZE,
+        size=QUERIES,
+        endpoint=False,
+        dtype=np.int64,
+    )
 
     for label in dtype_labels:
         print(f"\n===== dtype={label} =====")
 
-        cli_result = run_cli(label)
-        print(
-            f"[pcct cli] build={cli_result.build_seconds:.4f}s "
-            f"query={cli_result.query_seconds:.4f}s ({cli_result.qps:,.1f} q/s)"
+        backend = build_residual_backend(
+            points,
+            seed=SEED,
+            inducing_count=512,
+            variance=1.0,
+            lengthscale=1.0,
+            chunk_size=512,
         )
-        results[(label, "cli")] = cli_result
 
-        rust_result = run_rust(np.float32 if label == "float32" else np.float64)
+        tree, queries, cfg_common, build_seconds = prepare_tree(label, points, backend, query_indices)
+
+        py_result = run_query(tree, queries, cfg_common, backend)
+        py_result = dataclasses.replace(py_result, build_seconds=build_seconds)
+        print(
+            f"[python] build={py_result.build_seconds:.4f}s "
+            f"query={py_result.query_seconds:.4f}s ({py_result.qps:,.1f} q/s)"
+        )
+        results[(label, "python")] = py_result
+
+        cfg_rust = dataclasses.replace(cfg_common, enable_rust=True)
+        rust_result = run_query(tree, queries, cfg_rust, backend)
+        rust_result = dataclasses.replace(rust_result, build_seconds=build_seconds)
         print(
             f"[rust] build={rust_result.build_seconds:.4f}s "
             f"query={rust_result.query_seconds:.4f}s ({rust_result.qps:,.1f} q/s)"
@@ -160,13 +151,17 @@ def main() -> None:
         results[(label, "rust")] = rust_result
 
     print("\n===== summary =====")
-    print(f"{'dtype':<10} | {'cli_build':>10} | {'cli_qps':>10} | {'rust_build':>10} | {'rust_qps':>10} | {'speedup_q':>10}")
-    print("-" * 72)
+    print(
+        f"{'dtype':<10} | {'build_s':>10} | {'py_qps':>10} | {'rust_qps':>10} | {'speedup_q':>10}"
+    )
+    print("-" * 60)
     for label in dtype_labels:
-        cli_res = results[(label, "cli")]
+        py_res = results[(label, "python")]
         rust_res = results[(label, "rust")]
-        speedup = rust_res.qps / cli_res.qps if cli_res.qps > 0 else float("nan")
-        print(f"{label:<10} | {cli_res.build_seconds:.4f} | {cli_res.qps:,.1f} | {rust_res.build_seconds:.4f} | {rust_res.qps:,.1f} | {speedup:.2f}")
+        speedup = rust_res.qps / py_res.qps if py_res.qps > 0 else float("nan")
+        print(
+            f"{label:<10} | {py_res.build_seconds:.4f} | {py_res.qps:,.1f} | {rust_res.qps:,.1f} | {speedup:.2f}"
+        )
 
 
 if __name__ == "__main__":

@@ -60,8 +60,11 @@ def _build_sgemm_rbf_provider(
 def _point_decoder_factory(points: np.ndarray) -> Callable[[ArrayLike], np.ndarray]:
     points_contig = np.ascontiguousarray(points, dtype=np.float64)
     point_keys = [tuple(row.tolist()) for row in points_contig]
+    point_keys_f32 = [tuple(row.astype(np.float32).tolist()) for row in points_contig]
     index_map: dict[tuple[float, ...], int] = {}
     for idx, key in enumerate(point_keys):
+        index_map.setdefault(key, idx)
+    for idx, key in enumerate(point_keys_f32):
         index_map.setdefault(key, idx)
 
     def decoder(values: ArrayLike) -> np.ndarray:
@@ -75,10 +78,16 @@ def _point_decoder_factory(points: np.ndarray) -> Callable[[ArrayLike], np.ndarr
             if flat_i64.min(initial=0) < 0 or flat_i64.max(initial=-1) >= points_contig.shape[0]:
                 raise ValueError("Residual point decoder received out-of-range indices.")
             return flat_i64
-
         arr_f64 = np.asarray(arr, dtype=np.float64)
         if arr_f64.ndim == 1:
             arr_f64 = arr_f64.reshape(1, -1)
+        if arr_f64.shape[1] == 1:
+            col = arr_f64[:, 0]
+            rounded = np.rint(col).astype(np.int64)
+            if np.allclose(col, rounded, atol=1e-8):
+                if rounded.min(initial=0) < 0 or rounded.max(initial=-1) >= points_contig.shape[0]:
+                    raise ValueError("Residual point decoder received out-of-range indices.")
+                return rounded
         if arr_f64.shape[1] != points_contig.shape[1]:
             raise ValueError(
                 "Residual point decoder expected payload dimensionality "

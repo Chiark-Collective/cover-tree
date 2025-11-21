@@ -21,8 +21,19 @@ if TYPE_CHECKING:  # pragma: no cover
 def _generate_datasets(options: "QueryCLIOptions") -> tuple[np.ndarray, np.ndarray]:
     point_rng = default_rng(options.seed)
     points = gaussian_points(point_rng, options.tree_points, options.dimension, dtype=np.float64)
-    query_rng = default_rng(options.seed + 1)
-    queries = gaussian_points(query_rng, options.queries, options.dimension, dtype=np.float64)
+    if options.metric == "residual":
+        query_rng = default_rng(options.seed + 1)
+        query_indices = query_rng.integers(
+            0,
+            options.tree_points,
+            size=options.queries,
+            endpoint=False,
+            dtype=np.int64,
+        )
+        queries = query_indices.reshape(-1, 1)
+    else:
+        query_rng = default_rng(options.seed + 1)
+        queries = gaussian_points(query_rng, options.queries, options.dimension, dtype=np.float64)
     return points, queries
 
 
@@ -50,6 +61,9 @@ def _print_baseline_results(
     queries: np.ndarray,
     benchmark_result,
 ) -> None:
+    if options.metric == "residual" and queries.ndim == 2 and queries.shape[1] == 1:
+        idx = np.asarray(queries, dtype=np.int64).reshape(-1)
+        queries = points[idx % points.shape[0]]
     baseline_results = run_baseline_comparisons(
         points,
         queries,

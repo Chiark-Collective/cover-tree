@@ -11,6 +11,8 @@ def test_point_decoder_accepts_indices_and_coords():
     np.testing.assert_array_equal(decoder(ids), np.array([2, 0], dtype=np.int64))
     ids_col = ids.reshape(-1, 1)
     np.testing.assert_array_equal(decoder(ids_col), np.array([2, 0], dtype=np.int64))
+    float_ids = ids_col.astype(np.float32)
+    np.testing.assert_array_equal(decoder(float_ids), np.array([2, 0], dtype=np.int64))
 
     # Coordinates map back to indices
     coords = np.array([[1.0, 1.0], [0.0, 0.0]], dtype=np.float64)

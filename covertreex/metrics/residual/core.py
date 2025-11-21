@@ -235,7 +235,10 @@ def _normalise_indices(indices: np.ndarray, total: int) -> np.ndarray:
 
 
 def decode_indices(host_backend: ResidualCorrHostData, payload: ArrayLike) -> np.ndarray:
-    raw = host_backend.point_decoder(payload)
+    try:
+        raw = host_backend.point_decoder(payload)
+    except KeyError as exc:
+        raise ValueError("Residual point decoder rejected payload.") from exc
     arr = np.asarray(raw, dtype=np.int64)
     if arr.ndim == 0:
         return arr.reshape(1)
