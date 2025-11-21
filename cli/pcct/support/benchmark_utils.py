@@ -10,9 +10,7 @@ from numpy.random import Generator, default_rng
 from covertreex import config as cx_config
 from covertreex.algo import batch_insert, batch_insert_prefix_doubling
 from covertreex.core.tree import PCCTree, TreeBackend
-from covertreex.queries.knn import knn
 from covertreex.telemetry import BenchmarkLogWriter, ResidualScopeCapRecorder
-from tests.utils.datasets import gaussian_points
 
 from .runtime_utils import resolve_backend, measure_resources
 
@@ -44,8 +42,49 @@ def _generate_backend_points(
     *,
     backend: TreeBackend,
 ) -> np.ndarray:
+    from tests.utils.datasets import gaussian_points
     samples = gaussian_points(rng, count, dimension, dtype=np.float64)
     return backend.asarray(samples, dtype=backend.default_float)
+
+
+def _ensure_residual_backend(
+    points: np.ndarray,
+    context: cx_config.RuntimeContext,
+) -> None:
+    from covertreex.metrics.residual import (
+        ResidualCorrHostData,
+        configure_residual_correlation,
+        get_residual_backend,
+    )
+    try:
+        get_residual_backend()
+        return
+    except RuntimeError:
+        pass
+    
+    # Auto-configure dummy backend
+    N, D = points.shape
+    # Rank 16 default
+    rank = 16
+    rng = default_rng(42)
+    V = rng.normal(size=(N, rank)).astype(np.float32)
+    p_diag = rng.uniform(0.1, 1.0, size=N).astype(np.float32)
+    kernel_diag = np.ones(N, dtype=np.float32)
+    
+    def dummy_provider(r, c):
+        return np.zeros((r.size, c.size), dtype=np.float64)
+        
+    host_data = ResidualCorrHostData(
+        v_matrix=V,
+        p_diag=p_diag,
+        kernel_diag=kernel_diag,
+        kernel_provider=dummy_provider,
+        chunk_size=512
+    )
+    # Inject points for potential Numba usage or debugging
+    object.__setattr__(host_data, "kernel_points_f32", points.astype(np.float32))
+    
+    configure_residual_correlation(host_data, context=context)
 
 
 def build_tree(
@@ -61,10 +100,22 @@ def build_tree(
     plan_callback: Callable[[Any, int, int], Mapping[str, Any] | None] | None = None,
     context: cx_config.RuntimeContext | None = None,
 ) -> Tuple[PCCTree, np.ndarray, float]:
+    from tests.utils.datasets import gaussian_points
+    
     resolved_context = _ensure_context(context)
     backend = resolve_backend(context=resolved_context)
     tree = PCCTree.empty(dimension=dimension, backend=backend)
     runtime = resolved_context.config
+    
+    is_residual = runtime.metric == "residual_correlation"
+    
+    # If residual, we MUST generate all points upfront to configure backend
+    if is_residual and prebuilt_points is None:
+        rng = default_rng(seed)
+        prebuilt_points = gaussian_points(rng, tree_points, dimension, dtype=np.float64)
+        
+    if is_residual:
+        _ensure_residual_backend(prebuilt_points, resolved_context)
 
     if build_mode == "prefix":
         if prebuilt_points is not None:
@@ -72,7 +123,15 @@ def build_tree(
         else:
             rng = default_rng(seed)
             points_np = gaussian_points(rng, tree_points, dimension, dtype=np.float64)
-        batch = backend.asarray(points_np, dtype=backend.default_float)
+            
+        # For residual, pass INDICES
+        if is_residual:
+            batch_data = np.arange(points_np.shape[0], dtype=np.int64).reshape(-1, 1)
+            tree = PCCTree.empty(dimension=1, backend=backend)
+            batch = backend.asarray(batch_data, dtype=backend.default_int)
+        else:
+            batch = backend.asarray(points_np, dtype=backend.default_float)
+            
         start = time.perf_counter()
         tree, prefix_result = batch_insert_prefix_doubling(
             tree,
@@ -122,15 +181,23 @@ def build_tree(
         while idx * batch_size < total:
             start_idx = idx * batch_size
             end_idx = min(start_idx + batch_size, total)
-            batch_np = points_np[start_idx:end_idx]
-            batch = backend.asarray(batch_np, dtype=backend.default_float)
+            
+            if is_residual:
+                batch_np = np.arange(start_idx, end_idx, dtype=np.int64).reshape(-1, 1)
+                batch = backend.asarray(batch_np, dtype=backend.default_int)
+                if idx == 0:
+                     tree = PCCTree.empty(dimension=1, backend=backend)
+            else:
+                batch_np = points_np[start_idx:end_idx]
+                batch = backend.asarray(batch_np, dtype=backend.default_float)
+                
             tree, plan = batch_insert(
                 tree,
                 batch,
                 mis_seed=seed + idx,
                 context=resolved_context,
             )
-            extra_payload: Mapping[str, Any] | None = None
+            extra_payload = None
             if plan_callback is not None:
                 extra_payload = plan_callback(plan, idx, int(batch_np.shape[0]))
             if log_writer is not None:
@@ -161,7 +228,7 @@ def build_tree(
                 mis_seed=seed + idx,
                 context=resolved_context,
             )
-            extra_payload: Mapping[str, Any] | None = None
+            extra_payload = None
             if plan_callback is not None:
                 extra_payload = plan_callback(plan, idx, current)
             if log_writer is not None:
@@ -178,10 +245,13 @@ def build_tree(
             idx += 1
 
     build_seconds = time.perf_counter() - start
-    if buffers:
+    if prebuilt_points is not None:
+        pass
+    elif buffers:
         points_np = np.concatenate(buffers, axis=0)
     else:
         points_np = np.empty((0, dimension), dtype=np.float64)
+        
     return tree, points_np, build_seconds
 
 
@@ -203,6 +273,8 @@ def benchmark_knn_latency(
     plan_callback: Callable[[Any, int, int], Mapping[str, Any] | None] | None = None,
     context: cx_config.RuntimeContext | None = None,
 ) -> Tuple[PCCTree, QueryBenchmarkResult]:
+    from covertreex.queries.knn import knn
+    
     resolved_context = _ensure_context(context)
     tree_build_seconds: float | None = None
     if prebuilt_tree is None:
