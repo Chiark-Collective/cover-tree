@@ -65,17 +65,26 @@ def _point_decoder_factory(points: np.ndarray) -> Callable[[ArrayLike], np.ndarr
         index_map.setdefault(key, idx)
 
     def decoder(values: ArrayLike) -> np.ndarray:
-        arr = np.asarray(values, dtype=np.float64)
+        # Accept either integer dataset ids (shape (N,) or (N,1)) or coordinate payloads.
+        arr = np.asarray(values)
         if arr.ndim == 0:
-            arr = arr.reshape(1, 1)
-        elif arr.ndim == 1:
-            arr = arr.reshape(1, -1)
-        if arr.shape[1] != points_contig.shape[1]:
+            arr = arr.reshape(1)
+        if arr.dtype.kind in {"i", "u"}:
+            flat = arr.reshape(-1)
+            flat_i64 = flat.astype(np.int64, copy=False)
+            if flat_i64.min(initial=0) < 0 or flat_i64.max(initial=-1) >= points_contig.shape[0]:
+                raise ValueError("Residual point decoder received out-of-range indices.")
+            return flat_i64
+
+        arr_f64 = np.asarray(arr, dtype=np.float64)
+        if arr_f64.ndim == 1:
+            arr_f64 = arr_f64.reshape(1, -1)
+        if arr_f64.shape[1] != points_contig.shape[1]:
             raise ValueError(
                 "Residual point decoder expected payload dimensionality "
-                f"{points_contig.shape[1]}, received {arr.shape[1]}."
+                f"{points_contig.shape[1]}, received {arr_f64.shape[1]}."
             )
-        rows = np.ascontiguousarray(arr, dtype=np.float64)
+        rows = np.ascontiguousarray(arr_f64, dtype=np.float64)
         indices = np.empty(rows.shape[0], dtype=np.int64)
         for i, row in enumerate(rows):
             key = tuple(row.tolist())

@@ -196,6 +196,7 @@ def residual_knn_query(
                 knn_keys, knn_indices, visited_bitset
             )
             results_indices.append(indices.copy())
+            results_distances.append(np.asarray(dists, dtype=np.float64))
             
     else:
         # Python Fallback

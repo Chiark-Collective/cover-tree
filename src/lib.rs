@@ -1,5 +1,7 @@
 use pyo3::prelude::*;
-use numpy::{PyReadonlyArray2, IntoPyArray};
+use pyo3::exceptions::PyTypeError;
+use pyo3::types::PyAny;
+use numpy::{IntoPyArray, PyReadonlyArray1, PyReadonlyArray2};
 use crate::tree::CoverTreeData;
 use crate::algo::batch::batch_insert;
 use crate::algo::batch_knn_query;
@@ -19,6 +21,46 @@ struct CoverTreeWrapper {
 enum CoverTreeInner {
     F32(CoverTreeData<f32>),
     F64(CoverTreeData<f64>),
+}
+
+fn to_array2_f32(obj: &Bound<'_, PyAny>) -> PyResult<ndarray::Array2<f32>> {
+    if let Ok(arr) = obj.extract::<PyReadonlyArray2<f32>>() {
+        return Ok(arr.as_array().to_owned());
+    }
+    if let Ok(arr) = obj.extract::<PyReadonlyArray2<f64>>() {
+        return Ok(arr.as_array().mapv(|v| v as f32));
+    }
+    Err(PyTypeError::new_err("expected a float32 or float64 2D array"))
+}
+
+fn to_array1_f32(obj: &Bound<'_, PyAny>) -> PyResult<ndarray::Array1<f32>> {
+    if let Ok(arr) = obj.extract::<PyReadonlyArray1<f32>>() {
+        return Ok(arr.as_array().to_owned());
+    }
+    if let Ok(arr) = obj.extract::<PyReadonlyArray1<f64>>() {
+        return Ok(arr.as_array().mapv(|v| v as f32));
+    }
+    Err(PyTypeError::new_err("expected a float32 or float64 1D array"))
+}
+
+fn to_array2_f64(obj: &Bound<'_, PyAny>) -> PyResult<ndarray::Array2<f64>> {
+    if let Ok(arr) = obj.extract::<PyReadonlyArray2<f64>>() {
+        return Ok(arr.as_array().to_owned());
+    }
+    if let Ok(arr) = obj.extract::<PyReadonlyArray2<f32>>() {
+        return Ok(arr.as_array().mapv(|v| v as f64));
+    }
+    Err(PyTypeError::new_err("expected a float32 or float64 2D array"))
+}
+
+fn to_array1_f64(obj: &Bound<'_, PyAny>) -> PyResult<ndarray::Array1<f64>> {
+    if let Ok(arr) = obj.extract::<PyReadonlyArray1<f64>>() {
+        return Ok(arr.as_array().to_owned());
+    }
+    if let Ok(arr) = obj.extract::<PyReadonlyArray1<f32>>() {
+        return Ok(arr.as_array().mapv(|v| v as f64));
+    }
+    Err(PyTypeError::new_err("expected a float32 or float64 1D array"))
 }
 
 #[pymethods]
@@ -84,50 +126,36 @@ impl CoverTreeWrapper {
     ) -> PyResult<()> {
         match &mut self.inner {
             CoverTreeInner::F32(data) => {
-                let batch_obj = batch_indices.extract::<PyReadonlyArray2<f32>>(py)?;
-                let batch_view = batch_obj.as_array();
-                
-                let v_matrix_obj = v_matrix.extract::<PyReadonlyArray2<f32>>(py)?;
-                let p_diag_obj = p_diag.extract::<numpy::PyReadonlyArray1<f32>>(py)?;
-                let coords_obj = coords.extract::<PyReadonlyArray2<f32>>(py)?;
-                let rbf_ls_obj = rbf_ls.extract::<numpy::PyReadonlyArray1<f32>>(py)?;
-                
-                let v_matrix_view = v_matrix_obj.as_array();
-                let p_diag_view = p_diag_obj.as_array();
-                let coords_view = coords_obj.as_array();
-                let rbf_ls_view = rbf_ls_obj.as_array();
+                let batch_arr = to_array2_f32(&batch_indices.bind(py))?;
+                let v_matrix_arr = to_array2_f32(&v_matrix.bind(py))?;
+                let p_diag_arr = to_array1_f32(&p_diag.bind(py))?;
+                let coords_arr = to_array2_f32(&coords.bind(py))?;
+                let rbf_ls_arr = to_array1_f32(&rbf_ls.bind(py))?;
                 
                 let metric = ResidualMetric {
-                    v_matrix: v_matrix_view,
-                    p_diag: p_diag_view.as_slice().unwrap(),
-                    coords: coords_view,
+                    v_matrix: v_matrix_arr.view(),
+                    p_diag: p_diag_arr.as_slice().unwrap(),
+                    coords: coords_arr.view(),
                     rbf_var: rbf_var as f32,
-                    rbf_ls_sq: rbf_ls_view.as_slice().unwrap(),
+                    rbf_ls_sq: rbf_ls_arr.as_slice().unwrap(),
                 };
-                batch_insert(data, batch_view, &metric);
+                batch_insert(data, batch_arr.view(), &metric);
             }
             CoverTreeInner::F64(data) => {
-                let batch_obj = batch_indices.extract::<PyReadonlyArray2<f64>>(py)?;
-                let batch_view = batch_obj.as_array();
-                
-                let v_matrix_obj = v_matrix.extract::<PyReadonlyArray2<f64>>(py)?;
-                let p_diag_obj = p_diag.extract::<numpy::PyReadonlyArray1<f64>>(py)?;
-                let coords_obj = coords.extract::<PyReadonlyArray2<f64>>(py)?;
-                let rbf_ls_obj = rbf_ls.extract::<numpy::PyReadonlyArray1<f64>>(py)?;
-                
-                let v_matrix_view = v_matrix_obj.as_array();
-                let p_diag_view = p_diag_obj.as_array();
-                let coords_view = coords_obj.as_array();
-                let rbf_ls_view = rbf_ls_obj.as_array();
+                let batch_arr = to_array2_f64(&batch_indices.bind(py))?;
+                let v_matrix_arr = to_array2_f64(&v_matrix.bind(py))?;
+                let p_diag_arr = to_array1_f64(&p_diag.bind(py))?;
+                let coords_arr = to_array2_f64(&coords.bind(py))?;
+                let rbf_ls_arr = to_array1_f64(&rbf_ls.bind(py))?;
                 
                 let metric = ResidualMetric {
-                    v_matrix: v_matrix_view,
-                    p_diag: p_diag_view.as_slice().unwrap(),
-                    coords: coords_view,
+                    v_matrix: v_matrix_arr.view(),
+                    p_diag: p_diag_arr.as_slice().unwrap(),
+                    coords: coords_arr.view(),
                     rbf_var: rbf_var,
-                    rbf_ls_sq: rbf_ls_view.as_slice().unwrap(),
+                    rbf_ls_sq: rbf_ls_arr.as_slice().unwrap(),
                 };
-                batch_insert(data, batch_view, &metric);
+                batch_insert(data, batch_arr.view(), &metric);
             }
         }
         Ok(())
@@ -180,22 +208,17 @@ impl CoverTreeWrapper {
         
         match &self.inner {
             CoverTreeInner::F32(data) => {
-                let v_matrix_obj = v_matrix.extract::<PyReadonlyArray2<f32>>(py)?;
-                let p_diag_obj = p_diag.extract::<numpy::PyReadonlyArray1<f32>>(py)?;
-                let coords_obj = coords.extract::<PyReadonlyArray2<f32>>(py)?;
-                let rbf_ls_obj = rbf_ls.extract::<numpy::PyReadonlyArray1<f32>>(py)?;
-                
-                let v_matrix_view = v_matrix_obj.as_array();
-                let p_diag_view = p_diag_obj.as_array();
-                let coords_view = coords_obj.as_array();
-                let rbf_ls_view = rbf_ls_obj.as_array();
+                let v_matrix_arr = to_array2_f32(&v_matrix.bind(py))?;
+                let p_diag_arr = to_array1_f32(&p_diag.bind(py))?;
+                let coords_arr = to_array2_f32(&coords.bind(py))?;
+                let rbf_ls_arr = to_array1_f32(&rbf_ls.bind(py))?;
                 
                 let metric = ResidualMetric {
-                    v_matrix: v_matrix_view,
-                    p_diag: p_diag_view.as_slice().unwrap(),
-                    coords: coords_view,
+                    v_matrix: v_matrix_arr.view(),
+                    p_diag: p_diag_arr.as_slice().unwrap(),
+                    coords: coords_arr.view(),
                     rbf_var: rbf_var as f32,
-                    rbf_ls_sq: rbf_ls_view.as_slice().unwrap(),
+                    rbf_ls_sq: rbf_ls_arr.as_slice().unwrap(),
                 };
                 
                 let (indices, dists) = batch_residual_knn_query(
@@ -209,22 +232,17 @@ impl CoverTreeWrapper {
                 Ok((idx, dst.into_any().into()))
             }
             CoverTreeInner::F64(data) => {
-                let v_matrix_obj = v_matrix.extract::<PyReadonlyArray2<f64>>(py)?;
-                let p_diag_obj = p_diag.extract::<numpy::PyReadonlyArray1<f64>>(py)?;
-                let coords_obj = coords.extract::<PyReadonlyArray2<f64>>(py)?;
-                let rbf_ls_obj = rbf_ls.extract::<numpy::PyReadonlyArray1<f64>>(py)?;
-                
-                let v_matrix_view = v_matrix_obj.as_array();
-                let p_diag_view = p_diag_obj.as_array();
-                let coords_view = coords_obj.as_array();
-                let rbf_ls_view = rbf_ls_obj.as_array();
+                let v_matrix_arr = to_array2_f64(&v_matrix.bind(py))?;
+                let p_diag_arr = to_array1_f64(&p_diag.bind(py))?;
+                let coords_arr = to_array2_f64(&coords.bind(py))?;
+                let rbf_ls_arr = to_array1_f64(&rbf_ls.bind(py))?;
                 
                 let metric = ResidualMetric {
-                    v_matrix: v_matrix_view,
-                    p_diag: p_diag_view.as_slice().unwrap(),
-                    coords: coords_view,
+                    v_matrix: v_matrix_arr.view(),
+                    p_diag: p_diag_arr.as_slice().unwrap(),
+                    coords: coords_arr.view(),
                     rbf_var: rbf_var,
-                    rbf_ls_sq: rbf_ls_view.as_slice().unwrap(),
+                    rbf_ls_sq: rbf_ls_arr.as_slice().unwrap(),
                 };
                 
                 let (indices, dists) = batch_residual_knn_query(
