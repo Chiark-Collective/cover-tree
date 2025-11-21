@@ -15,54 +15,11 @@ from covertreex.queries._knn_numba import (
     materialise_tree_view_cached,
     knn_numba as _knn_numba,
 )
+from covertreex.queries.residual_knn import residual_knn_query
+from covertreex.queries.utils import ChildChainCache, to_numpy_array
 
 
 LOGGER = get_logger("queries.knn")
-
-
-def _to_numpy_array(backend: TreeBackend, array: Any, dtype: Any) -> np.ndarray:
-    """Materialise a backend array as a NumPy array with the desired dtype."""
-
-    return np.asarray(backend.to_numpy(array), dtype=dtype)
-
-
-class _ChildChainCache:
-    """Memoise decoded child chains from the compressed representation."""
-
-    __slots__ = ("_children", "_next", "_cache", "_empty")
-
-    def __init__(self, children: np.ndarray, next_cache: np.ndarray) -> None:
-        self._children = children
-        self._next = next_cache
-        self._cache: Dict[int, np.ndarray] = {}
-        self._empty = np.empty(0, dtype=np.int64)
-
-    def get(self, parent: int) -> np.ndarray:
-        if parent < 0 or parent >= self._children.shape[0]:
-            return self._empty
-        cached = self._cache.get(parent)
-        if cached is not None:
-            return cached
-
-        head = int(self._children[parent])
-        if head < 0 or head >= self._next.shape[0]:
-            self._cache[parent] = self._empty
-            return self._empty
-
-        chain: List[int] = []
-        seen: set[int] = set()
-        current = head
-        while 0 <= current < self._next.shape[0] and current not in seen:
-            chain.append(current)
-            seen.add(current)
-            nxt = int(self._next[current])
-            if nxt < 0 or nxt == current:
-                break
-            current = nxt
-
-        arr = np.asarray(chain, dtype=np.int64) if chain else self._empty
-        self._cache[parent] = arr
-        return arr
 
 
 def _fallback_bruteforce(
@@ -81,7 +38,7 @@ def _single_query_knn(
     *,
     points: np.ndarray,
     si_cache: np.ndarray,
-    child_cache: _ChildChainCache,
+    child_cache: ChildChainCache,
     root_indices: Sequence[int],
     k: int,
 ) -> Tuple[np.ndarray, np.ndarray]:
@@ -210,9 +167,20 @@ def _knn_impl(
 
     context = context or cx_config.runtime_context()
     runtime = context.config
+    
+    if runtime.residual_use_static_euclidean_tree:
+        return residual_knn_query(
+            tree,
+            batch,
+            k=k,
+            return_distances=return_distances,
+            backend=backend,
+            context=context,
+        )
+
     use_numba = runtime.enable_numba and NUMBA_QUERY_AVAILABLE
 
-    batch_np = _to_numpy_array(backend, batch, dtype=np.float64)
+    batch_np = to_numpy_array(backend, batch, dtype=np.float64)
     num_queries = batch_np.shape[0]
 
     if use_numba:
@@ -230,12 +198,12 @@ def _knn_impl(
             numba_distances if numba_distances.ndim > 1 else numba_distances[None, :]
         )
     else:
-        points_np = _to_numpy_array(backend, tree.points, dtype=np.float64)
-        parents_np = _to_numpy_array(backend, tree.parents, dtype=np.int64)
-        children_np = _to_numpy_array(backend, tree.children, dtype=np.int64)
-        next_cache_np = _to_numpy_array(backend, tree.next_cache, dtype=np.int64)
-        si_cache_np = _to_numpy_array(backend, tree.si_cache, dtype=np.float64)
-        child_cache = _ChildChainCache(children_np, next_cache_np)
+        points_np = to_numpy_array(backend, tree.points, dtype=np.float64)
+        parents_np = to_numpy_array(backend, tree.parents, dtype=np.int64)
+        children_np = to_numpy_array(backend, tree.children, dtype=np.int64)
+        next_cache_np = to_numpy_array(backend, tree.next_cache, dtype=np.int64)
+        si_cache_np = to_numpy_array(backend, tree.si_cache, dtype=np.float64)
+        child_cache = ChildChainCache(children_np, next_cache_np)
 
         root_candidates = np.where(parents_np < 0)[0]
         if root_candidates.size == 0:

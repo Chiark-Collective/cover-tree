@@ -278,6 +278,7 @@ class ResidualConfig(BaseModel):
     prefilter_radius_cap: float = _DEFAULT_RESIDUAL_PREFILTER_RADIUS_CAP
     prefilter_audit: bool = _DEFAULT_RESIDUAL_PREFILTER_AUDIT
     grid_whiten_scale: float = _DEFAULT_RESIDUAL_GRID_WHITEN_SCALE
+    use_static_euclidean_tree: bool = False
 
 
 class RuntimeModel(BaseModel):
@@ -356,6 +357,10 @@ class RuntimeModel(BaseModel):
     def residual_level_cache_batching(self) -> bool:
         return self.residual.level_cache_batching
 
+    @property
+    def residual_use_static_euclidean_tree(self) -> bool:
+        return self.residual.use_static_euclidean_tree
+
     def to_runtime_config(self) -> "RuntimeConfig":
         from .config import RuntimeConfig  # local import to avoid circular dependency
 
@@ -408,6 +413,7 @@ class RuntimeModel(BaseModel):
             residual_prefilter_radius_cap=residual.prefilter_radius_cap,
             residual_prefilter_audit=residual.prefilter_audit,
             residual_grid_whiten_scale=residual.grid_whiten_scale,
+            residual_use_static_euclidean_tree=residual.use_static_euclidean_tree,
         )
 
     @classmethod
@@ -432,6 +438,7 @@ class RuntimeModel(BaseModel):
             prefilter_radius_cap=legacy.residual_prefilter_radius_cap,
             prefilter_audit=legacy.residual_prefilter_audit,
             grid_whiten_scale=legacy.residual_grid_whiten_scale,
+            use_static_euclidean_tree=legacy.residual_use_static_euclidean_tree,
         )
         diagnostics = DiagnosticsConfig(
             enabled=legacy.enable_diagnostics,
@@ -653,6 +660,11 @@ class RuntimeModel(BaseModel):
         )
         if residual_grid_whiten_scale <= 0.0:
             residual_grid_whiten_scale = _DEFAULT_RESIDUAL_GRID_WHITEN_SCALE
+        
+        residual_use_static_euclidean_tree = _bool_from_env(
+            source.get("COVERTREEX_RESIDUAL_USE_STATIC_EUCLIDEAN_TREE"),
+            default=False,
+        )
 
         residual = ResidualConfig(
             radius_floor=residual_radius_floor,
@@ -676,6 +688,7 @@ class RuntimeModel(BaseModel):
             prefilter_radius_cap=residual_prefilter_radius_cap,
             prefilter_audit=residual_prefilter_audit,
             grid_whiten_scale=residual_grid_whiten_scale,
+            use_static_euclidean_tree=residual_use_static_euclidean_tree,
         )
 
         return cls(

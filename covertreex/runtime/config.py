@@ -96,6 +96,7 @@ class RuntimeConfig:
     residual_prefilter_radius_cap: float
     residual_prefilter_audit: bool
     residual_grid_whiten_scale: float
+    residual_use_static_euclidean_tree: bool
 
     @property
     def mis_seed(self) -> int | None:
@@ -303,6 +304,7 @@ def describe_runtime() -> Dict[str, Any]:
         "residual_scope_cap_percentile": config.residual_scope_cap_percentile,
         "residual_scope_cap_margin": config.residual_scope_cap_margin,
         "residual_grid_whiten_scale": config.residual_grid_whiten_scale,
+        "residual_use_static_euclidean_tree": config.residual_use_static_euclidean_tree,
     }
 
 
