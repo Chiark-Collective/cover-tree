@@ -10,3 +10,9 @@
 - **Audit Surface**: Treat the repository as a workspace for finding the optimal implementation.
 - **Pruning**: Don't be afraid to delete dead code, but ensure you aren't deleting the *only* working implementation of a critical feature.
 - **Communication**: If making a destructive change to a core workflow, briefly document why in the commit message or PR.
+
+## IMPORTANT RULES
+
+- **Reproducibility**: Whenever a new benchmark is run with noteworthy results, update all documentation that contains benchmarks and make sure that:
+    - The benchmark is reproducible, with the exact command used to run it included in the docs next to the benchmark results themselves.
+    - The commit message mentions a benchmark result update
