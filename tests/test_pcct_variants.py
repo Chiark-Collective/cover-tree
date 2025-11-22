@@ -116,8 +116,8 @@ def test_knn_consistency_residual_whitened_toggle() -> None:
         enable_sparse_traversal=True,
     )
 
-    dense = runtime_base.with_updates(residual_force_whitened=False)
-    whitened = runtime_base.with_updates(residual_force_whitened=True)
+    dense = runtime_base.with_updates(residual_dynamic_query_block=False)
+    whitened = runtime_base.with_updates(residual_dynamic_query_block=True)
 
     idx_a, dist_a = _knn_result(dense)
     idx_b, dist_b = _knn_result(whitened)

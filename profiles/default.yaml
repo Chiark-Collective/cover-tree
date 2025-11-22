@@ -18,5 +18,3 @@ runtime:
     enabled: false
     log_level: INFO
   batch_order_strategy: hilbert
-  residual:
-    gate1_enabled: false

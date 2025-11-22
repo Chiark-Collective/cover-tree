@@ -2,6 +2,8 @@
 
 Goal: unify residual tree builds behind a single cover-tree abstraction with pluggable engines, defaulting to Python/Numba and offering a fast Rust residual-only engine. Avoid “PCCT” naming in user-facing surfaces.
 
+Status: runtime `engine` config + `--engine` CLI flag now select between `python-numba` (default) and `rust-fast`, and the CoverTree wrapper dispatches queries through the chosen engine.
+
 ## Naming & Config
 - Introduce `engine` enum in `RuntimeConfig`/CLI: `python-numba` (default), `rust-fast` (residual-only), later `rust-hybrid`.
 - Deprecate “PCCT” in help/docs; describe engines as “Python/Numba” vs “Rust fast residual”.

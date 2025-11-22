@@ -7,6 +7,7 @@ try:
 except Exception:  # pragma: no cover - best effort during local development
     __version__ = "0.0.1"
 
+from .engine import CoverTree
 from .core import (
     PCCTree,
     TreeBackend,
@@ -34,6 +35,7 @@ from .baseline import (
 __all__ = [
     "__version__",
     "PCCTree",
+    "CoverTree",
     "TreeBackend",
     "TreeLogStats",
     "available_metrics",

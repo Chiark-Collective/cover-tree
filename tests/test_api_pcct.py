@@ -23,7 +23,7 @@ def _runtime() -> Runtime:
         conflict_graph="dense",
         batch_order="natural",
         diagnostics=False,
-        residual=Residual(gate1_enabled=False),
+        residual=Residual(),
     )
 
 
@@ -83,7 +83,7 @@ def test_pcct_fit_uses_explicit_runtime_context(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_pcct_delete_threads_runtime_context(monkeypatch: pytest.MonkeyPatch):
-    runtime = Runtime(mis_seed=77, residual=Residual(gate1_enabled=False))
+    runtime = Runtime(mis_seed=77, residual=Residual())
     base_tree = PCCT(runtime).fit([[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]])
 
     captured: dict[str, Any] = {}

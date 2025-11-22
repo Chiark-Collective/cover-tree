@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from numpy.random import default_rng
@@ -37,7 +37,7 @@ def _generate_datasets(options: "QueryCLIOptions") -> tuple[np.ndarray, np.ndarr
     return points, queries
 
 
-def _run_residual_backend(options: "QueryCLIOptions", points: np.ndarray, *, context) -> tuple[str, bool]:
+def _run_residual_backend(options: "QueryCLIOptions", points: np.ndarray, *, context) -> tuple[str, bool, Any]:
     runtime_cfg = context.config
     seed_pack = runtime_cfg.seeds
     residual_seed = seed_pack.resolved("residual_grid", fallback=seed_pack.resolved("mis"))
@@ -52,7 +52,7 @@ def _run_residual_backend(options: "QueryCLIOptions", points: np.ndarray, *, con
     configure_residual_correlation(residual_backend, context=context)
     gate_active = False
     engine_label = "residual_parallel"
-    return engine_label, gate_active
+    return engine_label, gate_active, residual_backend
 
 
 def _print_baseline_results(
@@ -96,13 +96,13 @@ def execute_query_benchmark(options: "QueryCLIOptions", run: BenchmarkRun) -> Qu
     scope_cap_recorder = run.scope_cap_recorder
     context = run.context
 
-    engine_label = "euclidean_dense"
+    engine_label = context.config.engine or "python-numba"
     gate_flag = False
+    residual_backend: Any | None = None
     if options.metric == "residual-lite":
-        engine_label = "residual_lite"
-        runtime_snapshot["runtime_traversal_engine"] = engine_label
+        runtime_snapshot["runtime_traversal_engine"] = f"{engine_label}-residual-lite"
         runtime_snapshot["runtime_gate_active"] = gate_flag
-        _emit_engine_banner(engine_label, thread_snapshot)
+        _emit_engine_banner(runtime_snapshot["runtime_traversal_engine"], thread_snapshot)
     elif options.metric != "residual":
         runtime_snapshot["runtime_traversal_engine"] = engine_label
         runtime_snapshot["runtime_gate_active"] = gate_flag
@@ -111,7 +111,9 @@ def execute_query_benchmark(options: "QueryCLIOptions", run: BenchmarkRun) -> Qu
     points_np, queries_np = _generate_datasets(options)
 
     if options.metric == "residual":
-        engine_label, gate_flag = _run_residual_backend(options, points_np, context=context)
+        if engine_label == "python-numba":
+            backend_label, gate_flag, residual_backend = _run_residual_backend(options, points_np, context=context)
+            engine_label = f"{engine_label}:{backend_label}"
         runtime_snapshot["runtime_traversal_engine"] = engine_label
         runtime_snapshot["runtime_gate_active"] = gate_flag
         _emit_engine_banner(engine_label, thread_snapshot)
@@ -133,6 +135,13 @@ def execute_query_benchmark(options: "QueryCLIOptions", run: BenchmarkRun) -> Qu
         build_mode=options.build_mode,
         plan_callback=telemetry_view.observe_plan if telemetry_view is not None else None,
         context=context,
+        residual_backend=residual_backend,
+        residual_params={
+            "variance": options.residual_variance,
+            "lengthscale": options.residual_lengthscale,
+            "inducing_count": options.residual_inducing,
+            "chunk_size": options.residual_chunk_size,
+        },
     )
 
     cpu_time = (result.cpu_user_seconds or 0.0) + (result.cpu_system_seconds or 0.0)

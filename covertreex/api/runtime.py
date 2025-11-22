@@ -30,6 +30,7 @@ def _active_runtime_config() -> cx_config.RuntimeConfig:
 _ATTR_TO_FIELD = {
     "backend": "backend",
     "precision": "precision",
+    "engine": "engine",
     "metric": "metric",
     "devices": "devices",
     "enable_numba": "enable_numba",
@@ -133,6 +134,7 @@ class Runtime:
 
     backend: str | None = None
     precision: str | None = None
+    engine: str | None = None
     metric: str | None = None
     devices: Tuple[str, ...] | None = None
     enable_numba: bool | None = None
@@ -216,6 +218,7 @@ class Runtime:
         return {
             "backend": config.backend,
             "precision": config.precision,
+            "engine": config.engine,
             "metric": config.metric,
             "devices": config.devices,
             "conflict_graph": config.conflict_graph_impl,
@@ -271,6 +274,7 @@ class Runtime:
         return cls(
             backend=config.backend,
             precision=config.precision,
+            engine=getattr(config, "engine", None),
             metric=config.metric,
             devices=config.devices,
             enable_numba=config.enable_numba,

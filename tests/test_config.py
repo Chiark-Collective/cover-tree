@@ -13,6 +13,7 @@ from cli.pcct.runtime_config import runtime_from_args
 def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for key in [
         "COVERTREEX_BACKEND",
+        "COVERTREEX_ENGINE",
         "COVERTREEX_PRECISION",
         "COVERTREEX_DEVICE",
         "COVERTREEX_ENABLE_NUMBA",
@@ -56,6 +57,7 @@ def test_runtime_config_defaults(monkeypatch: pytest.MonkeyPatch):
     runtime = cx_config.runtime_config()
 
     assert runtime.backend == "numpy"
+    assert runtime.engine == "python-numba"
     assert runtime.precision == "float64"
     assert runtime.jax_enable_x64 is True
     assert runtime.devices == ()
@@ -75,17 +77,7 @@ def test_runtime_config_defaults(monkeypatch: pytest.MonkeyPatch):
     assert runtime.scope_budget_schedule == ()
     assert runtime.scope_budget_up_thresh == pytest.approx(0.015)
     assert runtime.scope_budget_down_thresh == pytest.approx(0.002)
-    assert runtime.residual_gate1_enabled is False
-    assert runtime.residual_gate1_alpha == pytest.approx(4.0)
-    assert runtime.residual_gate1_margin == pytest.approx(0.05)
-    assert runtime.residual_gate1_eps == pytest.approx(1e-6)
-    assert runtime.residual_gate1_audit is False
-    assert runtime.residual_gate1_radius_cap == pytest.approx(1.0)
     assert runtime.residual_radius_floor == pytest.approx(1e-3)
-    assert runtime.residual_gate1_profile_path is None
-    assert runtime.residual_gate1_profile_bins == 256
-    assert runtime.residual_gate1_lookup_path is None
-    assert runtime.residual_gate1_lookup_margin == pytest.approx(0.02)
     assert runtime.residual_grid_whiten_scale == pytest.approx(1.0)
     assert runtime.residual_level_cache_batching is True
 
@@ -169,6 +161,7 @@ def test_describe_runtime_reports_expected_fields(monkeypatch: pytest.MonkeyPatc
     summary = cx_config.describe_runtime()
 
     assert summary["backend"] == "numpy"
+    assert summary["engine"] == "python-numba"
     assert summary["precision"] == "float64"
     assert summary["log_level"] == "INFO"
     assert summary["enable_sparse_traversal"] is False
@@ -184,16 +177,7 @@ def test_describe_runtime_reports_expected_fields(monkeypatch: pytest.MonkeyPatc
     assert summary["scope_budget_up_thresh"] == pytest.approx(0.015)
     assert summary["scope_budget_down_thresh"] == pytest.approx(0.002)
     assert summary["metric"] == "euclidean"
-    assert summary["residual_gate1_enabled"] is False
-    assert summary["residual_gate1_alpha"] == pytest.approx(4.0)
-    assert summary["residual_gate1_margin"] == pytest.approx(0.05)
-    assert summary["residual_gate1_eps"] == pytest.approx(1e-6)
-    assert summary["residual_gate1_radius_cap"] == pytest.approx(1.0)
     assert summary["residual_radius_floor"] == pytest.approx(1e-3)
-    assert summary["residual_gate1_profile_path"] is None
-    assert summary["residual_gate1_profile_bins"] == 256
-    assert summary["residual_gate1_lookup_path"] is None
-    assert summary["residual_gate1_lookup_margin"] == pytest.approx(0.02)
     assert summary["residual_grid_whiten_scale"] == pytest.approx(1.0)
     assert summary["residual_level_cache_batching"] is True
 
@@ -231,7 +215,7 @@ def test_runtime_activate_context_manager(monkeypatch: pytest.MonkeyPatch):
         precision="float64",
         conflict_graph="dense",
         diagnostics=False,
-        residual=Residual(gate1_enabled=False),
+        residual=Residual(),
     )
 
     with runtime.activate() as context:
@@ -422,16 +406,11 @@ def test_residual_defaults_enable_gate_and_doubling(monkeypatch: pytest.MonkeyPa
     cx_config.reset_runtime_config_cache()
 
     runtime = cx_config.runtime_config()
-    expected_lookup = str(
-        Path(__file__).resolve().parents[1]
-        / "docs"
-        / "data"
-        / "residual_gate_profile_32768_caps.json"
-    )
 
     assert runtime.prefix_schedule == "doubling"
-    assert runtime.residual_gate1_enabled is True
-    assert runtime.residual_gate1_lookup_path == expected_lookup
+    assert runtime.residual_scope_bitset is True
+    assert runtime.residual_stream_tile == 64
+    assert runtime.residual_dynamic_query_block is True
 
 
 def test_sparse_traversal_toggle(monkeypatch: pytest.MonkeyPatch):
@@ -472,7 +451,7 @@ def test_runtime_from_args_defaults_sparse_numba_for_residual(monkeypatch: pytes
     config = runtime.to_config(cx_config.RuntimeConfig.from_env())
 
     assert config.metric == "residual_correlation"
-    assert config.enable_sparse_traversal is True
+    assert config.enable_sparse_traversal is False
     assert config.enable_numba is True
 
 
@@ -514,32 +493,3 @@ def test_runtime_extra_fields_feed_runtime_model(monkeypatch: pytest.MonkeyPatch
     config = runtime.to_config()
 
     assert config.scope_budget_schedule == (128, 256)
-
-
-def test_residual_gate1_env_overrides(monkeypatch: pytest.MonkeyPatch):
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("COVERTREEX_RESIDUAL_GATE1", "1")
-    monkeypatch.setenv("COVERTREEX_RESIDUAL_GATE1_ALPHA", "1.5")
-    monkeypatch.setenv("COVERTREEX_RESIDUAL_GATE1_MARGIN", "0.2")
-    monkeypatch.setenv("COVERTREEX_RESIDUAL_GATE1_EPS", "0.001")
-    monkeypatch.setenv("COVERTREEX_RESIDUAL_GATE1_AUDIT", "1")
-    monkeypatch.setenv("COVERTREEX_RESIDUAL_GATE1_RADIUS_CAP", "0.75")
-    monkeypatch.setenv("COVERTREEX_RESIDUAL_RADIUS_FLOOR", "0.25")
-    monkeypatch.setenv("COVERTREEX_RESIDUAL_GATE1_PROFILE_PATH", "/tmp/profile.json")
-    monkeypatch.setenv("COVERTREEX_RESIDUAL_GATE1_PROFILE_BINS", "64")
-    monkeypatch.setenv("COVERTREEX_RESIDUAL_GATE1_LOOKUP_PATH", "/tmp/lookup.json")
-    monkeypatch.setenv("COVERTREEX_RESIDUAL_GATE1_LOOKUP_MARGIN", "0.5")
-    cx_config.reset_runtime_config_cache()
-
-    runtime = cx_config.runtime_config()
-    assert runtime.residual_gate1_enabled is True
-    assert runtime.residual_gate1_alpha == pytest.approx(1.5)
-    assert runtime.residual_gate1_margin == pytest.approx(0.2)
-    assert runtime.residual_gate1_eps == pytest.approx(0.001)
-    assert runtime.residual_gate1_audit is True
-    assert runtime.residual_gate1_radius_cap == pytest.approx(0.75)
-    assert runtime.residual_radius_floor == pytest.approx(0.25)
-    assert runtime.residual_gate1_profile_path == "/tmp/profile.json"
-    assert runtime.residual_gate1_profile_bins == 64
-    assert runtime.residual_gate1_lookup_path == "/tmp/lookup.json"
-    assert runtime.residual_gate1_lookup_margin == pytest.approx(0.5)

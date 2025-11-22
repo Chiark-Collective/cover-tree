@@ -40,7 +40,7 @@ def test_parse_guardrail_metrics(tmp_path: Path) -> None:
     assert metrics.dominated_batches == 2
     assert metrics.semisort_median_ms == 30.0
     assert metrics.whitened_coverage == 0.925
-    assert metrics.gate1_pruned_total == 12
+    assert metrics.pairwise_reused_batches == 2
     assert metrics.all_pairwise_reused
 
 
@@ -50,19 +50,17 @@ def test_evaluate_metrics_reports_failures() -> None:
         whitened_pairs_sum=80,
         kernel_pairs_sum=200,
         semisort_median_ms=1500.0,
-        gate1_pruned_total=0,
         pairwise_reused_batches=1,
     )
     failures = guardrail.evaluate_metrics(
         metrics,
         min_whitened_coverage=0.95,
         max_median_semisort_ms=1000.0,
-        require_gate1_prunes=True,
         require_pairwise_reuse=True,
         min_dominated_batches=5,
     )
-    assert len(failures) == 5
+    assert len(failures) == 4
     assert "dominated batches" in failures[0]
     assert "whitened coverage" in failures[1]
     assert "median traversal_semisort_ms" in failures[2]
-    assert "gate1_pruned" in failures[3]
+    assert "pairwise_reused" in failures[3]

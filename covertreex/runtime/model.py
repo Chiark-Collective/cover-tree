@@ -32,6 +32,8 @@ _FALLBACK_CPU_DEVICE = ("cpu:0",)
 
 _SUPPORTED_BACKENDS = {"jax", "numpy", "gpu"}
 _SUPPORTED_PRECISION = {"float32", "float64"}
+_ENGINE_CHOICES = {"python-numba", "rust-fast", "rust-hybrid"}
+_DEFAULT_ENGINE = "python-numba"
 _CONFLICT_GRAPH_IMPLS = {"dense", "segmented", "auto", "grid"}
 _BATCH_ORDER_STRATEGIES = {"natural", "random", "hilbert"}
 _PREFIX_SCHEDULES = {"doubling", "adaptive"}
@@ -155,6 +157,17 @@ def _infer_backend(raw: str | None) -> str:
             f"Unsupported backend '{backend}'. Expected one of {_SUPPORTED_BACKENDS}."
         )
     return backend
+
+
+def _parse_engine(raw: str | None) -> str:
+    if not raw:
+        return _DEFAULT_ENGINE
+    engine = raw.strip().lower()
+    if engine not in _ENGINE_CHOICES:
+        raise ValueError(
+            f"Unsupported engine '{engine}'. Expected one of {_ENGINE_CHOICES}."
+        )
+    return engine
 
 
 def _parse_conflict_graph_impl(value: str | None) -> str:
@@ -294,6 +307,7 @@ class RuntimeModel(BaseModel):
 
     backend: str = "numpy"
     precision: str = "float64"
+    engine: str = _DEFAULT_ENGINE
     devices: Tuple[str, ...] = Field(default_factory=tuple)
     enable_numba: bool = False
     enable_rust: bool = False
@@ -377,6 +391,7 @@ class RuntimeModel(BaseModel):
         return RuntimeConfig(
             backend=self.backend,
             precision=self.precision,
+            engine=self.engine,
             devices=self.devices,
             enable_numba=self.enable_numba,
             enable_rust=self.enable_rust,
@@ -463,6 +478,7 @@ class RuntimeModel(BaseModel):
         return cls(
             backend=legacy.backend,
             precision=legacy.precision,
+            engine=getattr(legacy, "engine", _DEFAULT_ENGINE),
             devices=legacy.devices,
             enable_numba=legacy.enable_numba,
             enable_rust=legacy.enable_rust,
@@ -496,6 +512,7 @@ class RuntimeModel(BaseModel):
         backend = _infer_backend(source.get("COVERTREEX_BACKEND"))
         precision = _normalise_precision(_infer_precision_from_env(source))
         requested_devices = _parse_devices(source.get("COVERTREEX_DEVICE"))
+        engine = _parse_engine(source.get("COVERTREEX_ENGINE"))
         devices = _resolve_jax_devices(requested_devices) if backend == "jax" else ()
         enable_numba = _bool_from_env(
             source.get("COVERTREEX_ENABLE_NUMBA"), default=_NUMBA_AVAILABLE
@@ -706,6 +723,7 @@ class RuntimeModel(BaseModel):
         return cls(
             backend=backend,
             precision=precision,
+            engine=engine,
             devices=devices,
             enable_numba=enable_numba,
             enable_sparse_traversal=enable_sparse_traversal,

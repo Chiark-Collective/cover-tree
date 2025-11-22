@@ -98,6 +98,14 @@ MetricOption = Annotated[
         rich_help_panel=RUNTIME_PANEL,
     ),
 ]
+EngineOption = Annotated[
+    Optional[Literal["python-numba", "rust-fast", "rust-hybrid"]],
+    typer.Option(
+        "--engine",
+        help="Select the cover-tree engine (default: python-numba).",
+        rich_help_panel=RUNTIME_PANEL,
+    ),
+]
 BackendOption = Annotated[
     Optional[str],
     typer.Option("--backend", help="Runtime backend override (numpy, jax, ...).", rich_help_panel=RUNTIME_PANEL),
@@ -405,6 +413,7 @@ __all__ = [
     "ProfileOption",
     "SetOverrideOption",
     "MetricOption",
+    "EngineOption",
     "BackendOption",
     "PrecisionOption",
     "DevicesOption",

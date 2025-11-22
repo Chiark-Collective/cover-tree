@@ -126,6 +126,9 @@ def resolve_artifact_arg(path: str | None, *, category: str = "benchmarks") -> s
 
 def validate_residual_runtime(snapshot: Dict[str, Any]) -> None:
     errors = []
+    engine = snapshot.get("engine") or snapshot.get("runtime_engine")
+    if engine == "rust-fast":
+        return
     backend = snapshot.get("backend")
     if backend != "numpy":
         errors.append(f"expected backend 'numpy' but runtime selected {backend!r}")

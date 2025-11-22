@@ -23,6 +23,5 @@ runtime:
   prefix_schedule: doubling
   scope_chunk_target: 0
   residual:
-    gate1_enabled: false
     dense_scope_streamer: true
     stream_tile: 64

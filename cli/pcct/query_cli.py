@@ -13,7 +13,7 @@ query_app = typer.Typer(
     add_completion=False,
     pretty_exceptions_enable=False,
     invoke_without_command=True,
-    help="Run PCCT benchmarks driven by profiles and overrides.",
+    help="Run cover-tree benchmarks driven by profiles and engine overrides.",
 )
 
 @query_app.callback()
@@ -29,6 +29,7 @@ def query(
     profile: opts.ProfileOption = None,
     set_override: opts.SetOverrideOption = None,
     metric: opts.MetricOption = "auto",
+    engine: opts.EngineOption = None,
     backend: opts.BackendOption = None,
     precision: opts.PrecisionOption = None,
     devices: opts.DevicesOption = None,

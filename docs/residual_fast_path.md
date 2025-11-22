@@ -40,3 +40,12 @@ indices, dists = tree.knn_query_residual(
     50
 )
 ```
+
+## CLI quick start
+
+Use the cover-tree CLI with the Rust fast engine to exercise this path end to
+end (residual metric only):
+
+```
+python -m cli.pcct.query --metric residual --engine rust-fast --tree-points 50000 --dimension 3 --queries 1024 --k 50
+```

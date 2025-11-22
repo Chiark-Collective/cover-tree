@@ -34,6 +34,9 @@ def runtime_from_args(
             else "residual_correlation_lite" if metric == "residual-lite" else metric
         ),
     }
+    engine = _get_arg(args, "engine")
+    if engine:
+        runtime_kwargs["engine"] = engine
     backend = _get_arg(args, "backend")
     if backend:
         runtime_kwargs["backend"] = backend

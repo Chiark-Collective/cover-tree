@@ -128,6 +128,23 @@ def knn(
     backend: TreeBackend | None = None,
     context: cx_config.RuntimeContext | None = None,
 ) -> Tuple[Any, Any] | Any:
+    if "CoverTree" not in globals():
+        try:
+            from covertreex.engine import CoverTree as _CoverTree  # type: ignore
+
+            globals()["CoverTree"] = _CoverTree
+        except ImportError:
+            _CoverTree = None
+    else:
+        _CoverTree = globals().get("CoverTree")
+    if _CoverTree is not None and isinstance(tree, _CoverTree):
+        return tree.knn(
+            query_points,
+            k=k,
+            return_distances=return_distances,
+            context=context,
+        )
+
     backend = backend or tree.backend
     resolved_context = context or cx_config.current_runtime_context()
     if resolved_context is None:

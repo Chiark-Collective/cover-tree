@@ -53,6 +53,7 @@ def _replace_context(context: "RuntimeContext") -> None:
 class RuntimeConfig:
     backend: str
     precision: str
+    engine: str
     devices: Tuple[str, ...]
     enable_numba: bool
     enable_rust: bool
@@ -268,6 +269,7 @@ def describe_runtime() -> Dict[str, Any]:
     return {
         "backend": config.backend,
         "precision": config.precision,
+        "engine": config.engine,
         "devices": config.devices,
         "primary_platform": config.primary_platform,
         "enable_numba": config.enable_numba,
