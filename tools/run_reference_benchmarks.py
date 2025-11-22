@@ -207,6 +207,25 @@ def _jobs() -> Dict[str, BenchmarkJob]:
                     "--residual-masked-scope-append",
                 ),
             ),
+            BenchmarkJob(
+                name="gold_standard_32k",
+                metric="residual",
+                tree_points=32768,
+                batch_size=512,
+                queries=1024,
+                k=50,
+                baseline="gpboost",
+                env={
+                    "COVERTREEX_ENABLE_NUMBA": "1",
+                    "COVERTREEX_SCOPE_CHUNK_TARGET": "0",
+                    # Explicitly unset/disable sparse traversal to match gold standard script
+                    "COVERTREEX_ENABLE_SPARSE_TRAVERSAL": "0", 
+                    "COVERTREEX_BATCH_ORDER": "natural",
+                    "COVERTREEX_PREFIX_SCHEDULE": "doubling",
+                    "COVERTREEX_ENABLE_DIAGNOSTICS": "0",
+                },
+                description="Gold Standard Residual Benchmark (32k points, d=3, k=50). Matches run_residual_gold_standard.sh.",
+            ),
         ]
     }
 
