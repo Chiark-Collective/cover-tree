@@ -11,6 +11,16 @@ static DIST_EVALS: AtomicUsize = AtomicUsize::new(0);
 static HEAP_PUSHES: AtomicUsize = AtomicUsize::new(0);
 static EMIT_STATS: AtomicBool = AtomicBool::new(false);
 
+#[inline(always)]
+pub(crate) fn set_debug_stats_enabled(enabled: bool) {
+    EMIT_STATS.store(enabled, AtomicOrdering::Relaxed);
+}
+
+#[inline(always)]
+fn debug_stats_enabled() -> bool {
+    EMIT_STATS.load(AtomicOrdering::Relaxed)
+}
+
 pub mod batch;
 
 #[derive(Copy, Clone, PartialEq)]

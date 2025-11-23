@@ -409,5 +409,11 @@ fn to_py_arrays<'py, T: numpy::Element + Copy + num_traits::Zero>(
 #[pymodule]
 fn covertreex_backend(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<CoverTreeWrapper>()?;
+    m.add_function(wrap_pyfunction!(set_rust_debug_stats, m)?)?;
     Ok(())
+}
+
+#[pyfunction]
+fn set_rust_debug_stats(enable: bool) {
+    crate::algo::set_debug_stats_enabled(enable);
 }

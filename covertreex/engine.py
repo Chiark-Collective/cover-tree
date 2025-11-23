@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+import os
 from typing import Any, Callable, Dict, Mapping, Protocol
 
 import numpy as np
@@ -328,6 +329,14 @@ class RustFastResidualEngine:
     ) -> CoverTree:
         if runtime.metric != "residual_correlation":
             raise ValueError("rust-fast engine only supports the residual_correlation metric.")
+
+        try:
+            import covertreex_backend  # type: ignore
+            if os.environ.get("COVERTREEX_RUST_DEBUG_STATS") == "1":
+                if hasattr(covertreex_backend, "set_rust_debug_stats"):
+                    covertreex_backend.set_rust_debug_stats(True)  # type: ignore
+        except ImportError:
+            covertreex_backend = None
 
         params = dict(residual_params or {})
         variance = float(params.get("variance", 1.0))
