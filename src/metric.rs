@@ -1,6 +1,7 @@
 use ndarray::{Array2, ArrayView2};
-use num_traits::Float;
+use num_traits::{Float, NumCast};
 use std::fmt::Debug;
+use wide::{f32x8, f64x4};
 
 pub trait Metric<T>: Sync + Send {
     fn distance(&self, p1: &[T], p2: &[T]) -> T;
@@ -127,8 +128,7 @@ where
         // V-Matrix dot product (hot loop)
         let v1_view = self.v_matrix.row(idx_1);
         let v2_view = self.v_matrix.row(idx_2);
-        let len = v1_view.len();
-        let dot = dot_product_unrolled(v1_view, v2_view, len);
+        let dot = dot_product_simd(v1_view, v2_view);
 
         let denom = (self.p_diag[idx_1] * self.p_diag[idx_2]).sqrt();
         let eps = T::from(1e-9).unwrap();
@@ -158,7 +158,6 @@ where
         let x = x_view.as_slice().unwrap_or_else(|| panic!("Query coords must be contiguous"));
         let q_norm = self.scaled_norms[q_idx];
         let v1_view = self.v_matrix.row(q_idx);
-        let v1_len = v1_view.len();
         let q_diag = self.p_diag[q_idx];
         let two = T::from(2.0).unwrap();
         let one = T::one();
@@ -182,7 +181,7 @@ where
 
             // 2. V-Matrix Part
             let v2_view = self.v_matrix.row(idx_2);
-            let dot = dot_product_unrolled(v1_view, v2_view, v1_len);
+            let dot = dot_product_simd(v1_view, v2_view);
 
             let denom = (q_diag * self.p_diag[idx_2]).sqrt();
             
@@ -225,34 +224,72 @@ where
 }
 
 #[inline(always)]
-fn dot_product_unrolled<T>(a: ndarray::ArrayView1<T>, b: ndarray::ArrayView1<T>, len: usize) -> T
+fn dot_product_simd<T>(a: ndarray::ArrayView1<T>, b: ndarray::ArrayView1<T>) -> T
 where
     T: Float + Debug + Send + Sync + std::iter::Sum,
 {
-    let mut acc0 = T::zero();
-    let mut acc1 = T::zero();
-    let mut acc2 = T::zero();
-    let mut acc3 = T::zero();
-
-    let chunks = len / 4;
-    let rem = len % 4;
-
-    for i in 0..chunks {
-        let base = i * 4;
-        unsafe {
-            acc0 = acc0 + *a.uget(base) * *b.uget(base);
-            acc1 = acc1 + *a.uget(base + 1) * *b.uget(base + 1);
-            acc2 = acc2 + *a.uget(base + 2) * *b.uget(base + 2);
-            acc3 = acc3 + *a.uget(base + 3) * *b.uget(base + 3);
+    if let (Some(av), Some(bv)) = (a.as_slice(), b.as_slice()) {
+        if std::mem::size_of::<T>() == 4 {
+            let avf: &[f32] = unsafe { std::slice::from_raw_parts(av.as_ptr() as *const f32, av.len()) };
+            let bvf: &[f32] = unsafe { std::slice::from_raw_parts(bv.as_ptr() as *const f32, bv.len()) };
+            let mut acc = 0.0f32;
+            let chunks = avf.len() / 8;
+            let tail_start = chunks * 8;
+            for i in 0..chunks {
+                let base = i * 8;
+                let va = f32x8::from([
+                    avf[base],
+                    avf[base + 1],
+                    avf[base + 2],
+                    avf[base + 3],
+                    avf[base + 4],
+                    avf[base + 5],
+                    avf[base + 6],
+                    avf[base + 7],
+                ]);
+                let vb = f32x8::from([
+                    bvf[base],
+                    bvf[base + 1],
+                    bvf[base + 2],
+                    bvf[base + 3],
+                    bvf[base + 4],
+                    bvf[base + 5],
+                    bvf[base + 6],
+                    bvf[base + 7],
+                ]);
+                acc += (va * vb).reduce_add();
+            }
+            for i in tail_start..avf.len() {
+                acc += avf[i] * bvf[i];
+            }
+            return NumCast::from(acc).unwrap();
+        }
+        if std::mem::size_of::<T>() == 8 {
+            let avf: &[f64] = unsafe { std::slice::from_raw_parts(av.as_ptr() as *const f64, av.len()) };
+            let bvf: &[f64] = unsafe { std::slice::from_raw_parts(bv.as_ptr() as *const f64, bv.len()) };
+            let mut acc = 0.0f64;
+            let chunks = avf.len() / 4;
+            let tail_start = chunks * 4;
+            for i in 0..chunks {
+                let base = i * 4;
+                let va = f64x4::from([avf[base], avf[base + 1], avf[base + 2], avf[base + 3]]);
+                let vb = f64x4::from([bvf[base], bvf[base + 1], bvf[base + 2], bvf[base + 3]]);
+                acc += (va * vb).reduce_add();
+            }
+            for i in tail_start..avf.len() {
+                acc += avf[i] * bvf[i];
+            }
+            return NumCast::from(acc).unwrap();
         }
     }
 
-    let mut tail = T::zero();
-    for i in (len - rem)..len {
+    // Fallback scalar (non-contiguous or other types)
+    let mut dot = T::zero();
+    let len = a.len();
+    for i in 0..len {
         unsafe {
-            tail = tail + *a.uget(i) * *b.uget(i);
+            dot = dot + *a.uget(i) * *b.uget(i);
         }
     }
-
-    acc0 + acc1 + acc2 + acc3 + tail
+    dot
 }
