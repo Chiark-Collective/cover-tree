@@ -124,22 +124,11 @@ where
 
         let k_val = self.rbf_var * (self.neg_half * d2).exp();
 
-        // V-Matrix dot product (high dimension, typically 512+)
-        // This is the hot loop.
+        // V-Matrix dot product (hot loop)
         let v1_view = self.v_matrix.row(idx_1);
         let v2_view = self.v_matrix.row(idx_2);
-        
-        let mut dot = T::zero();
         let len = v1_view.len();
-        
-        // Manual loop with unchecked indexing for performance.
-        // Slicing might fail if the array is not contiguous (e.g. F-ordered input),
-        // so we avoid as_slice().
-        for i in 0..len {
-            unsafe {
-                dot = dot + *v1_view.uget(i) * *v2_view.uget(i);
-            }
-        }
+        let dot = dot_product_unrolled(v1_view, v2_view, len);
 
         let denom = (self.p_diag[idx_1] * self.p_diag[idx_2]).sqrt();
         let eps = T::from(1e-9).unwrap();
@@ -156,6 +145,14 @@ where
     }
 
     pub fn distances_sq_batch_idx(&self, q_idx: usize, p_indices: &[usize]) -> Vec<T> {
+        let mut results = Vec::with_capacity(p_indices.len());
+        self.distances_sq_batch_idx_into(q_idx, p_indices, &mut results);
+        results
+    }
+
+    pub fn distances_sq_batch_idx_into(&self, q_idx: usize, p_indices: &[usize], out: &mut Vec<T>) {
+        out.clear();
+        out.reserve(p_indices.len());
         // Pre-fetch query data
         let x_view = self.scaled_coords.row(q_idx);
         let x = x_view.as_slice().unwrap_or_else(|| panic!("Query coords must be contiguous"));
@@ -167,8 +164,6 @@ where
         let one = T::one();
         let neg_one = -one;
         let eps = T::from(1e-9).unwrap();
-
-        let mut results = Vec::with_capacity(p_indices.len());
 
         for &idx_2 in p_indices {
             // 1. Coords Part
@@ -187,24 +182,18 @@ where
 
             // 2. V-Matrix Part
             let v2_view = self.v_matrix.row(idx_2);
-            let mut dot = T::zero();
-            for i in 0..v1_len {
-                unsafe {
-                    dot = dot + *v1_view.uget(i) * *v2_view.uget(i);
-                }
-            }
+            let dot = dot_product_unrolled(v1_view, v2_view, v1_len);
 
             let denom = (q_diag * self.p_diag[idx_2]).sqrt();
             
             if denom < eps {
-                results.push(T::one());
+                out.push(T::one());
             } else {
                 let rho = (k_val - dot) / denom;
                 let rho_clamped = rho.max(neg_one).min(one);
-                results.push(one - rho_clamped.abs());
+                out.push(one - rho_clamped.abs());
             }
         }
-        results
     }
 
     pub fn distance_idx(&self, idx_1: usize, idx_2: usize) -> T {
@@ -233,4 +222,37 @@ where
         // Residual correlation distance is bounded by sqrt(2).
         Some(T::from(2.0).unwrap().sqrt())
     }
+}
+
+#[inline(always)]
+fn dot_product_unrolled<T>(a: ndarray::ArrayView1<T>, b: ndarray::ArrayView1<T>, len: usize) -> T
+where
+    T: Float + Debug + Send + Sync + std::iter::Sum,
+{
+    let mut acc0 = T::zero();
+    let mut acc1 = T::zero();
+    let mut acc2 = T::zero();
+    let mut acc3 = T::zero();
+
+    let chunks = len / 4;
+    let rem = len % 4;
+
+    for i in 0..chunks {
+        let base = i * 4;
+        unsafe {
+            acc0 = acc0 + *a.uget(base) * *b.uget(base);
+            acc1 = acc1 + *a.uget(base + 1) * *b.uget(base + 1);
+            acc2 = acc2 + *a.uget(base + 2) * *b.uget(base + 2);
+            acc3 = acc3 + *a.uget(base + 3) * *b.uget(base + 3);
+        }
+    }
+
+    let mut tail = T::zero();
+    for i in (len - rem)..len {
+        unsafe {
+            tail = tail + *a.uget(i) * *b.uget(i);
+        }
+    }
+
+    acc0 + acc1 + acc2 + acc3 + tail
 }
