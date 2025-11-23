@@ -251,10 +251,12 @@ where
     // `Candidate` implements `Ord` as `other.dist.cmp(&self.dist)`.
     // So `pop()` returns SMALLEST distance. Correct.
 
-    // Push root (index 0) with "parent distance" 0.0 (dummy)
-    let zero = T::zero();
+    // Push root (index 0) with its true distance
+    let root_payload = tree.get_point_row(0);
+    let root_dataset_idx = root_payload[0].to_usize().unwrap();
+    let root_dist = metric.distance_idx(q_dataset_idx, root_dataset_idx);
     candidate_heap.push(Candidate {
-        dist: OrderedFloat(zero),
+        dist: OrderedFloat(root_dist),
         node_idx: 0,
     });
 
@@ -321,9 +323,13 @@ where
 
             let mut child = tree.children[node_idx as usize];
             while child != -1 {
-                // Push child with PARENT's distance (`dist`) as key
+                // Compute exact distance for child to maintain proper ordering/pruning
+                let child_dataset_idx = node_to_dataset[child as usize] as usize;
+                let child_dist_sq = metric.distance_sq_idx(q_dataset_idx, child_dataset_idx);
+                let child_dist = child_dist_sq.sqrt();
+
                 candidate_heap.push(Candidate {
-                    dist: OrderedFloat(dist),
+                    dist: OrderedFloat(child_dist),
                     node_idx: child,
                 });
                 child = tree.next_node[child as usize];
