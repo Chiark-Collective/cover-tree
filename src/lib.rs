@@ -380,6 +380,9 @@ impl CoverTreeWrapper {
                     rbf_var as f32,
                     rbf_ls_arr.as_slice().unwrap(),
                 );
+
+                let scope_caps = load_scope_caps(py);
+
                 let mode = std::env::var("COVERTREEX_RUST_PCCT2_SGEMM")
                     .unwrap_or_else(|_| "tree".to_string());
                 let (indices, dists) = match mode.as_str() {
@@ -428,7 +431,7 @@ impl CoverTreeWrapper {
                             &node_to_dataset,
                             &metric,
                             k,
-                            None,
+                            scope_caps.as_ref(),
                         );
                         if !survivors.is_empty() {
                             batch_residual_knn_query_block_sgemm(
@@ -451,7 +454,7 @@ impl CoverTreeWrapper {
                         &node_to_dataset,
                         &metric,
                         k,
-                        None,
+                        scope_caps.as_ref(),
                     ),
                 };
                 let (idx, dst) = to_py_arrays(py, indices, dists);
