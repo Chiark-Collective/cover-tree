@@ -261,9 +261,13 @@ where
     });
 
     let mut kth_dist = T::max_value();
-    const BATCH_SIZE: usize = 32;
+    const BATCH_SIZE: usize = 64;
     let mut batch_nodes = Vec::with_capacity(BATCH_SIZE);
     let mut dataset_indices = Vec::with_capacity(BATCH_SIZE);
+    let mut distance_buffer: Vec<T> = Vec::with_capacity(BATCH_SIZE);
+    let mut child_nodes = Vec::with_capacity(BATCH_SIZE);
+    let mut child_dataset_indices = Vec::with_capacity(BATCH_SIZE);
+    let mut child_distance_buffer: Vec<T> = Vec::with_capacity(BATCH_SIZE);
 
     while !candidate_heap.is_empty() {
         batch_nodes.clear();
@@ -287,10 +291,10 @@ where
         }
 
         // 2. Batch Compute Distances
-        let dists_sq = metric.distances_sq_batch_idx(q_dataset_idx, &dataset_indices);
+        metric.distances_sq_batch_idx_into(q_dataset_idx, &dataset_indices, &mut distance_buffer);
 
         // 3. Process Results
-        for (i, &d_sq) in dists_sq.iter().enumerate() {
+        for (i, &d_sq) in distance_buffer.iter().enumerate() {
             let dist = d_sq.sqrt();
             let node_idx = batch_nodes[i];
 
@@ -321,18 +325,28 @@ where
                 continue; 
             }
 
+            // Collect children for batched distance evaluation
+            child_nodes.clear();
+            child_dataset_indices.clear();
             let mut child = tree.children[node_idx as usize];
             while child != -1 {
-                // Compute exact distance for child to maintain proper ordering/pruning
-                let child_dataset_idx = node_to_dataset[child as usize] as usize;
-                let child_dist_sq = metric.distance_sq_idx(q_dataset_idx, child_dataset_idx);
-                let child_dist = child_dist_sq.sqrt();
-
-                candidate_heap.push(Candidate {
-                    dist: OrderedFloat(child_dist),
-                    node_idx: child,
-                });
+                child_nodes.push(child);
+                child_dataset_indices.push(node_to_dataset[child as usize] as usize);
                 child = tree.next_node[child as usize];
+                if child == tree.children[node_idx as usize] {
+                    break;
+                }
+            }
+
+            if !child_nodes.is_empty() {
+                metric.distances_sq_batch_idx_into(q_dataset_idx, &child_dataset_indices, &mut child_distance_buffer);
+                for (j, &child_node) in child_nodes.iter().enumerate() {
+                    let child_dist = child_distance_buffer[j].sqrt();
+                    candidate_heap.push(Candidate {
+                        dist: OrderedFloat(child_dist),
+                        node_idx: child_node,
+                    });
+                }
             }
         }
     }
