@@ -241,63 +241,92 @@ where
         return (vec![], vec![]);
     }
 
-    let root_node_idx = 0;
-    let root_dataset_idx = node_to_dataset[root_node_idx as usize] as usize;
+    // Numba-style Frontier Batching
+    // Initial candidates: roots.
+    // We push them with priority 0.0 (or max_value? min_value?).
+    // Min-heap needed?
+    // BinaryHeap is Max-Heap.
+    // To get Min-Heap behavior for `dist`, we use `OrderedFloat` which orders by value.
+    // We want to pop SMALLEST distance first (Best-First).
+    // `Candidate` implements `Ord` as `other.dist.cmp(&self.dist)`.
+    // So `pop()` returns SMALLEST distance. Correct.
 
-    let d = metric.distance_idx(q_dataset_idx, root_dataset_idx);
+    // Push root (index 0) with "parent distance" 0.0 (dummy)
+    let zero = T::zero();
     candidate_heap.push(Candidate {
-        dist: OrderedFloat(d),
-        node_idx: root_node_idx,
+        dist: OrderedFloat(zero),
+        node_idx: 0,
     });
 
-    let two = T::from(2.0).unwrap();
     let mut kth_dist = T::max_value();
+    const BATCH_SIZE: usize = 32;
+    let mut batch_nodes = Vec::with_capacity(BATCH_SIZE);
+    let mut dataset_indices = Vec::with_capacity(BATCH_SIZE);
 
-    while let Some(cand) = candidate_heap.pop() {
-        let dist = cand.dist.0;
-        let node_idx = cand.node_idx;
+    while !candidate_heap.is_empty() {
+        batch_nodes.clear();
+        dataset_indices.clear();
 
-        // Pruning check
-        if result_heap.len() == k {
+        // 1. Collect Batch
+        while batch_nodes.len() < BATCH_SIZE {
+            if let Some(cand) = candidate_heap.pop() {
+                // Pruning based on parent distance (loose bound)
+                // Numba doesn't seem to prune here, but we can?
+                // Let's just process.
+                batch_nodes.push(cand.node_idx);
+                dataset_indices.push(node_to_dataset[cand.node_idx as usize] as usize);
+            } else {
+                break;
+            }
+        }
+
+        if batch_nodes.is_empty() {
+            break;
+        }
+
+        // 2. Batch Compute Distances
+        let dists_sq = metric.distances_sq_batch_idx(q_dataset_idx, &dataset_indices);
+
+        // 3. Process Results
+        for (i, &d_sq) in dists_sq.iter().enumerate() {
+            let dist = d_sq.sqrt();
+            let node_idx = batch_nodes[i];
+
+            // Update k-NN
+            if result_heap.len() < k || dist < kth_dist {
+                result_heap.push(Neighbor {
+                    dist: OrderedFloat(dist),
+                    node_idx,
+                });
+                if result_heap.len() > k {
+                    result_heap.pop();
+                }
+                if result_heap.len() == k {
+                    if let Some(peek) = result_heap.peek() {
+                        kth_dist = peek.dist.0;
+                    }
+                }
+            }
+
+            // Expand Children
+            // Pruning: d(q, u) - 2^{level+1} > kth_dist
+            let two = T::from(2.0).unwrap();
             let level = tree.levels[node_idx as usize];
             let radius = two.powi(level + 1);
             let lower_bound = dist - radius;
-            if lower_bound > kth_dist {
-                continue;
-            }
-        }
 
-        result_heap.push(Neighbor {
-            dist: OrderedFloat(dist),
-            node_idx,
-        });
-        if result_heap.len() > k {
-            result_heap.pop();
-        }
-        if result_heap.len() == k {
-            if let Some(peek) = result_heap.peek() {
-                kth_dist = peek.dist.0;
+            if result_heap.len() == k && lower_bound > kth_dist {
+                continue; 
             }
-        }
 
-        let mut child = tree.children[node_idx as usize];
-        while child != -1 {
-            // No visited check needed for tree structure
-            let child_dataset_idx = node_to_dataset[child as usize] as usize;
-            let d_child = metric.distance_idx(q_dataset_idx, child_dataset_idx);
-            
-            candidate_heap.push(Candidate {
-                dist: OrderedFloat(d_child),
-                node_idx: child,
-            });
-
-            let next = tree.next_node[child as usize];
-            if next == child {
-                break;
-            }
-            child = next;
-            if child == tree.children[node_idx as usize] {
-                break;
+            let mut child = tree.children[node_idx as usize];
+            while child != -1 {
+                // Push child with PARENT's distance (`dist`) as key
+                candidate_heap.push(Candidate {
+                    dist: OrderedFloat(dist),
+                    node_idx: child,
+                });
+                child = tree.next_node[child as usize];
             }
         }
     }

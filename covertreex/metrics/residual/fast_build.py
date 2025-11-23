@@ -52,7 +52,8 @@ def build_fast_residual_tree(
 
     dummy = np.empty((0, 1), dtype=dtype)
     empty_i64 = np.empty(0, dtype=np.int64)
-    tree = covertreex_backend.CoverTreeWrapper(dummy, empty_i64, empty_i64, empty_i64, empty_i64, -20, 20)
+    empty_i32 = np.empty(0, dtype=np.int32)
+    tree = covertreex_backend.CoverTreeWrapper(dummy, empty_i64, empty_i64, empty_i64, empty_i32, -20, 20)
 
     indices_all = np.arange(host_backend.num_points, dtype=dtype).reshape(-1, 1)
     tree.insert_residual(indices_all, v_matrix, p_diag, coords, rbf_var, rbf_ls, chunk_size)

@@ -206,7 +206,7 @@ def _rust_batch_insert(
 ) -> tuple[PCCTree, BatchInsertPlan]:
     import covertreex_backend
     from covertreex.queries.utils import to_numpy_array
-    from covertreex.metrics.residual.core import get_residual_backend
+    from covertreex.metrics.residual.core import get_residual_backend, decode_indices
     
     batch_np = to_numpy_array(backend, batch_points, dtype=np.float32)
     points_np = to_numpy_array(backend, tree.points, dtype=np.float32)
@@ -224,6 +224,13 @@ def _rust_batch_insert(
     
     if context.config.metric == "residual_correlation":
         host_backend = get_residual_backend()
+        
+        # Rust backend for Residual Metric expects INDICES, not coordinates.
+        # We must decode the batch coordinates into dataset indices.
+        batch_indices = decode_indices(host_backend, batch_np)
+        # Convert indices to float32 for the wrapper (which expects f32 or f64 arrays)
+        batch_indices_f32 = batch_indices.astype(np.float32).reshape(-1, 1)
+        
         v_matrix = host_backend.v_matrix
         p_diag = host_backend.p_diag
         coords = host_backend.kernel_points_f32
@@ -235,8 +242,8 @@ def _rust_batch_insert(
         else:
             rbf_ls = np.asarray(rbf_ls, dtype=np.float32)
 
-        chunk_size = int(getattr(context.config, "residual_chunk_size", batch_np.shape[0]))
-        wrapper.insert_residual(batch_np, v_matrix, p_diag, coords, rbf_var, rbf_ls, chunk_size)
+        chunk_size = int(getattr(context.config, "residual_chunk_size", batch_indices.shape[0]))
+        wrapper.insert_residual(batch_indices_f32, v_matrix, p_diag, coords, rbf_var, rbf_ls, chunk_size)
     else:
         wrapper.insert(batch_np)
         
@@ -252,7 +259,6 @@ def _rust_batch_insert(
     # Construct result
     new_tree = PCCTree(
         backend=backend,
-        dimension=tree.dimension,
         points=backend.asarray(new_points),
         parents=backend.asarray(new_parents),
         children=backend.asarray(new_children),

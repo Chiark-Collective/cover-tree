@@ -34,10 +34,10 @@ from covertreex.queries.knn import knn
 from tests.utils.datasets import gaussian_points
 
 # Configuration
-DATASET_SIZE = 50_000
+DATASET_SIZE = 10_000
 DIMENSION = 3
 K = 50
-QUERIES = 2_000
+QUERIES = 500
 BATCH_SIZE = 512
 SEED = 42
 WARMUP_SIZE = 1_000

@@ -155,6 +155,58 @@ where
         one - rho_clamped.abs()
     }
 
+    pub fn distances_sq_batch_idx(&self, q_idx: usize, p_indices: &[usize]) -> Vec<T> {
+        // Pre-fetch query data
+        let x_view = self.scaled_coords.row(q_idx);
+        let x = x_view.as_slice().unwrap_or_else(|| panic!("Query coords must be contiguous"));
+        let q_norm = self.scaled_norms[q_idx];
+        let v1_view = self.v_matrix.row(q_idx);
+        let v1_len = v1_view.len();
+        let q_diag = self.p_diag[q_idx];
+        let two = T::from(2.0).unwrap();
+        let one = T::one();
+        let neg_one = -one;
+        let eps = T::from(1e-9).unwrap();
+
+        let mut results = Vec::with_capacity(p_indices.len());
+
+        for &idx_2 in p_indices {
+            // 1. Coords Part
+            let y_view = self.scaled_coords.row(idx_2);
+            let y = y_view.as_slice().unwrap(); // Assume contiguous from construction
+            
+            let mut dot_scaled = T::zero();
+            for i in 0..x.len() {
+                dot_scaled = dot_scaled + x[i] * y[i];
+            }
+            
+            let mut d2 = q_norm + self.scaled_norms[idx_2] - two * dot_scaled;
+            if d2 < T::zero() { d2 = T::zero(); }
+            
+            let k_val = self.rbf_var * (self.neg_half * d2).exp();
+
+            // 2. V-Matrix Part
+            let v2_view = self.v_matrix.row(idx_2);
+            let mut dot = T::zero();
+            for i in 0..v1_len {
+                unsafe {
+                    dot = dot + *v1_view.uget(i) * *v2_view.uget(i);
+                }
+            }
+
+            let denom = (q_diag * self.p_diag[idx_2]).sqrt();
+            
+            if denom < eps {
+                results.push(T::one());
+            } else {
+                let rho = (k_val - dot) / denom;
+                let rho_clamped = rho.max(neg_one).min(one);
+                results.push(one - rho_clamped.abs());
+            }
+        }
+        results
+    }
+
     pub fn distance_idx(&self, idx_1: usize, idx_2: usize) -> T {
         self.distance_sq_idx(idx_1, idx_2).sqrt()
     }

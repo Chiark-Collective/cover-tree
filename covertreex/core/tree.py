@@ -160,6 +160,7 @@ class TreeLogStats:
             "num_conflicts_resolved": self.num_conflicts_resolved,
         }
 
+_SENTINEL = object()
 
 @dataclass(frozen=True)
 class PCCTree:
@@ -179,6 +180,8 @@ class PCCTree:
     level_offsets: ArrayLike
     si_cache: ArrayLike
     next_cache: ArrayLike
+    min_scale: int | None = field(default=None)
+    max_scale: int | None = field(default=None)
     stats: TreeLogStats = field(default_factory=TreeLogStats)
     backend: TreeBackend = field(default_factory=_context_backend)
 
@@ -243,6 +246,8 @@ class PCCTree:
             "level_offsets": xp.asarray(self.level_offsets),
             "si_cache": xp.asarray(self.si_cache),
             "next_cache": xp.asarray(self.next_cache),
+            "min_scale": self.min_scale,
+            "max_scale": self.max_scale,
             "stats": self.stats.as_dict(),
             "backend": self.backend.name,
         }
@@ -257,10 +262,15 @@ class PCCTree:
         level_offsets: ArrayLike | None = None,
         si_cache: ArrayLike | None = None,
         next_cache: ArrayLike | None = None,
+        min_scale: int | None | object = _SENTINEL,
+        max_scale: int | None | object = _SENTINEL,
         stats: TreeLogStats | None = None,
         backend: TreeBackend | None = None,
     ) -> "PCCTree":
         """Functional update helper mirroring dataclasses.replace semantics."""
+        
+        _min = self.min_scale if min_scale is _SENTINEL else min_scale
+        _max = self.max_scale if max_scale is _SENTINEL else max_scale
 
         return PCCTree(
             points=points if points is not None else self.points,
@@ -270,6 +280,8 @@ class PCCTree:
             level_offsets=level_offsets if level_offsets is not None else self.level_offsets,
             si_cache=si_cache if si_cache is not None else self.si_cache,
             next_cache=next_cache if next_cache is not None else self.next_cache,
+            min_scale=_min, # type: ignore
+            max_scale=_max, # type: ignore
             stats=stats if stats is not None else self.stats,
             backend=backend if backend is not None else self.backend,
         )
@@ -303,6 +315,8 @@ class PCCTree:
             level_offsets=backend.zeros((1,), dtype=backend.default_int),
             si_cache=backend.empty((0,), dtype=backend.default_float),
             next_cache=zeros_1d,
+            min_scale=None,
+            max_scale=None,
             stats=TreeLogStats(),
             backend=backend,
         )
