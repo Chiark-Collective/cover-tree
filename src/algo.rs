@@ -677,9 +677,13 @@ where
             .filter(|&v| v > 0)
             .unwrap_or(64)
     };
-    let use_masked_append = std::env::var("COVERTREEX_RESIDUAL_MASKED_SCOPE_APPEND")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(true);
+    let use_masked_append = if parity_mode {
+        false
+    } else {
+        std::env::var("COVERTREEX_RESIDUAL_MASKED_SCOPE_APPEND")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(true)
+    };
     let scope_member_limit_env = std::env::var("COVERTREEX_RESIDUAL_SCOPE_MEMBER_LIMIT")
         .ok()
         .and_then(|v| v.parse::<isize>().ok())
@@ -741,6 +745,29 @@ where
     let mut cached_lb: Vec<T> = vec![T::max_value(); node_to_dataset.len()];
 
     while !frontier.is_empty() && survivors_count < budget_limit {
+        if parity_mode && result_heap.len() == k {
+            // Early stop if frontier cannot beat current kth
+            let mut min_lb = T::max_value();
+            for &(parent, parent_dist) in frontier.iter() {
+                let parent_level = tree.levels[parent];
+                let mut parent_radius = if !tree.si_cache.is_empty() && parent < tree.si_cache.len()
+                {
+                    tree.si_cache[parent]
+                } else {
+                    two.powi(parent_level + 1)
+                };
+                if parent_radius < radius_floor {
+                    parent_radius = radius_floor;
+                }
+                let lb = parent_dist - parent_radius;
+                if lb < min_lb {
+                    min_lb = lb;
+                }
+            }
+            if min_lb > kth_dist {
+                break;
+            }
+        }
         if let Some(t) = telemetry.as_mut() {
             t.record_frontier(frontier.len(), children_nodes.len());
         }

@@ -678,80 +678,193 @@ fn build_pcct_residual_tree(
     chunk_size: Option<usize>,
     batch_order: Option<String>,
 ) -> PyResult<(CoverTreeWrapper, Vec<i64>)> {
-    // Force float32 to align with hybrid/PCCT fast paths
-    let v_matrix_arr = to_array2_f32(&v_matrix.bind(py))?;
-    let p_diag_arr = to_array1_f32(&p_diag.bind(py))?;
-    let coords_arr = to_array2_f32(&coords.bind(py))?;
-    let rbf_ls_arr = to_array1_f32(&rbf_ls.bind(py))?;
+    let parity_mode = std::env::var("COVERTREEX_RESIDUAL_PARITY")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
 
-    let order = match batch_order.as_deref() {
-        Some(s) if s.eq_ignore_ascii_case("natural") => (0..coords_arr.nrows()).collect(),
-        Some(s) if s.eq_ignore_ascii_case("hilbert") => hilbert_like_order(coords_arr.view()),
-        Some(s) if s.eq_ignore_ascii_case("hilbert-morton") => {
-            hilbert_like_order(coords_arr.view())
-        }
-        _ => hilbert_like_order(coords_arr.view()),
+    let (v_matrix_f32, v_matrix_f64, p_diag_f32, p_diag_f64, coords_f32, coords_f64, rbf_ls_f32,
+        rbf_ls_f64) = if parity_mode {
+        (
+            None,
+            Some(to_array2_f64(&v_matrix.bind(py))?),
+            None,
+            Some(to_array1_f64(&p_diag.bind(py))?),
+            None,
+            Some(to_array2_f64(&coords.bind(py))?),
+            None,
+            Some(to_array1_f64(&rbf_ls.bind(py))?),
+        )
+    } else {
+        (
+            Some(to_array2_f32(&v_matrix.bind(py))?),
+            None,
+            Some(to_array1_f32(&p_diag.bind(py))?),
+            None,
+            Some(to_array2_f32(&coords.bind(py))?),
+            None,
+            Some(to_array1_f32(&rbf_ls.bind(py))?),
+            None,
+        )
     };
 
-    let mut indices_f32 = Vec::with_capacity(order.len());
-    for &idx in &order {
-        indices_f32.push(idx as f32);
-    }
-    let indices_arr =
-        Array2::from_shape_vec((order.len(), 1), indices_f32).expect("shape for indices");
+    let n_rows = coords_f32
+        .as_ref()
+        .map(|c| c.nrows())
+        .unwrap_or_else(|| coords_f64.as_ref().unwrap().nrows());
+    let mut coords_for_order_owned: Option<ndarray::Array2<f32>> = None;
+    let coords_for_order = if let Some(c) = coords_f32.as_ref() {
+        c.view()
+    } else {
+        let tmp: ndarray::Array2<f32> = coords_f64
+            .as_ref()
+            .unwrap()
+            .mapv(|v| v as f32);
+        coords_for_order_owned = Some(tmp);
+        coords_for_order_owned.as_ref().unwrap().view()
+    };
+    let order = match batch_order.as_deref() {
+        Some(s) if s.eq_ignore_ascii_case("natural") => (0..n_rows).collect(),
+        Some(s) if s.eq_ignore_ascii_case("hilbert") => hilbert_like_order(coords_for_order),
+        Some(s) if s.eq_ignore_ascii_case("hilbert-morton") => hilbert_like_order(coords_for_order),
+        _ => hilbert_like_order(coords_for_order),
+    };
 
-    // Empty cover tree wrapper (f32)
-    let dummy = Array2::<f32>::zeros((0, 1));
+    // Index payloads (consistent with existing Rust path)
+    let indices_arr_f32 = {
+        let mut v = Vec::with_capacity(order.len());
+        for &idx in &order {
+            v.push(idx as f32);
+        }
+        ndarray::Array2::from_shape_vec((order.len(), 1), v).ok()
+    };
+    let indices_arr_f64 = {
+        let mut v = Vec::with_capacity(order.len());
+        for &idx in &order {
+            v.push(idx as f64);
+        }
+        ndarray::Array2::from_shape_vec((order.len(), 1), v).ok()
+    };
+
+    // Empty cover tree wrapper
     let empty_i64 = Array1::<i64>::zeros(0);
     let empty_i32 = Array1::<i32>::zeros(0);
-    let mut tree = CoverTreeWrapper {
-        inner: CoverTreeInner::F32(CoverTreeData::new(
-            dummy,
-            empty_i64.to_vec(),
-            empty_i64.to_vec(),
-            empty_i64.to_vec(),
-            empty_i32.to_vec(),
-            -20,
-            20,
-        )),
-        survivors: Vec::new(),
-        last_query_telemetry: None,
+    let mut tree = if parity_mode {
+        let dummy = Array2::<f64>::zeros((0, 1));
+        CoverTreeWrapper {
+            inner: CoverTreeInner::F64(CoverTreeData::new(
+                dummy,
+                empty_i64.to_vec(),
+                empty_i64.to_vec(),
+                empty_i64.to_vec(),
+                empty_i32.to_vec(),
+                -20,
+                20,
+            )),
+            survivors: Vec::new(),
+            last_query_telemetry: None,
+        }
+    } else {
+        let dummy = Array2::<f32>::zeros((0, 1));
+        CoverTreeWrapper {
+            inner: CoverTreeInner::F32(CoverTreeData::new(
+                dummy,
+                empty_i64.to_vec(),
+                empty_i64.to_vec(),
+                empty_i64.to_vec(),
+                empty_i32.to_vec(),
+                -20,
+                20,
+            )),
+            survivors: Vec::new(),
+            last_query_telemetry: None,
+        }
     };
 
-    let metric = ResidualMetric::new(
-        v_matrix_arr.view(),
-        p_diag_arr.as_slice().unwrap(),
-        coords_arr.view(),
+    let metric_f32 = v_matrix_f32.as_ref().map(|v| ResidualMetric::new(
+        v.view(),
+        p_diag_f32.as_ref().unwrap().as_slice().unwrap(),
+        coords_f32.as_ref().unwrap().view(),
         rbf_var as f32,
-        rbf_ls_arr.as_slice().unwrap(),
+        rbf_ls_f32.as_ref().unwrap().as_slice().unwrap(),
         None,
-    );
-    let chunk = chunk_size.unwrap_or_else(|| indices_arr.nrows());
+    ));
+    let metric_f64 = v_matrix_f64.as_ref().map(|v| ResidualMetric::new(
+        v.view(),
+        p_diag_f64.as_ref().unwrap().as_slice().unwrap(),
+        coords_f64.as_ref().unwrap().view(),
+        rbf_var,
+        rbf_ls_f64.as_ref().unwrap().as_slice().unwrap(),
+        None,
+    ));
+    let chunk = chunk_size.unwrap_or_else(|| {
+        if parity_mode {
+            indices_arr_f64.as_ref().unwrap().nrows()
+        } else {
+            indices_arr_f32.as_ref().unwrap().nrows()
+        }
+    });
     let mut start = 0;
     let mut survivors: Vec<i64> = Vec::new();
-    while start < indices_arr.nrows() {
-        let end = std::cmp::min(start + chunk, indices_arr.nrows());
-        let view = indices_arr.slice(ndarray::s![start..end, ..]);
-        let telemetry = batch_insert_with_telemetry(
-            match &mut tree.inner {
-                CoverTreeInner::F32(data) => data,
-                _ => unreachable!(),
+    while start < if parity_mode {
+        indices_arr_f64.as_ref().unwrap().nrows()
+    } else {
+        indices_arr_f32.as_ref().unwrap().nrows()
+    } {
+        let end = std::cmp::min(
+            start + chunk,
+            if parity_mode {
+                indices_arr_f64.as_ref().unwrap().nrows()
+            } else {
+                indices_arr_f32.as_ref().unwrap().nrows()
             },
-            view,
-            None,
-            &metric,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
         );
-        for sel in telemetry.selected.iter() {
-            survivors.push((telemetry.batch_start_index + *sel) as i64);
+
+        if parity_mode {
+            let view = indices_arr_f64.as_ref().unwrap().slice(ndarray::s![start..end, ..]);
+            let telemetry = batch_insert_with_telemetry(
+                match &mut tree.inner {
+                    CoverTreeInner::F64(data) => data,
+                    _ => unreachable!(),
+                },
+                view,
+                None,
+                metric_f64.as_ref().unwrap(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            );
+            for sel in telemetry.selected.iter() {
+                survivors.push((telemetry.batch_start_index + *sel) as i64);
+            }
+        } else {
+            let view = indices_arr_f32.as_ref().unwrap().slice(ndarray::s![start..end, ..]);
+            let telemetry = batch_insert_with_telemetry(
+                match &mut tree.inner {
+                    CoverTreeInner::F32(data) => data,
+                    _ => unreachable!(),
+                },
+                view,
+                None,
+                metric_f32.as_ref().unwrap(),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            );
+            for sel in telemetry.selected.iter() {
+                survivors.push((telemetry.batch_start_index + *sel) as i64);
+            }
         }
 
         start = end;
@@ -761,17 +874,32 @@ fn build_pcct_residual_tree(
     tree.survivors = survivors;
 
     // Compute and persist separation-invariant cache (cover radii) for residual traversal.
-    let si_cache = compute_si_cache_residual(
-        match &tree.inner {
-            CoverTreeInner::F32(data) => data,
+    if parity_mode {
+        let si_cache = compute_si_cache_residual(
+            match &tree.inner {
+                CoverTreeInner::F64(data) => data,
+                _ => unreachable!(),
+            },
+            node_to_dataset.as_slice(),
+            metric_f64.as_ref().unwrap(),
+        );
+        match &mut tree.inner {
+            CoverTreeInner::F64(data) => data.set_si_cache(si_cache),
             _ => unreachable!(),
-        },
-        node_to_dataset.as_slice(),
-        &metric,
-    );
-    match &mut tree.inner {
-        CoverTreeInner::F32(data) => data.set_si_cache(si_cache),
-        _ => unreachable!(),
+        }
+    } else {
+        let si_cache = compute_si_cache_residual(
+            match &tree.inner {
+                CoverTreeInner::F32(data) => data,
+                _ => unreachable!(),
+            },
+            node_to_dataset.as_slice(),
+            metric_f32.as_ref().unwrap(),
+        );
+        match &mut tree.inner {
+            CoverTreeInner::F32(data) => data.set_si_cache(si_cache),
+            _ => unreachable!(),
+        }
     }
 
     Ok((tree, node_to_dataset))
