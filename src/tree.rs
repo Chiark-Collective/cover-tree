@@ -13,6 +13,7 @@ pub struct CoverTreeData<T> {
     pub dimension: usize,
     pub min_level: i32,
     pub max_level: i32,
+    pub si_cache: Vec<T>,
 }
 
 impl<T> CoverTreeData<T>
@@ -28,12 +29,15 @@ where
         min_level: i32,
         max_level: i32,
     ) -> Self {
+        let rows = points_array.nrows();
         let dimension = points_array.shape()[1];
         // Convert Array2 to Vec
         let points = points_array
             .as_standard_layout()
             .into_owned()
             .into_raw_vec();
+
+        let si_cache = vec![T::zero(); rows];
 
         Self {
             points,
@@ -44,6 +48,7 @@ where
             dimension,
             min_level,
             max_level,
+            si_cache,
         }
     }
 
@@ -71,6 +76,7 @@ where
         self.children.push(-1);
         self.next_node.push(-1);
         self.levels.push(level);
+        self.si_cache.push(T::zero());
 
         // Link to parent (if valid)
         if parent >= 0 {
@@ -111,5 +117,9 @@ where
         if parent >= 0 {
             self.link_child(parent as usize, idx);
         }
+    }
+
+    pub fn set_si_cache(&mut self, cache: Vec<T>) {
+        self.si_cache = cache;
     }
 }

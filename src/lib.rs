@@ -1,7 +1,7 @@
 use crate::algo::batch::{batch_insert, batch_insert_with_telemetry, BatchInsertTelemetry};
 use crate::algo::{
     batch_knn_query, batch_residual_knn_query, batch_residual_knn_query_block_sgemm,
-    debug_stats_snapshot, set_debug_stats_enabled, take_debug_stats,
+    compute_si_cache_residual, debug_stats_snapshot, set_debug_stats_enabled, take_debug_stats,
 };
 use crate::metric::{Euclidean, ResidualMetric};
 use crate::pcct::hilbert_like_order;
@@ -759,6 +759,21 @@ fn build_pcct_residual_tree(
 
     let node_to_dataset: Vec<i64> = order.iter().map(|&i| i as i64).collect();
     tree.survivors = survivors;
+
+    // Compute and persist separation-invariant cache (cover radii) for residual traversal.
+    let si_cache = compute_si_cache_residual(
+        match &tree.inner {
+            CoverTreeInner::F32(data) => data,
+            _ => unreachable!(),
+        },
+        node_to_dataset.as_slice(),
+        &metric,
+    );
+    match &mut tree.inner {
+        CoverTreeInner::F32(data) => data.set_si_cache(si_cache),
+        _ => unreachable!(),
+    }
+
     Ok((tree, node_to_dataset))
 }
 
@@ -1005,6 +1020,20 @@ fn build_pcct2_residual_tree(
 
     let node_to_dataset: Vec<i64> = order.iter().map(|&i| i as i64).collect();
     tree.survivors = survivors;
+
+    let si_cache = compute_si_cache_residual(
+        match &tree.inner {
+            CoverTreeInner::F32(data) => data,
+            _ => unreachable!(),
+        },
+        node_to_dataset.as_slice(),
+        &metric,
+    );
+    match &mut tree.inner {
+        CoverTreeInner::F32(data) => data.set_si_cache(si_cache),
+        _ => unreachable!(),
+    }
+
     Ok((tree, node_to_dataset))
 }
 

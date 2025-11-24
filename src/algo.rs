@@ -44,6 +44,66 @@ pub(crate) fn debug_stats_snapshot() -> (usize, usize) {
 
 pub mod batch;
 
+// -----------------------------------------------------------------------------
+// Separation invariant cache (cover radii)
+// -----------------------------------------------------------------------------
+
+pub(crate) fn compute_si_cache_residual<'a, T>(
+    tree: &CoverTreeData<T>,
+    node_to_dataset: &[i64],
+    metric: &ResidualMetric<'a, T>,
+) -> Vec<T>
+where
+    T: Float + Debug + Send + Sync + std::iter::Sum + 'a,
+{
+    let mut cache = vec![T::zero(); tree.len()];
+
+    fn dfs<'a, T>(
+        node: usize,
+        tree: &CoverTreeData<T>,
+        node_to_dataset: &[i64],
+        metric: &ResidualMetric<'a, T>,
+        out: &mut [T],
+    ) -> T
+    where
+        T: Float + Debug + Send + Sync + std::iter::Sum + 'a,
+    {
+        let mut max_radius = T::zero();
+        let node_ds = node_to_dataset[node] as usize;
+
+        let mut child = tree.children[node];
+        if child != -1 {
+            loop {
+                let c = child as usize;
+                let child_radius = dfs(c, tree, node_to_dataset, metric, out);
+                let dist = metric.distance_idx(node_ds, node_to_dataset[c] as usize);
+                let bound = dist + child_radius;
+                if bound > max_radius {
+                    max_radius = bound;
+                }
+
+                let next = tree.next_node[c];
+                if next == child {
+                    break;
+                }
+                child = next;
+                if child == tree.children[node] {
+                    break;
+                }
+            }
+        }
+
+        out[node] = max_radius;
+        max_radius
+    }
+
+    if tree.len() > 0 {
+        dfs(0, tree, node_to_dataset, metric, &mut cache);
+    }
+
+    cache
+}
+
 #[derive(Copy, Clone, PartialEq)]
 struct OrderedFloat<T>(T);
 
@@ -524,22 +584,40 @@ where
         return (vec![], vec![]);
     }
 
-    // Budget Configuration
-    let budget_schedule_str = std::env::var("COVERTREEX_RESIDUAL_BUDGET_SCHEDULE").ok();
+    let parity_mode = std::env::var("COVERTREEX_RESIDUAL_PARITY")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    // Budget Configuration (disable in parity mode to match Python gold behavior)
+    let budget_schedule_str = if parity_mode {
+        None
+    } else {
+        std::env::var("COVERTREEX_RESIDUAL_BUDGET_SCHEDULE").ok()
+    };
     let budget_schedule: Vec<usize> = if let Some(s) = budget_schedule_str {
         s.split(',').filter_map(|v| v.parse().ok()).collect()
+    } else if parity_mode {
+        Vec::new()
     } else {
         vec![32, 64, 96]
     };
     // Match Python defaults (scope_budget_up_thresh/down_thresh)
-    let budget_up: f64 = std::env::var("COVERTREEX_RESIDUAL_BUDGET_UP")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0.015);
-    let budget_down: f64 = std::env::var("COVERTREEX_RESIDUAL_BUDGET_DOWN")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0.002);
+    let budget_up: f64 = if parity_mode {
+        1.0
+    } else {
+        std::env::var("COVERTREEX_RESIDUAL_BUDGET_UP")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.015)
+    };
+    let budget_down: f64 = if parity_mode {
+        0.0
+    } else {
+        std::env::var("COVERTREEX_RESIDUAL_BUDGET_DOWN")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.002)
+    };
 
     let mut budget_idx = 0;
     let mut budget_limit = if !budget_schedule.is_empty() {
@@ -562,11 +640,15 @@ where
     survivors_count += 1;
 
     // Buffers and frontier
-    let stream_tile = std::env::var("COVERTREEX_RESIDUAL_STREAM_TILE")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .filter(|&v| v > 0)
-        .unwrap_or(64);
+    let stream_tile = if parity_mode {
+        1
+    } else {
+        std::env::var("COVERTREEX_RESIDUAL_STREAM_TILE")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(64)
+    };
     let use_masked_append = std::env::var("COVERTREEX_RESIDUAL_MASKED_SCOPE_APPEND")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(true);
@@ -574,7 +656,9 @@ where
         .ok()
         .and_then(|v| v.parse::<isize>().ok())
         .unwrap_or(0);
-    let scope_limit: usize = if scope_member_limit_env > 0 {
+    let scope_limit: usize = if parity_mode {
+        usize::MAX
+    } else if scope_member_limit_env > 0 {
         scope_member_limit_env as usize
     } else {
         let scope_limit_env = std::env::var("COVERTREEX_SCOPE_CHUNK_TARGET")
@@ -587,12 +671,20 @@ where
             usize::MAX
         }
     };
-    let dynamic_query_block = std::env::var("COVERTREEX_RESIDUAL_DYNAMIC_QUERY_BLOCK")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(true);
-    let level_cache_batching = std::env::var("COVERTREEX_RESIDUAL_LEVEL_CACHE_BATCHING")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(true);
+    let dynamic_query_block = if parity_mode {
+        false
+    } else {
+        std::env::var("COVERTREEX_RESIDUAL_DYNAMIC_QUERY_BLOCK")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(true)
+    };
+    let level_cache_batching = if parity_mode {
+        false
+    } else {
+        std::env::var("COVERTREEX_RESIDUAL_LEVEL_CACHE_BATCHING")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(true)
+    };
     let emit_stats = EMIT_STATS.load(AtomicOrdering::Relaxed);
     let prune_sentinel = T::max_value();
     let use_pruning =
@@ -631,8 +723,16 @@ where
         // Gather children of the current frontier (level cache: process once per level)
         for &(parent, parent_dist) in frontier.iter() {
             let parent_level = tree.levels[parent];
-            let mut parent_radius = two.powi(parent_level + 1);
-            let capped_parent = metric.apply_level_cap(parent_level, scope_caps, parent_radius);
+            let mut parent_radius = if !tree.si_cache.is_empty() && parent < tree.si_cache.len() {
+                tree.si_cache[parent]
+            } else {
+                two.powi(parent_level + 1)
+            };
+            let capped_parent = if parity_mode {
+                parent_radius
+            } else {
+                metric.apply_level_cap(parent_level, scope_caps, parent_radius)
+            };
             if let Some(t) = telemetry.as_mut() {
                 if capped_parent < parent_radius {
                     t.caps_applied += 1;
@@ -665,8 +765,10 @@ where
                 }
             }
             if level_cache_batching && !parent_children.is_empty() {
-                // order by dataset distance to parent to prioritize closer children
-                parent_children.sort_by_key(|&c| node_to_dataset[c]);
+                if !parity_mode {
+                    // order by dataset distance to parent to prioritize closer children
+                    parent_children.sort_by_key(|&c| node_to_dataset[c]);
+                }
             }
             for child_idx in parent_children.into_iter() {
                 let ds_idx = node_to_dataset[child_idx] as usize;
@@ -802,8 +904,18 @@ where
 
             for (dist, child_idx, parent_lb_cached) in ordered.into_iter() {
                 let child_level = tree.levels[child_idx];
-                let mut child_radius = two.powi(child_level + 1);
-                let capped_child = metric.apply_level_cap(child_level, scope_caps, child_radius);
+                let mut child_radius = if !tree.si_cache.is_empty()
+                    && child_idx < tree.si_cache.len()
+                {
+                    tree.si_cache[child_idx]
+                } else {
+                    two.powi(child_level + 1)
+                };
+                let capped_child = if parity_mode {
+                    child_radius
+                } else {
+                    metric.apply_level_cap(child_level, scope_caps, child_radius)
+                };
                 if let Some(t) = telemetry.as_mut() {
                     if capped_child < child_radius {
                         t.caps_applied += 1;
@@ -858,7 +970,7 @@ where
             }
 
             // Budget ladder update (yield-based)
-            if !budget_schedule.is_empty() && !nodes_chunk.is_empty() {
+            if !parity_mode && !budget_schedule.is_empty() && !nodes_chunk.is_empty() {
                 let ratio = added_in_chunk as f64 / nodes_chunk.len() as f64;
                 if let Some(t) = telemetry.as_mut() {
                     t.record_yield(ratio as f32);

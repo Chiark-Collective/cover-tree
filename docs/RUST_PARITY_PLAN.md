@@ -2,6 +2,8 @@
 
 Goal: Close the ~130× query throughput gap to the gold Numba path on the 32k / d=3 / k=50 / 1,024q workload **without changing the gold configuration**. The gold script now hard-disables the Rust backend (`COVERTREEX_ENABLE_RUST=0`) to keep the reference immutable; Rust parity work must compare against that fixed Python/Numba baseline.
 
+Status 2025-11-24 (evening): Rust residual heap now computes and uses a stored `si_cache` (cover radii) during traversal, matching the Python separation bounds. Remaining gaps tracked below.
+
 The gold Numba run (via `benchmarks/run_residual_gold_standard.sh`) has these defaults **active**:
 - Level cache reuse (`residual_level_cache_batching=True`).
 - Dynamic block sizing (`residual_dynamic_query_block=True`) tied to active queries.
