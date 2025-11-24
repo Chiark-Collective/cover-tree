@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .artifacts import artifact_root, generate_run_id, resolve_artifact_path, timestamped_artifact
 from .logs import BenchmarkLogWriter, ResidualScopeCapRecorder
+from .rust_bridge import build_rust_plan, record_rust_batch
 from .schemas import (
     BENCHMARK_BATCH_JSON_SCHEMA,
     BENCHMARK_BATCH_SCHEMA_ID,
@@ -26,6 +27,8 @@ __all__ = [
     "timestamped_artifact",
     "BenchmarkLogWriter",
     "ResidualScopeCapRecorder",
+    "build_rust_plan",
+    "record_rust_batch",
     "BENCHMARK_BATCH_JSON_SCHEMA",
     "BENCHMARK_BATCH_SCHEMA_ID",
     "BENCHMARK_BATCH_SCHEMA_VERSION",

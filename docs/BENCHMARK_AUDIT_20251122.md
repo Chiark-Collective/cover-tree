@@ -53,3 +53,25 @@ These ad-hoc scripts reveal a critical architectural divergence between the Pyth
 1.  **Use `run_residual_gold_standard.sh`** for apples-to-apples historical comparisons.
 2.  **Use `tools/run_reference_benchmarks.py`** for validating stability and correctness across different features.
 3.  **Treat `rust_*_benchmark.py` scripts as low-level driver tests** for backend development, not system-level benchmarks.
+
+---
+
+## 5. Latest runs (2025-11-24)
+Commands (32,768 points, d=3, 1,024 queries, k=50):
+```
+# Python/Numba gold
+ENGINE=python-numba ./benchmarks/run_residual_gold_standard.sh bench_residual_python_numba_rerun.log
+
+# Rust Hilbert (current Rust residual impl)
+ENGINE=rust-hilbert COVERTREEX_ENABLE_RUST=1 COVERTREEX_RUST_PCCT2_SGEMM=auto COVERTREEX_BATCH_ORDER=natural \
+  ./benchmarks/run_residual_gold_standard.sh bench_residual_rust_hilbert.log
+```
+Results:
+- python-numba: build **7.104 s**, query **0.0247 s** (~41,519 q/s).
+- rust-hilbert: build **2.509 s**, query **3.195 s** (~320 q/s).
+- gpboost baseline (from same runs): build ~1.36–1.67 s, query ~3.70 s (~275 q/s).
+Artifacts:
+- `bench_residual_python_numba_rerun.log`, telemetry `artifacts/benchmarks/queries_pcct-20251124-111128-698165_20251124-111128.jsonl`
+- `bench_residual_rust_hilbert.log`, telemetry `artifacts/benchmarks/queries_pcct-20251124-111050-c01f7d_20251124-111050.jsonl`
+
+Note: the previous rust-pcct2 runs (2025-11-23) are superseded; rust-hilbert is the active Rust residual engine.

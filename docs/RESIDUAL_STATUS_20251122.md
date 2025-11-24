@@ -4,6 +4,13 @@
 
 This report summarizes the current state of the **Residual Correlation** metric implementation, comparing the production Python/Numba path against the experimental Rust backend. The benchmark workload matches the historical "Gold Standard" (32,768 points, 3 dimensions, 1,024 queries, k=50).
 
+## Update – 2025-11-23 (Rust Hybrid Telemetry)
+
+- Command: `ENGINE=rust-hybrid COVERTREEX_RUST_DEBUG_STATS=1 ./benchmarks/run_residual_gold_standard.sh bench_residual_rust_hybrid_bound.log`
+- Artefact: `artifacts/benchmarks/queries_pcct-20251123-181632-fabff9_20251123-181632.jsonl`
+- Result: build **4.45 s**, query **1.46 s** (~700 q/s), rust_distance_evals=65,304,771, rust_heap_pushes=32,422,360.
+- Note: Optional bound-based pruning was disabled by default (set `COVERTREEX_RUST_PRUNE_BOUNDS=1` to experiment). The run confirms the Rust cover-tree traversal still visits almost every point, so further work should focus on prefiltering/pruning rather than kernel micro-optimisations.
+
 ## Key Findings
 
 1.  **Python/Numba is the Performance Leader:**

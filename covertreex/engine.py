@@ -17,7 +17,7 @@ from covertreex.metrics.residual import (
 from covertreex.runtime.config import RuntimeConfig
 
 DEFAULT_ENGINE = "python-numba"
-SUPPORTED_ENGINES = ("python-numba", "rust-natural", "rust-hybrid", "rust-pcct", "rust-hilbert")
+SUPPORTED_ENGINES = ("python-numba", "rust-natural", "rust-hybrid", "rust-hilbert")
 
 
 def _enable_rust_debug_stats_if_requested():
@@ -437,9 +437,13 @@ class RustNaturalEngine:
 
 
 def get_engine(name: str) -> TreeEngine:
-    if name not in _ENGINE_REGISTRY:
+    alias = name
+    if alias == "rust-fast":
+        alias = "rust-natural"
+    engine = _ENGINE_REGISTRY.get(alias)
+    if engine is None:
         raise ValueError(f"Unknown engine '{name}'. Supported engines: {', '.join(SUPPORTED_ENGINES)}")
-    return _ENGINE_REGISTRY[name]
+    return engine
 
 
 def build_tree(
@@ -1021,13 +1025,11 @@ class RustHilbertEngine:
 _PYTHON_ENGINE = PythonNumbaEngine()
 _RUST_FAST_ENGINE = RustNaturalEngine()
 _RUST_HYBRID_ENGINE = RustHybridResidualEngine()
-_RUST_PCCT_ENGINE = RustPcctEngine()
 _RUST_PCCT2_ENGINE = RustHilbertEngine()
 _ENGINE_REGISTRY: Dict[str, TreeEngine] = {
     _PYTHON_ENGINE.name: _PYTHON_ENGINE,
     _RUST_FAST_ENGINE.name: _RUST_FAST_ENGINE,
     _RUST_HYBRID_ENGINE.name: _RUST_HYBRID_ENGINE,
-    _RUST_PCCT_ENGINE.name: _RUST_PCCT_ENGINE,
     _RUST_PCCT2_ENGINE.name: _RUST_PCCT2_ENGINE,
 }
 
@@ -1041,6 +1043,5 @@ __all__ = [
     "PythonNumbaEngine",
     "RustNaturalEngine",
     "RustHybridResidualEngine",
-    "RustPcctEngine",
     "RustHilbertEngine",
 ]

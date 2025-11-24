@@ -278,7 +278,7 @@ def benchmark_knn_latency(
             # Keep residual aggregators happy even without conflict telemetry.
             "conflict_pairwise_reused": 1,
         }
-        if runtime.metric == "residual_correlation" and engine_name in {"rust-fast", "rust-hybrid"}:
+        if runtime.metric == "residual_correlation" and engine_name in {"rust-fast", "rust-hybrid", "rust-pcct", "rust-pcct2"}:
             rust_stats = _collect_rust_debug_stats()
             if rust_stats:
                 extra_payload.update(rust_stats)

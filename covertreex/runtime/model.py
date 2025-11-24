@@ -32,7 +32,7 @@ _FALLBACK_CPU_DEVICE = ("cpu:0",)
 
 _SUPPORTED_BACKENDS = {"jax", "numpy", "gpu"}
 _SUPPORTED_PRECISION = {"float32", "float64"}
-_ENGINE_CHOICES = {"python-numba", "rust-fast", "rust-hybrid"}
+_ENGINE_CHOICES = {"python-numba", "rust-fast", "rust-hybrid", "rust-pcct", "rust-pcct2"}
 _DEFAULT_ENGINE = "python-numba"
 _CONFLICT_GRAPH_IMPLS = {"dense", "segmented", "auto", "grid"}
 _BATCH_ORDER_STRATEGIES = {"natural", "random", "hilbert"}

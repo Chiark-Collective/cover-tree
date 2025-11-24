@@ -99,7 +99,15 @@ MetricOption = Annotated[
     ),
 ]
 EngineOption = Annotated[
-    Optional[Literal["python-numba", "rust-fast", "rust-hybrid"]],
+    Optional[
+        Literal[
+            "python-numba",
+            "rust-natural",
+            "rust-hybrid",
+            "rust-hilbert",
+            "rust-fast",
+        ]
+    ],
     typer.Option(
         "--engine",
         help="Select the cover-tree engine (default: python-numba).",

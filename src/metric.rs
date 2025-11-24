@@ -46,6 +46,7 @@ pub struct ResidualMetric<'a, T> {
     pub rbf_var: T,
     pub scaled_coords: Array2<T>,
     pub scaled_norms: Vec<T>,
+    pub v_norms: Vec<T>,
     pub neg_half: T,
 }
 
@@ -83,6 +84,12 @@ where
             scaled_norms.push(norm);
         }
 
+        let mut v_norms: Vec<T> = Vec::with_capacity(v_matrix.nrows());
+        for row in v_matrix.outer_iter() {
+            let norm_sq: T = row.iter().map(|v| *v * *v).sum();
+            v_norms.push(norm_sq.sqrt());
+        }
+
         let neg_half = T::from(-0.5).unwrap();
 
         ResidualMetric {
@@ -91,6 +98,7 @@ where
             rbf_var,
             scaled_coords,
             scaled_norms,
+            v_norms,
             neg_half,
         }
     }
@@ -132,11 +140,22 @@ where
     #[allow(dead_code)]
     pub fn distances_sq_batch_idx(&self, q_idx: usize, p_indices: &[usize]) -> Vec<T> {
         let mut results = Vec::with_capacity(p_indices.len());
-        self.distances_sq_batch_idx_into(q_idx, p_indices, &mut results);
+        self.distances_sq_batch_idx_into_with_kth(q_idx, p_indices, None, &mut results);
         results
     }
 
+    #[allow(dead_code)]
     pub fn distances_sq_batch_idx_into(&self, q_idx: usize, p_indices: &[usize], out: &mut Vec<T>) {
+        self.distances_sq_batch_idx_into_with_kth(q_idx, p_indices, None, out);
+    }
+
+    pub fn distances_sq_batch_idx_into_with_kth(
+        &self,
+        q_idx: usize,
+        p_indices: &[usize],
+        kth: Option<T>,
+        out: &mut Vec<T>,
+    ) {
         out.clear();
         out.reserve(p_indices.len());
         // Pre-fetch query data
@@ -146,6 +165,9 @@ where
         let one = T::one();
         let neg_one = -one;
         let eps = T::from(1e-9).unwrap();
+        let prune_sentinel = T::max_value();
+        let kth_cutoff = kth.unwrap_or(prune_sentinel);
+        let pruning_enabled = kth.is_some();
 
         let coords_stride = self.scaled_coords.ncols();
         let v_stride = self.v_matrix.ncols();
@@ -161,43 +183,157 @@ where
             let mut idx = 0;
             while idx < p_indices.len() {
                 let end = usize::min(idx + TILE, p_indices.len());
-                // Precompute dot products for coords and V across the tile
-                let _tile_len = end - idx;
                 let size = std::mem::size_of::<T>();
+                if !pruning_enabled {
+                    let mut dot_coords_f32 = [0f32; TILE];
+                    let mut dot_v_f32 = [0f32; TILE];
+                    let mut dot_coords_f64 = [0f64; TILE];
+                    let mut dot_v_f64 = [0f64; TILE];
+                    if size == 4 {
+                        let q_coords_f = unsafe {
+                            std::slice::from_raw_parts(
+                                q_coords.as_ptr() as *const f32,
+                                q_coords.len(),
+                            )
+                        };
+                        let coords_f = unsafe {
+                            std::slice::from_raw_parts(
+                                coords_flat.as_ptr() as *const f32,
+                                coords_flat.len(),
+                            )
+                        };
+                        let q_v_f = unsafe {
+                            std::slice::from_raw_parts(q_v.as_ptr() as *const f32, q_v.len())
+                        };
+                        let v_flat_f = unsafe {
+                            std::slice::from_raw_parts(v_flat.as_ptr() as *const f32, v_flat.len())
+                        };
+                        dot_tile_f32(
+                            q_coords_f,
+                            coords_f,
+                            coords_stride,
+                            &p_indices[idx..end],
+                            &mut dot_coords_f32,
+                        );
+                        dot_tile_f32(
+                            q_v_f,
+                            v_flat_f,
+                            v_stride,
+                            &p_indices[idx..end],
+                            &mut dot_v_f32,
+                        );
+                    } else if size == 8 {
+                        let q_coords_f = unsafe {
+                            std::slice::from_raw_parts(
+                                q_coords.as_ptr() as *const f64,
+                                q_coords.len(),
+                            )
+                        };
+                        let coords_f = unsafe {
+                            std::slice::from_raw_parts(
+                                coords_flat.as_ptr() as *const f64,
+                                coords_flat.len(),
+                            )
+                        };
+                        let q_v_f = unsafe {
+                            std::slice::from_raw_parts(q_v.as_ptr() as *const f64, q_v.len())
+                        };
+                        let v_flat_f = unsafe {
+                            std::slice::from_raw_parts(v_flat.as_ptr() as *const f64, v_flat.len())
+                        };
+                        dot_tile_f64(
+                            q_coords_f,
+                            coords_f,
+                            coords_stride,
+                            &p_indices[idx..end],
+                            &mut dot_coords_f64,
+                        );
+                        dot_tile_f64(
+                            q_v_f,
+                            v_flat_f,
+                            v_stride,
+                            &p_indices[idx..end],
+                            &mut dot_v_f64,
+                        );
+                    }
+
+                    for (local_offset, &idx_2) in p_indices[idx..end].iter().enumerate() {
+                        let dot_scaled = if size == 4 {
+                            NumCast::from(dot_coords_f32[local_offset]).unwrap()
+                        } else if size == 8 {
+                            NumCast::from(dot_coords_f64[local_offset]).unwrap()
+                        } else {
+                            let y =
+                                &coords_flat[idx_2 * coords_stride..(idx_2 + 1) * coords_stride];
+                            dot_product_simd_slice(q_coords, y)
+                        };
+
+                        let mut d2 = q_norm + self.scaled_norms[idx_2] - two * dot_scaled;
+                        if d2 < T::zero() {
+                            d2 = T::zero();
+                        }
+
+                        let k_val = self.rbf_var * (self.neg_half * d2).exp();
+
+                        let dot = if size == 4 {
+                            NumCast::from(dot_v_f32[local_offset]).unwrap()
+                        } else if size == 8 {
+                            NumCast::from(dot_v_f64[local_offset]).unwrap()
+                        } else {
+                            let v2 = &v_flat[idx_2 * v_stride..(idx_2 + 1) * v_stride];
+                            dot_product_simd_slice(q_v, v2)
+                        };
+
+                        let denom = (q_diag * self.p_diag[idx_2]).sqrt();
+
+                        if denom < eps {
+                            out.push(one);
+                        } else {
+                            let rho = (k_val - dot) / denom;
+                            let rho_clamped = rho.max(neg_one).min(one);
+                            out.push(one - rho_clamped.abs());
+                        }
+                    }
+                    idx = end;
+                    continue;
+                }
+
                 let mut dot_coords_f32 = [0f32; TILE];
-                let mut dot_v_f32 = [0f32; TILE];
                 let mut dot_coords_f64 = [0f64; TILE];
-                let mut dot_v_f64 = [0f64; TILE];
                 if size == 4 {
                     let q_coords_f = unsafe {
                         std::slice::from_raw_parts(q_coords.as_ptr() as *const f32, q_coords.len())
                     };
                     let coords_f = unsafe {
-                        std::slice::from_raw_parts(coords_flat.as_ptr() as *const f32, coords_flat.len())
+                        std::slice::from_raw_parts(
+                            coords_flat.as_ptr() as *const f32,
+                            coords_flat.len(),
+                        )
                     };
-                    let q_v_f = unsafe {
-                        std::slice::from_raw_parts(q_v.as_ptr() as *const f32, q_v.len())
-                    };
-                    let v_flat_f = unsafe {
-                        std::slice::from_raw_parts(v_flat.as_ptr() as *const f32, v_flat.len())
-                    };
-                    dot_tile_f32(q_coords_f, coords_f, coords_stride, &p_indices[idx..end], &mut dot_coords_f32);
-                    dot_tile_f32(q_v_f, v_flat_f, v_stride, &p_indices[idx..end], &mut dot_v_f32);
+                    dot_tile_f32(
+                        q_coords_f,
+                        coords_f,
+                        coords_stride,
+                        &p_indices[idx..end],
+                        &mut dot_coords_f32,
+                    );
                 } else if size == 8 {
                     let q_coords_f = unsafe {
                         std::slice::from_raw_parts(q_coords.as_ptr() as *const f64, q_coords.len())
                     };
                     let coords_f = unsafe {
-                        std::slice::from_raw_parts(coords_flat.as_ptr() as *const f64, coords_flat.len())
+                        std::slice::from_raw_parts(
+                            coords_flat.as_ptr() as *const f64,
+                            coords_flat.len(),
+                        )
                     };
-                    let q_v_f = unsafe {
-                        std::slice::from_raw_parts(q_v.as_ptr() as *const f64, q_v.len())
-                    };
-                    let v_flat_f = unsafe {
-                        std::slice::from_raw_parts(v_flat.as_ptr() as *const f64, v_flat.len())
-                    };
-                    dot_tile_f64(q_coords_f, coords_f, coords_stride, &p_indices[idx..end], &mut dot_coords_f64);
-                    dot_tile_f64(q_v_f, v_flat_f, v_stride, &p_indices[idx..end], &mut dot_v_f64);
+                    dot_tile_f64(
+                        q_coords_f,
+                        coords_f,
+                        coords_stride,
+                        &p_indices[idx..end],
+                        &mut dot_coords_f64,
+                    );
                 }
 
                 for (local_offset, &idx_2) in p_indices[idx..end].iter().enumerate() {
@@ -217,25 +353,29 @@ where
 
                     let k_val = self.rbf_var * (self.neg_half * d2).exp();
 
-                    // V-matrix dot
-                    let dot = if size == 4 {
-                        NumCast::from(dot_v_f32[local_offset]).unwrap()
-                    } else if size == 8 {
-                        NumCast::from(dot_v_f64[local_offset]).unwrap()
-                    } else {
-                        let v2 = &v_flat[idx_2 * v_stride..(idx_2 + 1) * v_stride];
-                        dot_product_simd_slice(q_v, v2)
-                    };
-
                     let denom = (q_diag * self.p_diag[idx_2]).sqrt();
 
                     if denom < eps {
-                        out.push(T::one());
-                    } else {
-                        let rho = (k_val - dot) / denom;
-                        let rho_clamped = rho.max(neg_one).min(one);
-                        out.push(one - rho_clamped.abs());
+                        out.push(one);
+                        continue;
                     }
+
+                    if kth_cutoff < prune_sentinel {
+                        let cap = self.v_norms[q_idx] * self.v_norms[idx_2];
+                        let max_abs_rho = ((k_val - cap).abs()).max((k_val + cap).abs()) / denom;
+                        let min_dist = one - max_abs_rho.min(one);
+                        if min_dist > kth_cutoff {
+                            out.push(prune_sentinel);
+                            continue;
+                        }
+                    }
+
+                    let v2 = &v_flat[idx_2 * v_stride..(idx_2 + 1) * v_stride];
+                    let dot = dot_product_simd_slice(q_v, v2);
+
+                    let rho = (k_val - dot) / denom;
+                    let rho_clamped = rho.max(neg_one).min(one);
+                    out.push(one - rho_clamped.abs());
                 }
                 idx = end;
             }
@@ -257,19 +397,30 @@ where
 
             let k_val = self.rbf_var * (self.neg_half * d2).exp();
 
+            let denom = (q_diag * self.p_diag[idx_2]).sqrt();
+
+            if denom < eps {
+                out.push(one);
+                continue;
+            }
+
+            if kth_cutoff < prune_sentinel {
+                let cap = self.v_norms[q_idx] * self.v_norms[idx_2];
+                let max_abs_rho = ((k_val - cap).abs()).max((k_val + cap).abs()) / denom;
+                let min_dist = one - max_abs_rho.min(one);
+                if min_dist > kth_cutoff {
+                    out.push(prune_sentinel);
+                    continue;
+                }
+            }
+
             // 2. V-Matrix Part (SIMD)
             let v2_view = self.v_matrix.row(idx_2);
             let dot = dot_product_simd(v1_view, v2_view);
 
-            let denom = (q_diag * self.p_diag[idx_2]).sqrt();
-
-            if denom < eps {
-                out.push(T::one());
-            } else {
-                let rho = (k_val - dot) / denom;
-                let rho_clamped = rho.max(neg_one).min(one);
-                out.push(one - rho_clamped.abs());
-            }
+            let rho = (k_val - dot) / denom;
+            let rho_clamped = rho.max(neg_one).min(one);
+            out.push(one - rho_clamped.abs());
         }
     }
 
@@ -327,10 +478,8 @@ where
 {
     debug_assert_eq!(a.len(), b.len());
     if std::mem::size_of::<T>() == 4 {
-        let avf: &[f32] =
-            unsafe { std::slice::from_raw_parts(a.as_ptr() as *const f32, a.len()) };
-        let bvf: &[f32] =
-            unsafe { std::slice::from_raw_parts(b.as_ptr() as *const f32, b.len()) };
+        let avf: &[f32] = unsafe { std::slice::from_raw_parts(a.as_ptr() as *const f32, a.len()) };
+        let bvf: &[f32] = unsafe { std::slice::from_raw_parts(b.as_ptr() as *const f32, b.len()) };
         let mut acc = 0.0f32;
         let chunks = avf.len() / 8;
         let tail_start = chunks * 8;
@@ -365,10 +514,8 @@ where
         return NumCast::from(acc).unwrap();
     }
     if std::mem::size_of::<T>() == 8 {
-        let avf: &[f64] =
-            unsafe { std::slice::from_raw_parts(a.as_ptr() as *const f64, a.len()) };
-        let bvf: &[f64] =
-            unsafe { std::slice::from_raw_parts(b.as_ptr() as *const f64, b.len()) };
+        let avf: &[f64] = unsafe { std::slice::from_raw_parts(a.as_ptr() as *const f64, a.len()) };
+        let bvf: &[f64] = unsafe { std::slice::from_raw_parts(b.as_ptr() as *const f64, b.len()) };
         let mut acc = 0.0f64;
         let chunks = avf.len() / 4;
         let tail_start = chunks * 4;

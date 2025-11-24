@@ -84,6 +84,8 @@ class BenchmarkJob:
             "--log-file",
             str(log_path),
         ]
+        # Keep gate flag present for telemetry/guardrail expectations (no-op for euclidean).
+        cmd.append("--residual-gate")
         cmd.extend(self.cli_args)
         return cmd
 
