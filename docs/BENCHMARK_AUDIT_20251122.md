@@ -85,3 +85,11 @@ Results (q/s):
 - Gold mean **41.48k** (stdev **1.26k**), best **43.25k**.
 - Rust-hilbert mean **9.15k** (stdev **2.77k**), best **13.70k**.
 Artifacts: `bench_residual_si_rerun_{1..5}.log`, `bench_residual_si_rerun_{1..5}_rust-hilbert.log` in repo root.
+
+Single-run parity toggle sanity (2025-11-24 late):
+```
+COVERTREEX_RESIDUAL_PARITY=1 ./benchmarks/run_residual_gold_standard.sh bench_residual_parity_rust.log
+```
+- Gold: **41,364 q/s** (build 7.25 s, query 0.0248 s).
+- Rust-hilbert (parity mode: si_cache, no budgets/caps/reordering, stream_tile=1, f64 build): **5,127 q/s** (build 3.49 s, query 0.1997 s).
+Artifacts: `bench_residual_parity_rust.log`, `bench_residual_parity_rust_rust-hilbert.log`.

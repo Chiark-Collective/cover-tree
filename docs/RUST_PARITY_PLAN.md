@@ -18,13 +18,13 @@ The gold Numba run (via `benchmarks/run_residual_gold_standard.sh`) has these de
 
 ## Gaps to close (Rust)
 1) **Payload / precision parity**
-   - Build residual trees with coordinate payloads (or an explicit idx↔coord map) and enable a float64 build path; gold is f64 while Rust still builds f32 index payloads.
+   - ✅ Parity flag now builds residual trees in f64 and keeps the idx↔coord map; still uses index payloads. Optional: add coord payload variant.
 
 2) **Ordering & visited semantics**
-   - Match Python’s insertion-order child expansion and simple visited set; optionally bypass masked dedupe for parity.
+   - ✅ Parity mode disables child reordering and masked dedupe; uses insertion order. Consider explicit visited set if duplicates ever appear.
 
 3) **Stop rule & tiling**
-   - Parity toggle should short-circuit when kth bound excludes the frontier; currently uses heap exhaustion only. Keep tile=1 (done) but add explicit kth/frontier stop.
+   - ✅ Parity mode adds kth/frontier lower-bound stop and forces stream_tile=1.
 
 4) **Caps/budgets fully off (done) but audit side effects**
    - Verify no cap_default leakage from metric; ensure scope caps are ignored in parity.
