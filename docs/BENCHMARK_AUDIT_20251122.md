@@ -71,3 +71,17 @@ Latest local results (2025-11-24):
 - gpboost baseline (same runs): build ~1.42 s, query ~3.59 s (~278 q/s).
 
 Note: rust-hilbert is the current default comparison engine; adjust `COMP_ENGINE` to test alternatives or set `COMP_ENGINE=none` to suppress the comparison pass.
+
+### 2025-11-24 (evening) parity-mode reruns (best-of-5)
+Command (runs executed 5×):
+```
+# Gold (Python/Numba enforced)
+./benchmarks/run_residual_gold_standard.sh bench_residual_si_rerun_<n>.log
+
+# Comparison (rust-hilbert with stored si_cache + parity toggle available)
+COMP_ENGINE=rust-hilbert ./benchmarks/run_residual_gold_standard.sh bench_residual_si_rerun_<n>.log
+```
+Results (q/s):
+- Gold mean **41.48k** (stdev **1.26k**), best **43.25k**.
+- Rust-hilbert mean **9.15k** (stdev **2.77k**), best **13.70k**.
+Artifacts: `bench_residual_si_rerun_{1..5}.log`, `bench_residual_si_rerun_{1..5}_rust-hilbert.log` in repo root.
