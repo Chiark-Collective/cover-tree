@@ -681,78 +681,78 @@ where
         children_ds_idx.clear();
         children_parent_lb.clear();
 
-        // Gather children of the current frontier (level cache: process once per level)
-        for &(parent, parent_dist) in frontier.iter() {
-            let parent_level = tree.levels[parent];
-            let mut parent_radius = if !tree.si_cache.is_empty() && parent < tree.si_cache.len() {
-                tree.si_cache[parent]
-            } else {
-                two.powi(parent_level + 1)
-            };
-            let capped_parent = if parity_mode {
-                parent_radius
-            } else {
-                metric.apply_level_cap(parent_level, scope_caps, parent_radius)
-            };
-            if let Some(t) = telemetry.as_mut() {
-                if capped_parent < parent_radius {
-                    t.caps_applied += 1;
-                }
-            }
-            parent_radius = capped_parent;
-            if parent_radius < radius_floor {
-                parent_radius = radius_floor;
-            }
-            let parent_lb = parent_dist - parent_radius;
-            if result_heap.len() == k && parent_lb > kth_dist {
-                if let Some(t) = telemetry.as_mut() {
-                    t.prunes_lower_bound += 1;
-                }
-                continue;
-            }
-
-            // Level cache batching: prefetch child distances in blocks to tighten kth early
-            let mut child = tree.children[parent];
-            let mut parent_children: Vec<usize> = Vec::new();
-            while child != -1 {
-                parent_children.push(child as usize);
-                let next = tree.next_node[child as usize];
-                if next == child {
-                    break;
-                }
-                child = next;
-                if child == tree.children[parent] {
-                    break;
-                }
-            }
-            if level_cache_batching && !parent_children.is_empty() {
-                if !parity_mode {
-                    // order by dataset distance to parent to prioritize closer children
-                    parent_children.sort_by_key(|&c| node_to_dataset[c]);
-                }
-            }
-            for child_idx in parent_children.into_iter() {
-                let ds_idx = node_to_dataset[child_idx] as usize;
-                if use_visited {
-                    if let Some(already) = visited_nodes.get(child_idx).copied() {
-                        if already {
-                            if let Some(t) = telemetry.as_mut() {
-                                t.masked_dedup += 1;
-                            }
-                            continue;
+                    // Gather children of the current frontier (level cache: process once per level)
+                for &(parent, parent_dist) in frontier.iter() {
+                    let parent_level = tree.levels[parent];
+                    let mut parent_radius = if !tree.si_cache.is_empty() && parent < tree.si_cache.len() {
+                        tree.si_cache[parent]
+                    } else {
+                        two.powi(parent_level + 1)
+                    };
+                    let capped_parent = if parity_mode {
+                        parent_radius
+                    } else {
+                        metric.apply_level_cap(parent_level, scope_caps, parent_radius)
+                    };
+                    if let Some(t) = telemetry.as_mut() {
+                        if capped_parent < parent_radius {
+                            t.caps_applied += 1;
                         }
                     }
-                    if let Some(slot) = visited_nodes.get_mut(child_idx) {
-                        *slot = true;
+                    parent_radius = capped_parent;
+                    if parent_radius < radius_floor {
+                        parent_radius = radius_floor;
+                    }
+                    let parent_lb = parent_dist - parent_radius;
+                    if result_heap.len() == k && parent_lb > kth_dist {
+                        if let Some(t) = telemetry.as_mut() {
+                            t.prunes_lower_bound += 1;
+                        }
+                        continue;
+                    }
+        
+                    // Iterate children directly (no allocation)
+                    let mut child = tree.children[parent];
+                    while child != -1 {
+                        let child_idx = child as usize;
+                        let ds_idx = node_to_dataset[child_idx] as usize;
+                        
+                        // Visited check
+                        if use_visited {
+                            let visited = if let Some(already) = visited_nodes.get(child_idx) {
+                                *already
+                            } else {
+                                false
+                            };
+                            
+                            if visited {
+                                if let Some(t) = telemetry.as_mut() {
+                                    t.masked_dedup += 1;
+                                }
+                            } else {
+                                if let Some(slot) = visited_nodes.get_mut(child_idx) {
+                                    *slot = true;
+                                }
+                                children_nodes.push(child_idx);
+                                children_ds_idx.push(ds_idx);
+                                children_parent_lb.push(parent_lb);
+                            }
+                        } else {
+                            children_nodes.push(child_idx);
+                            children_ds_idx.push(ds_idx);
+                            children_parent_lb.push(parent_lb);
+                        }
+        
+                        let next = tree.next_node[child_idx];
+                        if next == child {
+                            break;
+                        }
+                        child = next;
+                        if child == tree.children[parent] {
+                            break;
+                        }
                     }
                 }
-                
-                children_nodes.push(child_idx);
-                children_ds_idx.push(ds_idx);
-                children_parent_lb.push(parent_lb);
-            }
-        }
-
         // Process children in tiles
         let mut start = 0;
         while start < children_nodes.len() && survivors_count < budget_limit {
