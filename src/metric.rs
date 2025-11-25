@@ -613,60 +613,136 @@ where
             .and_then(|v| v.to_f32())
             .unwrap_or(prune_sentinel);
 
+        // SIMD constants
+        let v_two = f32x8::splat(2.0);
+        let v_one = f32x8::splat(1.0);
+        let v_neg_one = f32x8::splat(-1.0);
+        let v_zero = f32x8::splat(0.0);
+        let v_eps = f32x8::splat(eps);
+        let v_q_norm = f32x8::splat(q_norm);
+        let v_q_diag = f32x8::splat(q_diag);
+        let v_rbf_var = f32x8::splat(self.rbf_var.to_f32().unwrap());
+        let v_neg_half = f32x8::splat(self.neg_half.to_f32().unwrap());
+        let v_v_norm_q = f32x8::splat(v_norms[q_idx]);
+
+        let coords_stride = coords.ncols();
+        let v_stride = v_mat.ncols();
+        
+        let (coords_flat, v_flat) = match (coords.as_slice_memory_order(), v_mat.as_slice_memory_order()) {
+            (Some(c), Some(v)) => (c, v),
+            _ => {
+                (coords.as_slice().unwrap(), v_mat.as_slice().unwrap())
+            }
+        };
+
         out.clear();
         out.reserve(p_indices.len());
 
-        for &idx_2 in p_indices {
-            if q_idx == idx_2 {
-                out.push(NumCast::from(0.0).unwrap());
-                continue;
-            }
+        let mut dot_coords_f32 = [0f32; 64];
+        let mut dot_v_f32 = [0f32; 64];
+        
+        let mut idx = 0;
+        while idx < p_indices.len() {
+            let end = usize::min(idx + 64, p_indices.len());
+            let chunk_len = end - idx;
+            
+            // 1. Compute Dot Products (Batch 64)
+            dot_tile_f32(
+                &coords_flat[q_idx * coords_stride..(q_idx + 1) * coords_stride],
+                coords_flat,
+                coords_stride,
+                &p_indices[idx..end],
+                &mut dot_coords_f32,
+            );
+            dot_tile_f32(
+                &v_flat[q_idx * v_stride..(q_idx + 1) * v_stride],
+                v_flat,
+                v_stride,
+                &p_indices[idx..end],
+                &mut dot_v_f32,
+            );
 
-            let dot_scaled = if self.parity_mode {
-                parity_dot_f32(coords.row(q_idx), coords.row(idx_2))
-                    .unwrap_or_else(|| coords.row(q_idx).dot(&coords.row(idx_2)))
-            } else {
-                dot_product_simd(coords.row(q_idx), coords.row(idx_2))
-            };
+            // 2. Compute Distances (SIMD x 8)
+            let mut i = 0;
+            while i < chunk_len {
+                // Check if we have a full vector of 8
+                if i + 8 <= chunk_len {
+                    // Gather
+                    let p_idxs = &p_indices[idx + i..idx + i + 8];
+                    let mut norms = [0.0f32; 8];
+                    let mut diags = [0.0f32; 8];
+                    let mut v_norms_p = [0.0f32; 8];
+                    
+                    for k in 0..8 {
+                        norms[k] = scaled_norms[p_idxs[k]];
+                        diags[k] = p_diag[p_idxs[k]];
+                        v_norms_p[k] = v_norms[p_idxs[k]];
+                    }
+                    
+                    let v_norms_p_vec = f32x8::from(norms);
+                    let v_p_diag = f32x8::from(diags);
+                    
+                    let v_dot_c = f32x8::from(&dot_coords_f32[i..i+8]);
+                    let v_dot_v = f32x8::from(&dot_v_f32[i..i+8]);
 
-            let mut d2 = q_norm + scaled_norms[idx_2] - two * dot_scaled;
-            if d2 < 0.0 {
-                d2 = 0.0;
-            }
-
-            let k_val =
-                self.rbf_var.to_f32().unwrap() * (self.neg_half.to_f32().unwrap() * d2).exp();
-
-            let denom_sq = (q_diag * p_diag[idx_2]).max(eps * eps);
-            let denom = denom_sq.sqrt();
-
-            if kth.is_some() {
-                let cap = v_norms[q_idx] * v_norms[idx_2];
-                let max_abs_rho = ((k_val - cap).abs()).max((k_val + cap).abs()) / denom;
-                let min_dist_sq = one - max_abs_rho.min(one);
-                let min_dist = if min_dist_sq > 0.0 {
-                    min_dist_sq.sqrt()
+                    // RBF Kernel
+                    // d2 = q_norm + p_norm - 2 * dot
+                    let mut v_d2 = v_q_norm + v_norms_p_vec - v_two * v_dot_c;
+                    v_d2 = v_d2.max(v_zero);
+                    
+                    let v_k_val = v_rbf_var * (v_neg_half * v_d2).exp();
+                    
+                    // Denom
+                    let v_denom_sq = (v_q_diag * v_p_diag).max(v_eps * v_eps);
+                    let v_denom = v_denom_sq.sqrt();
+                    
+                    // Result
+                    // rho = (k_val - dot_v) / denom
+                    let v_rho = (v_k_val - v_dot_v) / v_denom;
+                    let v_rho_clamped = v_rho.max(v_neg_one).min(v_one);
+                    let v_dist_sq = v_one - v_rho_clamped.abs();
+                    // mask out small neg
+                    let v_dist = v_dist_sq.max(v_zero).sqrt();
+                    
+                    let res_arr = v_dist.to_array();
+                    
+                    // Write back
+                    for k in 0..8 {
+                        if p_idxs[k] == q_idx {
+                            out.push(NumCast::from(0.0).unwrap());
+                        } else {
+                            out.push(NumCast::from(res_arr[k]).unwrap());
+                        }
+                    }
+                    i += 8;
                 } else {
-                    0.0
-                };
-                if min_dist > kth_cutoff {
-                    out.push(NumCast::from(prune_sentinel).unwrap());
-                    continue;
+                    // Scalar tail
+                    let p_idx = p_indices[idx + i];
+                    if p_idx == q_idx {
+                        out.push(NumCast::from(0.0).unwrap());
+                        i += 1;
+                        continue;
+                    }
+                    
+                    let dot_c = dot_coords_f32[i];
+                    let dot_v = dot_v_f32[i];
+                    let p_norm = scaled_norms[p_idx];
+                    let p_d = p_diag[p_idx];
+                    
+                    let mut d2 = q_norm + p_norm - two * dot_c;
+                    if d2 < 0.0 { d2 = 0.0; }
+                    let k_val = self.rbf_var.to_f32().unwrap() * (self.neg_half.to_f32().unwrap() * d2).exp();
+                    let denom = (q_diag * p_d).max(eps * eps).sqrt();
+                    let rho = (k_val - dot_v) / denom;
+                    let rho_clamped = rho.max(neg_one).min(one);
+                    let dist_sq = one - rho_clamped.abs();
+                    let dist = if dist_sq > 0.0 { dist_sq.sqrt() } else { 0.0 };
+                    out.push(NumCast::from(dist).unwrap());
+                    i += 1;
                 }
             }
-
-            let dot = if self.parity_mode {
-                parity_dot_f32(v_mat.row(q_idx), v_mat.row(idx_2))
-                    .unwrap_or_else(|| v_mat.row(q_idx).dot(&v_mat.row(idx_2)))
-            } else {
-                dot_product_simd(v_mat.row(q_idx), v_mat.row(idx_2))
-            };
-
-            let rho = if denom > 0.0 { (k_val - dot) / denom } else { 0.0 };
-            let rho_clamped = rho.max(neg_one).min(one);
-            let dist_sq = one - rho_clamped.abs();
-            let dist = if dist_sq > 0.0 { dist_sq.sqrt() } else { 0.0 };
-            out.push(NumCast::from(dist).unwrap());
+            
+            idx = end;
         }
     }
 
