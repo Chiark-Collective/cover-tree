@@ -2,7 +2,7 @@ use crate::metric::{Euclidean, Metric, ResidualMetric};
 use crate::telemetry::ResidualQueryTelemetry;
 use crate::tree::CoverTreeData;
 use ndarray::parallel::prelude::*;
-use num_traits::Float;
+use num_traits::{Float, NumCast};
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 use std::fmt::Debug;

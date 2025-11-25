@@ -42,22 +42,22 @@ where
 
 // Residual Metric operates on INDICES into the V-Matrix and Coords
 pub struct ResidualMetric<'a, T> {
-    pub v_matrix: ArrayView2<'a, T>,
-    pub p_diag: &'a [T],
-    pub rbf_var: T,
-    pub scaled_coords: Array2<T>,
-    pub scaled_norms: Vec<T>,
-    pub v_norms: Vec<T>,
-    pub neg_half: T,
-    pub cap_default: T,
-    pub disable_fast_paths: bool,
-    parity_mode: bool,
-    use_f32_math: bool,
-    scaled_coords_f32: Option<Array2<f32>>,
-    scaled_norms_f32: Option<Vec<f32>>,
-    v_matrix_f32: Option<Array2<f32>>,
-    p_diag_f32: Option<Vec<f32>>,
-    v_norms_f32: Option<Vec<f32>>,
+    pub(crate) v_matrix: ArrayView2<'a, T>,
+    pub(crate) p_diag: &'a [T],
+    pub(crate) rbf_var: T,
+    pub(crate) scaled_coords: Array2<T>,
+    pub(crate) scaled_norms: Vec<T>,
+    pub(crate) v_norms: Vec<T>,
+    pub(crate) neg_half: T,
+    pub(crate) cap_default: T,
+    pub(crate) disable_fast_paths: bool,
+    pub(crate) parity_mode: bool,
+    pub(crate) use_f32_math: bool,
+    pub(crate) scaled_coords_f32: Option<Array2<f32>>,
+    pub(crate) scaled_norms_f32: Option<Vec<f32>>,
+    pub(crate) v_matrix_f32: Option<Array2<f32>>,
+    pub(crate) p_diag_f32: Option<Vec<f32>>,
+    pub(crate) v_norms_f32: Option<Vec<f32>>,
 }
 
 impl<'a, T> ResidualMetric<'a, T>
@@ -755,7 +755,7 @@ where
 }
 
 #[inline(always)]
-fn dot_product_simd<T>(a: ndarray::ArrayView1<T>, b: ndarray::ArrayView1<T>) -> T
+pub(crate) fn dot_product_simd<T>(a: ndarray::ArrayView1<T>, b: ndarray::ArrayView1<T>) -> T
 where
     T: Float + Debug + Send + Sync + std::iter::Sum,
 {
@@ -774,13 +774,13 @@ where
 }
 
 #[inline(always)]
-fn dot_parity_f32(a: ndarray::ArrayView1<f32>, b: ndarray::ArrayView1<f32>) -> f32 {
+pub(crate) fn dot_parity_f32(a: ndarray::ArrayView1<f32>, b: ndarray::ArrayView1<f32>) -> f32 {
     // Use f64 accumulation to minimize rounding errors, hoping to align better with BLAS
     a.iter().zip(b.iter()).map(|(&x, &y)| (x as f64) * (y as f64)).sum::<f64>() as f32
 }
 
 #[inline(always)]
-fn parity_dot_f32<T>(a: ndarray::ArrayView1<T>, b: ndarray::ArrayView1<T>) -> Option<T>
+pub(crate) fn parity_dot_f32<T>(a: ndarray::ArrayView1<T>, b: ndarray::ArrayView1<T>) -> Option<T>
 where
     T: Float + Debug + Send + Sync + std::iter::Sum + NumCast,
 {
@@ -802,7 +802,7 @@ where
 }
 
 #[inline(always)]
-fn dot_product_simd_slice<T>(a: &[T], b: &[T]) -> T
+pub(crate) fn dot_product_simd_slice<T>(a: &[T], b: &[T]) -> T
 where
     T: Float + Debug + Send + Sync + std::iter::Sum,
 {
