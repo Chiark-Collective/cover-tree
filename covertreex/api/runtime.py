@@ -28,6 +28,7 @@ def _active_runtime_config() -> cx_config.RuntimeConfig:
 
 
 _ATTR_TO_FIELD = {
+    "preset": "preset",
     "backend": "backend",
     "precision": "precision",
     "engine": "engine",
@@ -132,6 +133,7 @@ class Residual:
 class Runtime:
     """Declarative runtime configuration that can activate a covertreex context."""
 
+    preset: str | None = None
     backend: str | None = None
     precision: str | None = None
     engine: str | None = None

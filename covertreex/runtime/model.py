@@ -305,6 +305,7 @@ class RuntimeModel(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
+    preset: str = ""
     backend: str = "numpy"
     precision: str = "float64"
     engine: str = _DEFAULT_ENGINE
@@ -389,6 +390,7 @@ class RuntimeModel(BaseModel):
         diagnostics = self.diagnostics
         seeds = self.seeds
         return RuntimeConfig(
+            preset=self.preset,
             backend=self.backend,
             precision=self.precision,
             engine=self.engine,
@@ -476,6 +478,7 @@ class RuntimeModel(BaseModel):
                 batch_order=getattr(legacy, "batch_order_seed", None),
             )
         return cls(
+            preset="",
             backend=legacy.backend,
             precision=legacy.precision,
             engine=getattr(legacy, "engine", _DEFAULT_ENGINE),
@@ -508,7 +511,32 @@ class RuntimeModel(BaseModel):
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "RuntimeModel":
-        source = os.environ if env is None else env
+        # Copy env so we can apply preset-derived defaults without mutating the caller.
+        source = dict(os.environ if env is None else env)
+
+        preset = (source.get("COVERTREEX_PRESET") or "").strip().lower()
+
+        def _ensure(key: str, value: str) -> None:
+            if key not in source or source[key] is None or str(source[key]).strip() == "":
+                source[key] = value
+
+        if preset == "residual_parity":
+            _ensure("COVERTREEX_METRIC", "residual_correlation")
+            _ensure("COVERTREEX_PRECISION", "float64")
+            _ensure("COVERTREEX_RESIDUAL_PARITY", "1")
+            _ensure("COVERTREEX_RESIDUAL_DISABLE_FAST_PATHS", "1")
+            _ensure("COVERTREEX_RESIDUAL_USE_STATIC_EUCLIDEAN_TREE", "1")
+            _ensure("COVERTREEX_ENABLE_NUMBA", "1")
+            _ensure("COVERTREEX_RUST_QUERY_TELEMETRY", "1")
+        elif preset == "residual_perf":
+            _ensure("COVERTREEX_METRIC", "residual_correlation")
+            _ensure("COVERTREEX_PRECISION", "float32")
+            _ensure("COVERTREEX_RESIDUAL_PARITY", "0")
+            _ensure("COVERTREEX_RESIDUAL_DISABLE_FAST_PATHS", "0")
+            _ensure("COVERTREEX_RESIDUAL_USE_STATIC_EUCLIDEAN_TREE", "0")
+            _ensure("COVERTREEX_ENABLE_RUST", "1")
+            _ensure("COVERTREEX_ENABLE_NUMBA", "1")
+
         backend = _infer_backend(source.get("COVERTREEX_BACKEND"))
         precision = _normalise_precision(_infer_precision_from_env(source))
         requested_devices = _parse_devices(source.get("COVERTREEX_DEVICE"))
@@ -721,6 +749,7 @@ class RuntimeModel(BaseModel):
         )
 
         return cls(
+            preset=preset,
             backend=backend,
             precision=precision,
             engine=engine,

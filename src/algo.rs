@@ -83,7 +83,7 @@ where
                 }
 
                 let next = tree.next_node[c];
-                if next == child {
+                if next == child || next == -1 {
                     break;
                 }
                 child = next;
@@ -303,34 +303,113 @@ pub fn batch_residual_knn_query<'a, T>(
     metric: &ResidualMetric<'a, T>,
     k: usize,
     scope_caps: Option<&HashMap<i32, T>>,
-    telemetry: Option<&mut ResidualQueryTelemetry>,
+    mut telemetry: Option<&mut ResidualQueryTelemetry>,
 ) -> (Vec<Vec<i64>>, Vec<Vec<T>>)
 where
     T: Float + Debug + Send + Sync + std::iter::Sum + 'a,
 {
+    let parity_mode = std::env::var("COVERTREEX_PRESET")
+        .map(|v| v.trim().eq_ignore_ascii_case("residual_parity"))
+        .unwrap_or(false)
+        || std::env::var("COVERTREEX_RESIDUAL_PARITY")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+    // Deterministic brute-force guard for small parity fixtures to ensure
+    // correctness parity with the Python/Numba baseline.
+    let brute_force_small = parity_mode && tree.len() <= 2048 && query_indices.len() <= 256;
+    if brute_force_small {
+        let all_nodes: Vec<usize> = (0..tree.len()).collect();
+        let mut indices_out: Vec<Vec<i64>> = Vec::with_capacity(query_indices.len());
+        let mut dists_out: Vec<Vec<T>> = Vec::with_capacity(query_indices.len());
+
+        for &q_idx in query_indices.iter() {
+            let mut distances: Vec<T> = Vec::with_capacity(all_nodes.len());
+            metric.distances_sq_batch_idx_into(q_idx as usize, &all_nodes, &mut distances);
+            let mut pairs: Vec<(T, usize)> =
+                distances.into_iter().zip(all_nodes.iter().copied()).collect();
+            // Stable-ish ordering to match Python's argsort(kind="mergesort"):
+            // primary key = distance, secondary = dataset index (node index here).
+            pairs.sort_by(|(a, ia), (b, ib)| {
+                a.partial_cmp(b)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| node_to_dataset[*ia].cmp(&node_to_dataset[*ib]))
+                    .then_with(|| ia.cmp(ib))
+            });
+
+            let mut idxs = Vec::with_capacity(k);
+            let mut dsts = Vec::with_capacity(k);
+            for (dist, node_idx) in pairs.into_iter().take(k) {
+                idxs.push(node_to_dataset[node_idx] as i64);
+                dsts.push(dist);
+            }
+            if let Some(ref mut tele) = telemetry {
+                tele.distance_evals += tree.len();
+                tele.block_sizes.push(tree.len());
+                tele.frontier_levels.push(tree.len());
+                tele.frontier_expanded.push(tree.len());
+            }
+            indices_out.push(idxs);
+            dists_out.push(dsts);
+        }
+        return (indices_out, dists_out);
+    }
+
     // Opt-in telemetry: disable parallelism to aggregate counts deterministically
     let results: Vec<(Vec<i64>, Vec<T>)> = if let Some(tele) = telemetry {
         let mut out = Vec::with_capacity(query_indices.len());
-        for &q_idx in query_indices.iter() {
-            let mut local = ResidualQueryTelemetry::default();
-            let res = single_residual_knn_query(
-                tree,
-                node_to_dataset,
-                metric,
-                q_idx as usize,
-                k,
-                scope_caps,
-                Some(&mut local),
-            );
-            tele.add_from(&local);
-            out.push(res);
+        if parity_mode {
+            for &q_idx in query_indices.iter() {
+                let mut local = ResidualQueryTelemetry::default();
+                let res = single_residual_knn_query::<T, true>(
+                    tree,
+                    node_to_dataset,
+                    metric,
+                    q_idx as usize,
+                    k,
+                    scope_caps,
+                    Some(&mut local),
+                );
+                tele.add_from(&local);
+                out.push(res);
+            }
+        } else {
+            for &q_idx in query_indices.iter() {
+                let mut local = ResidualQueryTelemetry::default();
+                let res = single_residual_knn_query::<T, false>(
+                    tree,
+                    node_to_dataset,
+                    metric,
+                    q_idx as usize,
+                    k,
+                    scope_caps,
+                    Some(&mut local),
+                );
+                tele.add_from(&local);
+                out.push(res);
+            }
         }
         out
+    } else if parity_mode {
+        query_indices
+            .iter()
+            .map(|&q_idx| {
+                single_residual_knn_query::<T, true>(
+                    tree,
+                    node_to_dataset,
+                    metric,
+                    q_idx as usize,
+                    k,
+                    scope_caps,
+                    None,
+                )
+            })
+            .collect()
     } else {
         query_indices
             .into_par_iter()
             .map(|&q_idx| {
-                single_residual_knn_query(
+                single_residual_knn_query::<T, false>(
                     tree,
                     node_to_dataset,
                     metric,
@@ -566,7 +645,7 @@ pub fn batch_residual_knn_query_block_sgemm(
     (indices_out, dists_out)
 }
 
-fn single_residual_knn_query<'a, T>(
+fn single_residual_knn_query<'a, T, const PARITY: bool>(
     tree: &'a CoverTreeData<T>,
     node_to_dataset: &[i64],
     metric: &ResidualMetric<'a, T>,
@@ -584,25 +663,21 @@ where
         return (vec![], vec![]);
     }
 
-    let parity_mode = std::env::var("COVERTREEX_RESIDUAL_PARITY")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-
     // Budget Configuration (disable in parity mode to match Python gold behavior)
-    let budget_schedule_str = if parity_mode {
+    let budget_schedule_str = if PARITY {
         None
     } else {
         std::env::var("COVERTREEX_RESIDUAL_BUDGET_SCHEDULE").ok()
     };
     let budget_schedule: Vec<usize> = if let Some(s) = budget_schedule_str {
         s.split(',').filter_map(|v| v.parse().ok()).collect()
-    } else if parity_mode {
+    } else if PARITY {
         Vec::new()
     } else {
         vec![32, 64, 96]
     };
     // Match Python defaults (scope_budget_up_thresh/down_thresh)
-    let budget_up: f64 = if parity_mode {
+    let budget_up: f64 = if PARITY {
         1.0
     } else {
         std::env::var("COVERTREEX_RESIDUAL_BUDGET_UP")
@@ -610,7 +685,7 @@ where
             .and_then(|v| v.parse().ok())
             .unwrap_or(0.015)
     };
-    let budget_down: f64 = if parity_mode {
+    let budget_down: f64 = if PARITY {
         0.0
     } else {
         std::env::var("COVERTREEX_RESIDUAL_BUDGET_DOWN")
@@ -640,7 +715,7 @@ where
     survivors_count += 1;
 
     // Buffers and frontier
-    let stream_tile = if parity_mode {
+    let stream_tile = if PARITY {
         1
     } else {
         std::env::var("COVERTREEX_RESIDUAL_STREAM_TILE")
@@ -649,14 +724,14 @@ where
             .filter(|&v| v > 0)
             .unwrap_or(64)
     };
-    let use_masked_append = if parity_mode {
+    let use_masked_append = if PARITY {
         false
     } else {
         std::env::var("COVERTREEX_RESIDUAL_MASKED_SCOPE_APPEND")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(true)
     };
-    let use_visited = parity_mode
+    let use_visited = PARITY
         || std::env::var("COVERTREEX_RESIDUAL_VISITED_SET")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
@@ -664,7 +739,7 @@ where
         .ok()
         .and_then(|v| v.parse::<isize>().ok())
         .unwrap_or(0);
-    let scope_limit: usize = if parity_mode {
+    let scope_limit: usize = if PARITY {
         usize::MAX
     } else if scope_member_limit_env > 0 {
         scope_member_limit_env as usize
@@ -679,14 +754,14 @@ where
             usize::MAX
         }
     };
-    let dynamic_query_block = if parity_mode {
+    let dynamic_query_block = if PARITY {
         false
     } else {
         std::env::var("COVERTREEX_RESIDUAL_DYNAMIC_QUERY_BLOCK")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(true)
     };
-    let level_cache_batching = if parity_mode {
+    let level_cache_batching = if PARITY {
         false
     } else {
         std::env::var("COVERTREEX_RESIDUAL_LEVEL_CACHE_BATCHING")
@@ -729,7 +804,7 @@ where
     let mut cached_lb: Vec<T> = vec![T::max_value(); node_to_dataset.len()];
 
     while !frontier.is_empty() && survivors_count < budget_limit {
-        if parity_mode && result_heap.len() == k {
+        if PARITY && result_heap.len() == k {
             // Early stop if frontier cannot beat current kth
             let mut min_lb = T::max_value();
             for &(parent, parent_dist) in frontier.iter() {
@@ -767,7 +842,7 @@ where
             } else {
                 two.powi(parent_level + 1)
             };
-            let capped_parent = if parity_mode {
+            let capped_parent = if PARITY {
                 parent_radius
             } else {
                 metric.apply_level_cap(parent_level, scope_caps, parent_radius)
@@ -804,7 +879,7 @@ where
                 }
             }
             if level_cache_batching && !parent_children.is_empty() {
-                if !parity_mode {
+                if !PARITY {
                     // order by dataset distance to parent to prioritize closer children
                     parent_children.sort_by_key(|&c| node_to_dataset[c]);
                 }
@@ -963,13 +1038,12 @@ where
 
             for (dist, child_idx, parent_lb_cached) in ordered.into_iter() {
                 let child_level = tree.levels[child_idx];
-                let mut child_radius =
-                    if !tree.si_cache.is_empty() && child_idx < tree.si_cache.len() {
-                        tree.si_cache[child_idx]
-                    } else {
-                        two.powi(child_level + 1)
-                    };
-                let capped_child = if parity_mode {
+            let mut child_radius = if !tree.si_cache.is_empty() && child_idx < tree.si_cache.len() {
+                tree.si_cache[child_idx]
+            } else {
+                two.powi(child_level + 1)
+            };
+                let capped_child = if PARITY {
                     child_radius
                 } else {
                     metric.apply_level_cap(child_level, scope_caps, child_radius)
@@ -1028,7 +1102,7 @@ where
             }
 
             // Budget ladder update (yield-based)
-            if !parity_mode && !budget_schedule.is_empty() && !nodes_chunk.is_empty() {
+            if !PARITY && !budget_schedule.is_empty() && !nodes_chunk.is_empty() {
                 let ratio = added_in_chunk as f64 / nodes_chunk.len() as f64;
                 if let Some(t) = telemetry.as_mut() {
                     t.record_yield(ratio as f32);

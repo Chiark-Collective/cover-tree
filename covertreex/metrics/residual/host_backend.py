@@ -163,5 +163,7 @@ def build_residual_backend(
         chunk_size=int(chunk_size),
         kernel_points_f32=kernel_points_f32,
         kernel_row_norms_f32=kernel_row_norms,
+        rbf_variance=float(variance),
+        rbf_lengthscale=float(lengthscale),
     )
     return host_backend

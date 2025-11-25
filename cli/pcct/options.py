@@ -21,6 +21,7 @@ class QueryCLIOptions:
     set_override: list[str] | None = None
     metric: str = "euclidean"
     engine: str | None = None
+    preset: str | None = None
     backend: str | None = None
     precision: str | None = None
     devices: Tuple[str, ...] | None = None

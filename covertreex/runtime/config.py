@@ -51,6 +51,7 @@ def _replace_context(context: "RuntimeContext") -> None:
 
 @dataclass(frozen=True)
 class RuntimeConfig:
+    preset: str
     backend: str
     precision: str
     engine: str

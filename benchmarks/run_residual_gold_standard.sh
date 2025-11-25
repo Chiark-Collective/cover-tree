@@ -23,6 +23,8 @@ ENGINE="python-numba"  # hard lock to reference path
 # Optional comparison engine (runs after gold standard). Use COMP_ENGINE=none to skip.
 COMP_ENGINE="${COMP_ENGINE:-rust-hilbert}"
 RESIDUAL_CHUNK_SIZE="${RESIDUAL_CHUNK_SIZE:-512}"
+PRESET="${PRESET:-}"
+COMP_PRESET="${COMP_PRESET:-}"
 
 # Ensure we run with the default dense traversal / no chunking knobs, since
 # the reference result was captured before the sparse/Numba paths were enabled.
@@ -34,6 +36,10 @@ export COVERTREEX_ENABLE_RUST=0
 export COVERTREEX_BATCH_ORDER=natural
 export COVERTREEX_PREFIX_SCHEDULE=doubling
 export COVERTREEX_ENABLE_DIAGNOSTICS=0
+if [[ -n "$PRESET" ]]; then
+  export COVERTREEX_PRESET="$PRESET"
+  echo "[run_residual_gold_standard] applying preset PRESET=$PRESET for gold run"
+fi
 
 if [[ -n "$GRID_WHITEN_SCALE" ]]; then
   export COVERTREEX_RESIDUAL_GRID_WHITEN_SCALE="$GRID_WHITEN_SCALE"
@@ -61,6 +67,10 @@ if [[ -n "$COMP_ENGINE" && "$COMP_ENGINE" != "none" ]]; then
   COMP_LOG_PATH="${LOG_PATH%.log}_${COMP_ENGINE}.log"
   # Allow Rust for comparison; keep other knobs aligned.
   export COVERTREEX_ENABLE_RUST=1
+  if [[ -n "$COMP_PRESET" ]]; then
+    export COVERTREEX_PRESET="$COMP_PRESET"
+    echo "[run_residual_gold_standard] applying comparison preset COMP_PRESET=$COMP_PRESET"
+  fi
   COMP_ENGINE_ARGS=(--engine "$COMP_ENGINE" --residual-chunk-size "$RESIDUAL_CHUNK_SIZE")
   python -m cli.pcct query \
     --dimension 3 \

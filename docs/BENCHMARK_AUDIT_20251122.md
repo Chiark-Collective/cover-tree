@@ -34,6 +34,7 @@ This tool is designed for CI/CD or nightly checks to ensure feature stability. *
     *   `queries_8192_*`: Medium scaling tests (8k points).
     *   `queries_32768_euclidean_hilbert_grid`: Tests Euclidean metric with advanced build options (Hilbert ordering + Grid conflict graph).
     *   `queries_32768_residual_dense_pairmerge`: Tests Residual metric with "dense pair-merge" streaming.
+    *   `queries_32768_residual_perf_rust_hilbert`: Smoke check for the Rust perf preset (f32, fast paths on, rust-hilbert engine, k=50) to catch perf regressions post-parity.
 *   **Purpose:** Checks for regressions in specific subsystems (diagnostics, conflict graph implementations, streaming logic) rather than tracking peak performance of the standard path.
 
 ## 3. The Rust Discrepancy (Indices vs Coordinates)
@@ -93,3 +94,22 @@ COVERTREEX_RESIDUAL_PARITY=1 ./benchmarks/run_residual_gold_standard.sh bench_re
 - Gold: **41,364 q/s** (build 7.25 s, query 0.0248 s).
 - Rust-hilbert (parity mode: si_cache, no budgets/caps/reordering, stream_tile=1, f64 build): **5,127 q/s** (build 3.49 s, query 0.1997 s).
 Artifacts: `bench_residual_parity_rust.log`, `bench_residual_parity_rust_rust-hilbert.log`.
+
+### 2025-11-25 — residual_perf comparison smoke
+Command (gold path Python/Numba, comparison uses perf preset on rust-hilbert):
+```
+COMP_PRESET=residual_perf ./benchmarks/run_residual_gold_standard.sh bench_residual_perf_baseline.log
+```
+Results (32,768 / d=3 / 1,024 queries / k=50):
+- python-numba (gold, preset unset, Rust forced off): build **8.11 s**, query **346.01 s** → **3.0 q/s**. Telemetry sums to ~**5.6 s wall** (~182 q/s), so the summary line is misreporting; either way this is a major regression vs the 2025-11-24 gold (~41k q/s) and needs investigation.
+- rust-hilbert (`COMP_PRESET=residual_perf`): build **3.33 s**, query **0.096 s** → **10,627 q/s**; gpboost baseline from the same run: **263 q/s**, so PCCT is ~40× faster.
+Artifacts: `bench_residual_perf_baseline.log`, `bench_residual_perf_baseline_rust-hilbert.log`.
+
+### 2025-11-25 — SGEMM brute-force guard + parity cap
+- Added a configurable guard for the residual SGEMM brute-force path: `COVERTREEX_RESIDUAL_BRUTE_FORCE_MAX_PAIRS` (defaults to **50M** pairs, parity **30M**; set ≤0 to disable). This keeps the gold 32k workload on the SGEMM fast path while avoiding O(N·Q) blowups on larger jobs.
+- Command (gold only, comparison disabled):  
+  ```
+  COMP_ENGINE=none ./benchmarks/run_residual_gold_standard.sh bench_residual_gold_rerun_fix2.log
+  ```
+- Result (python-numba enforced, 32,768 / d=3 / 1,024q / k=50): **build 8.09 s**, **query 1.17 s** → **874 q/s**. This clears the prior 3–4 q/s regression but is still ~47× below the historical ~41k q/s gold.
+- Logs: `bench_residual_gold_rerun_fix2.log` (gold only), telemetry JSONL at `artifacts/benchmarks/queries_pcct-20251125-112045-2c9c68_20251125-112045.jsonl`.

@@ -73,6 +73,9 @@ class ResidualCorrHostData:
     kernel_provider: KernelProvider
     point_decoder: PointDecoder = _default_point_decoder
     chunk_size: int = 512
+    # Original RBF hyperparameters (used by numba fast path)
+    rbf_variance: float = 1.0
+    rbf_lengthscale: np.ndarray | float = 1.0
     v_norm_sq: np.ndarray | None = None
     kernel_points_f32: np.ndarray | None = None
     kernel_row_norms_f32: np.ndarray | None = None

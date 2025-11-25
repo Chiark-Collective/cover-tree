@@ -11,6 +11,11 @@ Update 2025-11-24 (late):
 - Rust residual parity path now records query telemetry for both f32 and f64 builds; `COVERTREEX_RUST_QUERY_TELEMETRY=1` produces the same frontier/prune/eval counters as the f32 path.
 - Parity flag also forces the residual metric to bypass SIMD/tiled fast paths (or use `COVERTREEX_RESIDUAL_DISABLE_FAST_PATHS=1` explicitly).
 - Added an optional traversal visited set (auto-enabled under parity or via `COVERTREEX_RESIDUAL_VISITED_SET=1`) to keep node expansions deterministic when masked dedupe is disabled.
+- Presets: `COVERTREEX_PRESET=residual_parity` now applies the parity-safe stack (f64, parity flag, static tree, fast paths off, telemetry on); `COVERTREEX_PRESET=residual_perf` flips back to rust-native defaults (f32, fast paths on, parity off) without hand-setting multiple env vars.
+
+Preset usage:
+- CLI: `cli.pcct query --metric residual --preset residual_parity` (or `residual_perf`).
+- Bench scripts: `PRESET=residual_parity ./benchmarks/run_residual_gold_standard.sh` for gold run, `COMP_PRESET=residual_perf` for the comparison pass.
 
 The gold Numba run (via `benchmarks/run_residual_gold_standard.sh`) has these defaults **active**:
 - Level cache reuse (`residual_level_cache_batching=True`).

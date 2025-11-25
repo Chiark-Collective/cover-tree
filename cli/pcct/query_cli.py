@@ -30,6 +30,7 @@ def query(
     set_override: opts.SetOverrideOption = None,
     metric: opts.MetricOption = "auto",
     engine: opts.EngineOption = None,
+    preset: opts.PresetOption = None,
     backend: opts.BackendOption = None,
     precision: opts.PrecisionOption = None,
     devices: opts.DevicesOption = None,

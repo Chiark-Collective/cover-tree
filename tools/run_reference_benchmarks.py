@@ -5,7 +5,7 @@ The default suite runs:
 - Residual 4 k guardrail (via tools/residual_guardrail_check.py)
 - 2 048-point quick check (diagnostics off + on)
 - 8 192-point Euclidean + residual scaling runs
-- 32 768-point Euclidean (Hilbert + grid) and residual dense pair-merge runs
+- 32 768-point Euclidean (Hilbert + grid), residual dense pair-merge, and a rust-hilbert perf smoke (residual_perf preset)
 
 Use --list-jobs to inspect the available presets and --jobs to run a subset.
 """
@@ -226,6 +226,26 @@ def _jobs() -> Dict[str, BenchmarkJob]:
                 },
                 description="Gold Standard Residual Benchmark (32k points, d=3, k=50). Matches run_residual_gold_standard.sh.",
             ),
+            BenchmarkJob(
+                name="queries_32768_residual_perf_rust_hilbert",
+                metric="residual",
+                tree_points=32768,
+                batch_size=512,
+                queries=1024,
+                k=50,
+                baseline="gpboost",
+                cli_args=("--engine", "rust-hilbert"),
+                env={
+                    "COVERTREEX_PRESET": "residual_perf",
+                    "COVERTREEX_ENABLE_RUST": "1",
+                    "COVERTREEX_SCOPE_CHUNK_TARGET": "0",
+                    "COVERTREEX_ENABLE_SPARSE_TRAVERSAL": "0",
+                    "COVERTREEX_BATCH_ORDER": "natural",
+                    "COVERTREEX_PREFIX_SCHEDULE": "doubling",
+                    "COVERTREEX_ENABLE_DIAGNOSTICS": "0",
+                },
+                description="Rust perf preset smoke (residual_perf, rust-hilbert, k=50, 32k pts).",
+            ),
         ]
     }
 
@@ -285,6 +305,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--list-jobs", action="store_true", help="List available job presets and exit")
     parser.add_argument("--skip-existing", action="store_true", help="Skip jobs whose log files already exist")
     parser.add_argument("--summary", type=Path, help="Optional path for the manifest JSON (default: <output>/manifest.json)")
+    parser.add_argument("--preset", type=str, choices=["residual_parity", "residual_perf"], help="Optional COVERTREEX_PRESET applied to all jobs.")
     args = parser.parse_args(argv)
 
     jobs = _jobs()
@@ -304,11 +325,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     for job in _select_jobs(jobs, selected_names):
         log_path = output_dir / f"{job.name}.jsonl"
         csv_path = output_dir / f"{job.name}.csv"
+        env = {}
+        if args.preset:
+            env["COVERTREEX_PRESET"] = args.preset
         result = _run_job(
             job=job,
             log_path=log_path,
             csv_path=csv_path,
-            env={},
+            env=env,
             python_executable=python_executable,
             skip_existing=args.skip_existing,
         )

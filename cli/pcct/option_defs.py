@@ -126,6 +126,14 @@ DevicesOption = Annotated[
     Optional[List[str]],
     typer.Option("--device", "-d", help="Restrict execution to specific logical devices.", rich_help_panel=RUNTIME_PANEL),
 ]
+PresetOption = Annotated[
+    Optional[Literal["residual_parity", "residual_perf"]],
+    typer.Option(
+        "--preset",
+        help="Apply a runtime preset (residual_parity for correctness, residual_perf for Rust speed).",
+        rich_help_panel=RUNTIME_PANEL,
+    ),
+]
 EnableNumbaOption = Annotated[
     Optional[bool],
     typer.Option("--enable-numba/--disable-numba", help="Force-enable or disable Numba kernels.", rich_help_panel=RUNTIME_PANEL),

@@ -27,6 +27,7 @@ def runtime_from_args(
         raise ValueError("--set overrides require --profile.")
 
     metric = _get_arg(args, "metric", default_metric) or default_metric
+    preset = _get_arg(args, "preset")
     runtime_kwargs: dict[str, Any] = {
         "metric": (
             "residual_correlation"
@@ -34,6 +35,8 @@ def runtime_from_args(
             else "residual_correlation_lite" if metric == "residual-lite" else metric
         ),
     }
+    if preset:
+        runtime_kwargs["preset"] = preset
     engine = _get_arg(args, "engine")
     if engine:
         runtime_kwargs["engine"] = engine

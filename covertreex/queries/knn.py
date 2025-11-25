@@ -204,7 +204,7 @@ def _knn_impl(
         except ImportError:
             pass
     
-    if runtime.residual_use_static_euclidean_tree:
+    if runtime.metric == "residual_correlation" or runtime.residual_use_static_euclidean_tree:
         return residual_knn_query(
             tree,
             batch,
