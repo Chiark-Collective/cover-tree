@@ -1,76 +1,51 @@
-# High-Performance Cover Tree Roadmap: Rust & Hybrid Architectures
+# Optimization Roadmap: Closing the Gap to Numba
 
-**Date:** 2025-11-24
-**Context:** Following the successful integration of the Dense Scope Streamer and Scope Caps into the Rust backend, we have achieved a ~200x speedup in Rust queries. However, a performance gap remains compared to the highly optimized Python/Numba query path. This document outlines two distinct avenues to close this gap and potentially surpass current state-of-the-art performance.
+## Problem Statement
+Current Rust throughput: **~10.3k q/s** (SIMD-optimized).
+Target Numba throughput: **~39.0k q/s**.
+Gap: **3.8x**.
 
-## Current State (Gold Standard 32k)
+Analysis shows the bottleneck has shifted from **Arithmetic Intensity** (solved by SIMD) to **Memory Latency** (the "Gather" problem).
 
-| Engine | Implementation | Order | Build Time | Query Time | Throughput |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **python-numba** | Numba JIT | Natural | 16.10s | **0.05s** | **21,123 q/s** |
-| **rust-natural** | Rust Native | Natural | 7.42s | 0.14s | 7,105 q/s |
-| **rust-hilbert** | Rust Native | Hilbert | **4.20s** | 0.21s | 4,971 q/s |
+## Evaluation of Approaches
 
----
+We compared two architectural changes to address the gather bottleneck: **Dual-Tree Traversal** and **Contiguous Memory Layout**.
 
-## Avenue 1: Native Rust Optimization
-**Goal:** Bring `rust-natural` and `rust-hilbert` query throughput up to parity with `python-numba` (~22k q/s) while maintaining pure Rust portability.
+### 1. Dual-Tree Traversal (Batch-Query vs. Batch-Node)
+*   **Concept:** Instead of processing one query against the tree, process a batch of queries ($Q$) against a batch of tree nodes ($N$).
+*   **Mechanism:** Collect all children of a set of active nodes, gather their data *once*, and compute a $Q \times N$ distance matrix.
+*   **Pros:**
+    *   **Amortization:** The cost of fetching a node's data is shared across all queries in the batch.
+    *   **Compute Density:** Allows use of SGEMM (Matrix-Matrix multiplication), efficiently utilizing FPU pipelines.
+*   **Cons:**
+    *   **Complexity:** Requires a complete rewrite of the traversal logic (`single_residual_knn_query` is deeply recursive/DFS). Managing the "frontier" for multiple queries simultaneously is non-trivial.
+    *   **Pruning Granularity:** Batching reduces pruning effectiveness. If one query needs to visit a node, the whole batch effectively "visits" it (or complex masking is required), potentially wasting work.
 
-### 1. Level Caching (The "Missing Link")
-The single largest differentiator between the implementations is the **Level Cache**.
-*   **Python/Numba:** Maintains a cache of "valid scope members" from the parent level. When descending, it intersects the parent's scope with the child's potential scope. This often avoids re-scanning the entire child list or re-computing distances for points already known to be far.
-*   **Rust (Current):** Re-scans children and re-evaluates heuristics at every level.
-*   **Implementation Plan:**
-    *   Implement a per-query (or thread-local) cache structure in Rust.
-    *   Requires careful memory management to avoid allocations in the hot loop (e.g., reusing a `Vec<usize>` or a fixed-size buffer).
-    *   Port the "semisort" or "masked append" logic to efficiently filter survivors from level $i$ to $i-1$.
+### 2. Contiguous Memory Layout (Data-Oriented Design)
+*   **Concept:** Restructure the tree and dataset so that data is accessed sequentially, not randomly.
+*   **Mechanism:**
+    1.  **CSR Topology:** Replace the Linked-List child structure (`first_child`, `next_node`) with a Compressed Sparse Row format (`children_offset[node]`, `children_len[node]`). Children of a node are stored contiguously in a `children` array.
+    2.  **Dataset Reordering:** Permute the underlying `v_matrix` and `coords` arrays to match the tree's traversal order (e.g., BFS or DFS order).
+*   **Pros:**
+    *   **Zero Gather:** If children indices are contiguous ($i, i+1, \dots, i+8$), we can load data using **Vector Loads** (`vmovups`) instead of **Scalar Gathers**. This is a massive latency reduction.
+    *   **Cache Locality:** Prefetchers can predict sequential access perfectly.
+    *   **Simplicity:** The traversal logic remains mostly the same (DFS/BFS), just the iteration mechanism changes (`for child in slice` vs `while child != -1`).
+*   **Cons:**
+    *   **Preprocessing:** Requires re-indexing the dataset at build time (O(N) copy).
 
-### 2. Dynamic Block Sizing
-*   **Python/Numba:** Dynamically adjusts the vector block size based on the number of active queries at a specific tree level. This maximizes SIMD utilization and minimizes work for "straggler" queries.
-*   **Rust (Current):** Uses a fixed block size (default 64 or 256).
-*   **Implementation Plan:**
-    *   Refactor the batch driver to group queries by their current tree level.
-    *   Process level-groups together, allowing the block size to adapt to the "wavefront" of the search.
+## Recommendation: Contiguous Memory Layout
 
-### 3. Hilbert-Specific Tuning
-`rust-hilbert` builds fastest but queries slowest.
-*   **Hypothesis:** Hilbert ordering creates highly dense, spatially coherent sub-trees. The current "budget" heuristics (which stop searching after seeing $N$ survivors) might be saturating early on "local" points that aren't actually the nearest neighbors for a distant Maximin query, effectively "blinding" the search to better candidates in other branches.
-*   **Fix:** Tune `BUDGET_UP` / `BUDGET_DOWN` specifically for Hilbert-ordered trees, or implement a "diversity" heuristic that forces the traversal to check sibling branches even if the local budget is full.
+**Winner: Contiguous Memory Layout (CSR + Reorder)**
 
----
+### Reasoning based on Codebase Analysis:
+1.  **Current Bottleneck:** `algo.rs` spends significant time in `metric.distances_sq_batch_idx_into...`. Inside this function, `p_indices` are random. The code explicitly gathers: `norms[k] = scaled_norms[p_idxs[k]]`. This scalar gather defeats the purpose of SIMD if the CPU is waiting for L3 cache lines on every load.
+2.  **Traversal Overhead:** The current `CoverTreeData` uses a linked-list structure (`next_node`). This incurs a dependent load per child visited (`child = next_node[child]`). A CSR approach eliminates this entirely.
+3.  **Feasibility:** Implementing Dual-Tree requires a paradigm shift. Implementing Layout Optimization is a transformation of the *storage*, keeping the *logic* largely similar.
 
-## Avenue 2: The "Super Engine" (Hybrid Architecture)
-**Goal:** Combine the superior build speed of `rust-hilbert` with the superior query speed of `python-numba` to create an engine that dominates both metrics.
+### Implementation Plan
+1.  **Refactor `CoverTreeData`:** Move to `children_offsets: Vec<usize>` and `children: Vec<NodeId>`.
+2.  **Reorder Strategy:** When building the tree, output a permutation vector $P$ that maps `TreeIndex -> DatasetIndex`.
+3.  **Permute Metric Data:** Create a `ReorderedResidualMetric` that stores `v_matrix` and `coords` in `TreeIndex` order.
+4.  **SIMD Load:** Rewrite `distances_sq_...` to take a `start_idx` and `count` instead of `indices: &[usize]`. Use `std::slice::from_raw_parts` + `f32x8::from_slice` (aligned load).
 
-**Target Performance:** ~4.2s Build + ~0.05s Query = **~4.25s Total** (vs 16.1s current best).
-
-### Architecture
-The workflow would be:
-1.  **Rust Build:** Use `rust-hilbert` logic to construct the Cover Tree. This handles the heavy lifting (conflict graph, rigorous contraction, reordering) in compiled, parallel Rust.
-2.  **Zero-Copy Transfer:** Expose the internal struct-of-arrays (`parents`, `children`, `levels`, `points`) from Rust to Python.
-    *   Use `PyO3` to return these vectors as NumPy arrays (or read-only views).
-    *   This avoids serialization overhead.
-3.  **Python Wrapper:** Construct a `PCCTree` object in Python wrapping these Rust-generated arrays.
-4.  **Numba Query:** Pass this `PCCTree` to the existing `_ResidualTraversal` strategy. The Numba JIT kernels will run against the memory allocated by Rust.
-
-### Implementation Steps
-1.  **Expose Internals:** Add a method to `CoverTreeWrapper` (e.g., `export_arrays()`) that returns a tuple of `(parents, children, levels, points, next_nodes)` as `PyArray` objects.
-2.  **Engine Binding:** Create a new engine class (e.g., `HybridRustNumbaEngine`) in `covertreex/engine.py`.
-    *   `build()` calls `rust-hilbert` backend.
-    *   Extracts arrays.
-    *   Instantiates `PCCTree(backend=numpy, ...)` with the arrays.
-3.  **Verify Memory Layout:** Ensure Rust `Vec<T>` layout matches what Numba expects (C-contiguous). (It should, as standard `Vec` is contiguous).
-
-## Comparison & Recommendation
-
-| Feature | Avenue 1 (Native Rust) | Avenue 2 (Hybrid) |
-| :--- | :--- | :--- |
-| **Query Speed** | High (Potential) | **Maximum (Proven)** |
-| **Build Speed** | High | **Maximum** |
-| **Complexity** | High (Algorithm porting) | Medium (Glue code) |
-| **Portability** | **Pure Rust** | Requires Python/Numba |
-| **Dependencies** | Low | High (Numba, LLVM) |
-
-**Recommendation:**
-1.  **Implement Avenue 2 (Hybrid) immediately.** It provides the highest immediate performance gain with the lowest algorithmic risk, leveraging code that is already proven to work (Numba query + Rust build).
-2.  **Pursue Avenue 1 (Native)** as a long-term goal to remove the Python dependency for production deployments that require a standalone binary.
+**Expected Impact:** Closing the remaining 4x gap. Numba likely benefits from cache-friendly arrays or JIT-fused loops that hide gather latency. Explicitly fixing the layout in Rust will match or beat that performance.
