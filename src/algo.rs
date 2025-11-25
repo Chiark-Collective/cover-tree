@@ -54,7 +54,7 @@ pub(crate) fn compute_si_cache_residual<'a, T>(
     metric: &ResidualMetric<'a, T>,
 ) -> Vec<T>
 where
-    T: Float + Debug + Send + Sync + std::iter::Sum + 'a,
+    T: Float + Debug + Send + Sync + std::iter::Sum + 'a + 'static,
 {
     let mut cache = vec![T::zero(); tree.len()];
 
@@ -66,7 +66,7 @@ where
         out: &mut [T],
     ) -> T
     where
-        T: Float + Debug + Send + Sync + std::iter::Sum + 'a,
+        T: Float + Debug + Send + Sync + std::iter::Sum + 'a + 'static,
     {
         let mut max_radius = T::zero();
         let node_ds = node_to_dataset[node] as usize;
@@ -306,7 +306,7 @@ pub fn batch_residual_knn_query<'a, T>(
     telemetry: Option<&mut ResidualQueryTelemetry>,
 ) -> (Vec<Vec<i64>>, Vec<Vec<T>>)
 where
-    T: Float + Debug + Send + Sync + std::iter::Sum + 'a,
+    T: Float + Debug + Send + Sync + std::iter::Sum + 'a + 'static,
 {
     let use_heap = std::env::var("COVERTREEX_RUST_RESIDUAL_HEAP")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -390,7 +390,7 @@ pub fn batch_residual_knn_query_block<'a, T>(
     k: usize,
 ) -> (Vec<Vec<i64>>, Vec<Vec<T>>)
 where
-    T: Float + Debug + Send + Sync + std::iter::Sum + 'a,
+    T: Float + Debug + Send + Sync + std::iter::Sum + 'a + 'static,
 {
     let n = node_to_dataset.len();
     let mut indices_out: Vec<Vec<i64>> = Vec::with_capacity(query_indices.len());
@@ -543,7 +543,12 @@ pub fn batch_residual_knn_query_block_sgemm(
                 }
                 let rho = (k_val - dot_v) / denom;
                 let rho_clamped = rho.max(-1.0).min(1.0);
-                dist_block[row_offset + j] = 1.0 - rho_clamped.abs();
+                let dist_sq = 1.0 - rho_clamped.abs();
+                dist_block[row_offset + j] = if dist_sq > 0.0 {
+                    dist_sq.sqrt()
+                } else {
+                    0.0
+                };
             }
 
             for j in t_size..t_block {
@@ -604,7 +609,7 @@ fn single_residual_knn_query<'a, T>(
     mut telemetry: Option<&mut ResidualQueryTelemetry>,
 ) -> (Vec<i64>, Vec<T>)
 where
-    T: Float + Debug + Send + Sync + std::iter::Sum + 'a,
+    T: Float + Debug + Send + Sync + std::iter::Sum + 'a + 'static,
 {
     let mut result_heap: BinaryHeap<Neighbor<T>> = BinaryHeap::new();
 

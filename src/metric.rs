@@ -51,11 +51,18 @@ pub struct ResidualMetric<'a, T> {
     pub neg_half: T,
     pub cap_default: T,
     pub disable_fast_paths: bool,
+    parity_mode: bool,
+    use_f32_math: bool,
+    scaled_coords_f32: Option<Array2<f32>>,
+    scaled_norms_f32: Option<Vec<f32>>,
+    v_matrix_f32: Option<Array2<f32>>,
+    p_diag_f32: Option<Vec<f32>>,
+    v_norms_f32: Option<Vec<f32>>,
 }
 
 impl<'a, T> ResidualMetric<'a, T>
 where
-    T: Float + Debug + Send + Sync + std::iter::Sum + 'a,
+    T: Float + Debug + Send + Sync + std::iter::Sum + 'a + 'static,
 {
     pub fn new(
         v_matrix: ArrayView2<'a, T>,
@@ -101,6 +108,32 @@ where
             || std::env::var("COVERTREEX_RESIDUAL_DISABLE_FAST_PATHS")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false);
+        let force_f32_math = std::env::var("COVERTREEX_RESIDUAL_FORCE_F32_MATH")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        // Rust f64 accumulation deviates from the float32 baseline used by the Python
+        // residual backend. In parity/forced modes, run the metric arithmetic in f32
+        // and cast results back to T to match the gold distances.
+        let use_f32_math =
+            std::mem::size_of::<T>() == 8 && (parity_mode || force_f32_math);
+
+        let (scaled_coords_f32, scaled_norms_f32, v_matrix_f32, p_diag_f32, v_norms_f32) =
+            if use_f32_math {
+                let coords_f32 = scaled_coords.mapv(|v| v.to_f32().unwrap());
+                let norms_f32 = scaled_norms.iter().map(|v| v.to_f32().unwrap()).collect();
+                let v_mat_f32 = v_matrix.mapv(|v| v.to_f32().unwrap());
+                let p_diag_f32: Vec<f32> = p_diag.iter().map(|v| v.to_f32().unwrap()).collect();
+                let v_norms_f32: Vec<f32> = v_norms.iter().map(|v| v.to_f32().unwrap()).collect();
+                (
+                    Some(coords_f32),
+                    Some(norms_f32),
+                    Some(v_mat_f32),
+                    Some(p_diag_f32),
+                    Some(v_norms_f32),
+                )
+            } else {
+                (None, None, None, None, None)
+            };
 
         let neg_half = T::from(-0.5).unwrap();
         let cap_default = cap_default.unwrap_or_else(|| T::from(2.0).unwrap());
@@ -115,13 +148,20 @@ where
             neg_half,
             cap_default,
             disable_fast_paths,
+            parity_mode,
+            use_f32_math,
+            scaled_coords_f32,
+            scaled_norms_f32,
+            v_matrix_f32,
+            p_diag_f32,
+            v_norms_f32,
         }
     }
 
     #[inline(always)]
     pub fn max_distance_hint(&self) -> T {
-        // Residual correlation distance is bounded in [0, 2].
-        T::from(2.0).unwrap()
+        // Residual correlation distance is bounded in [0, 1].
+        T::one()
     }
 
     #[inline(always)]
@@ -140,10 +180,17 @@ where
 
     #[inline(always)]
     pub fn distance_sq_idx(&self, idx_1: usize, idx_2: usize) -> T {
+        if self.use_f32_math {
+            return self.distance_sq_idx_f32(idx_1, idx_2);
+        }
         // Coords dot product (small dimension, typically 2-10)
         let x_view = self.scaled_coords.row(idx_1);
         let y_view = self.scaled_coords.row(idx_2);
-        let dot_scaled = dot_product_simd(x_view, y_view);
+        let dot_scaled = if self.parity_mode {
+            parity_dot_f32(x_view, y_view).unwrap_or_else(|| x_view.dot(&y_view))
+        } else {
+            dot_product_simd(x_view, y_view)
+        };
 
         let two = T::from(2.0).unwrap();
         let mut d2 = self.scaled_norms[idx_1] + self.scaled_norms[idx_2] - two * dot_scaled;
@@ -156,7 +203,11 @@ where
         // V-Matrix dot product (hot loop)
         let v1_view = self.v_matrix.row(idx_1);
         let v2_view = self.v_matrix.row(idx_2);
-        let dot = dot_product_simd(v1_view, v2_view);
+        let dot = if self.parity_mode {
+            parity_dot_f32(v1_view, v2_view).unwrap_or_else(|| v1_view.dot(&v2_view))
+        } else {
+            dot_product_simd(v1_view, v2_view)
+        };
 
         let denom = (self.p_diag[idx_1] * self.p_diag[idx_2]).sqrt();
         let eps = T::from(1e-9).unwrap();
@@ -184,6 +235,9 @@ where
         self.distances_sq_batch_idx_into_with_kth(q_idx, p_indices, None, out);
     }
 
+    // NOTE: Despite the name, this returns the residual **distance** (sqrt of
+    // 1 - |rho|) to align with the Python/Numba implementation. The interface
+    // is kept to avoid broader refactors while preserving parity.
     pub fn distances_sq_batch_idx_into_with_kth(
         &self,
         q_idx: usize,
@@ -193,6 +247,10 @@ where
     ) {
         out.clear();
         out.reserve(p_indices.len());
+        if self.use_f32_math {
+            self.distances_f32_batch_idx_into_with_kth(q_idx, p_indices, kth, out);
+            return;
+        }
         if self.disable_fast_paths {
             self.distances_sq_batch_idx_into_with_kth_fallback(q_idx, p_indices, kth, out);
             return;
@@ -297,6 +355,11 @@ where
                     }
 
                     for (local_offset, &idx_2) in p_indices[idx..end].iter().enumerate() {
+                        if q_idx == idx_2 {
+                            out.push(T::zero());
+                            continue;
+                        }
+
                         let dot_scaled = if size == 4 {
                             NumCast::from(dot_coords_f32[local_offset]).unwrap()
                         } else if size == 8 {
@@ -402,7 +465,12 @@ where
                     if kth_cutoff < prune_sentinel {
                         let cap = self.v_norms[q_idx] * self.v_norms[idx_2];
                         let max_abs_rho = ((k_val - cap).abs()).max((k_val + cap).abs()) / denom;
-                        let min_dist = one - max_abs_rho.min(one);
+                        let min_dist_sq = one - max_abs_rho.min(one);
+                        let min_dist = if min_dist_sq > T::zero() {
+                            min_dist_sq.sqrt()
+                        } else {
+                            T::zero()
+                        };
                         if min_dist > kth_cutoff {
                             out.push(prune_sentinel);
                             continue;
@@ -414,7 +482,13 @@ where
 
                     let rho = (k_val - dot) / denom;
                     let rho_clamped = rho.max(neg_one).min(one);
-                    out.push(one - rho_clamped.abs());
+                    let dist_sq = one - rho_clamped.abs();
+                    let dist = if dist_sq > T::zero() {
+                        dist_sq.sqrt()
+                    } else {
+                        T::zero()
+                    };
+                    out.push(dist);
                 }
                 idx = end;
             }
@@ -442,9 +516,18 @@ where
         let x_view = self.scaled_coords.row(q_idx);
         let v1_view = self.v_matrix.row(q_idx);
         for &idx_2 in p_indices {
+            if q_idx == idx_2 {
+                out.push(T::zero());
+                continue;
+            }
+
             // 1. Coords Part (SIMD)
             let y_view = self.scaled_coords.row(idx_2);
-            let dot_scaled = dot_product_simd(x_view, y_view);
+            let dot_scaled = if self.parity_mode {
+                parity_dot_f32(x_view, y_view).unwrap_or_else(|| x_view.dot(&y_view))
+            } else {
+                dot_product_simd(x_view, y_view)
+            };
 
             let mut d2 = q_norm + self.scaled_norms[idx_2] - two * dot_scaled;
             if d2 < T::zero() {
@@ -463,7 +546,12 @@ where
             if kth.is_some() {
                 let cap = self.v_norms[q_idx] * self.v_norms[idx_2];
                 let max_abs_rho = ((k_val - cap).abs()).max((k_val + cap).abs()) / denom;
-                let min_dist = one - max_abs_rho.min(one);
+                let min_dist_sq = one - max_abs_rho.min(one);
+                let min_dist = if min_dist_sq > T::zero() {
+                    min_dist_sq.sqrt()
+                } else {
+                    T::zero()
+                };
                 if min_dist > kth_cutoff {
                     out.push(prune_sentinel);
                     continue;
@@ -472,12 +560,174 @@ where
 
             // 2. V-Matrix Part (SIMD)
             let v2_view = self.v_matrix.row(idx_2);
-            let dot = dot_product_simd(v1_view, v2_view);
+            let dot = if self.parity_mode {
+                parity_dot_f32(v1_view, v2_view).unwrap_or_else(|| v1_view.dot(&v2_view))
+            } else {
+                dot_product_simd(v1_view, v2_view)
+            };
 
             let rho = (k_val - dot) / denom;
             let rho_clamped = rho.max(neg_one).min(one);
-            out.push(one - rho_clamped.abs());
+            let dist_sq = one - rho_clamped.abs();
+            let dist = if dist_sq > T::zero() {
+                dist_sq.sqrt()
+            } else {
+                T::zero()
+            };
+            out.push(dist);
         }
+    }
+
+    fn distances_f32_batch_idx_into_with_kth(
+        &self,
+        q_idx: usize,
+        p_indices: &[usize],
+        kth: Option<T>,
+        out: &mut Vec<T>,
+    ) {
+        let coords = self
+            .scaled_coords_f32
+            .as_ref()
+            .expect("f32 coords requested but not initialised");
+        let v_mat = self
+            .v_matrix_f32
+            .as_ref()
+            .expect("f32 v_matrix requested but not initialised");
+        let p_diag = self
+            .p_diag_f32
+            .as_ref()
+            .expect("f32 p_diag requested but not initialised");
+        let scaled_norms = self
+            .scaled_norms_f32
+            .as_ref()
+            .expect("f32 norms requested but not initialised");
+        let v_norms = self
+            .v_norms_f32
+            .as_ref()
+            .expect("f32 v_norms requested but not initialised");
+
+        let q_norm = scaled_norms[q_idx];
+        let q_diag = p_diag[q_idx];
+        let two = 2.0f32;
+        let one = 1.0f32;
+        let neg_one = -one;
+        let eps = 1e-9f32;
+        let prune_sentinel = f32::MAX;
+        let kth_cutoff: f32 = kth
+            .and_then(|v| v.to_f32())
+            .unwrap_or(prune_sentinel);
+
+        out.clear();
+        out.reserve(p_indices.len());
+
+        for &idx_2 in p_indices {
+            if q_idx == idx_2 {
+                out.push(NumCast::from(0.0).unwrap());
+                continue;
+            }
+
+            let dot_scaled = if self.parity_mode {
+                parity_dot_f32(coords.row(q_idx), coords.row(idx_2))
+                    .unwrap_or_else(|| coords.row(q_idx).dot(&coords.row(idx_2)))
+            } else {
+                dot_product_simd(coords.row(q_idx), coords.row(idx_2))
+            };
+
+            let mut d2 = q_norm + scaled_norms[idx_2] - two * dot_scaled;
+            if d2 < 0.0 {
+                d2 = 0.0;
+            }
+
+            let k_val =
+                self.rbf_var.to_f32().unwrap() * (self.neg_half.to_f32().unwrap() * d2).exp();
+
+            let denom_sq = (q_diag * p_diag[idx_2]).max(eps * eps);
+            let denom = denom_sq.sqrt();
+
+            if kth.is_some() {
+                let cap = v_norms[q_idx] * v_norms[idx_2];
+                let max_abs_rho = ((k_val - cap).abs()).max((k_val + cap).abs()) / denom;
+                let min_dist_sq = one - max_abs_rho.min(one);
+                let min_dist = if min_dist_sq > 0.0 {
+                    min_dist_sq.sqrt()
+                } else {
+                    0.0
+                };
+                if min_dist > kth_cutoff {
+                    out.push(NumCast::from(prune_sentinel).unwrap());
+                    continue;
+                }
+            }
+
+            let dot = if self.parity_mode {
+                parity_dot_f32(v_mat.row(q_idx), v_mat.row(idx_2))
+                    .unwrap_or_else(|| v_mat.row(q_idx).dot(&v_mat.row(idx_2)))
+            } else {
+                dot_product_simd(v_mat.row(q_idx), v_mat.row(idx_2))
+            };
+
+            let rho = if denom > 0.0 { (k_val - dot) / denom } else { 0.0 };
+            let rho_clamped = rho.max(neg_one).min(one);
+            let dist_sq = one - rho_clamped.abs();
+            let dist = if dist_sq > 0.0 { dist_sq.sqrt() } else { 0.0 };
+            out.push(NumCast::from(dist).unwrap());
+        }
+    }
+
+    fn distance_sq_idx_f32(&self, idx_1: usize, idx_2: usize) -> T {
+        if idx_1 == idx_2 {
+            return NumCast::from(0.0).unwrap();
+        }
+
+        let coords = self
+            .scaled_coords_f32
+            .as_ref()
+            .expect("f32 coords requested but not initialised");
+        let v_mat = self
+            .v_matrix_f32
+            .as_ref()
+            .expect("f32 v_matrix requested but not initialised");
+        let p_diag = self
+            .p_diag_f32
+            .as_ref()
+            .expect("f32 p_diag requested but not initialised");
+        let scaled_norms = self
+            .scaled_norms_f32
+            .as_ref()
+            .expect("f32 norms requested but not initialised");
+
+        let two = 2.0f32;
+        let one = 1.0f32;
+        let neg_one = -one;
+        let eps = 1e-9f32;
+
+        let dot_scaled = if self.parity_mode {
+            parity_dot_f32(coords.row(idx_1), coords.row(idx_2))
+                .unwrap_or_else(|| coords.row(idx_1).dot(&coords.row(idx_2)))
+        } else {
+            dot_product_simd(coords.row(idx_1), coords.row(idx_2))
+        };
+        let mut d2 = scaled_norms[idx_1] + scaled_norms[idx_2] - two * dot_scaled;
+        if d2 < 0.0 {
+            d2 = 0.0;
+        }
+        let k_val =
+            self.rbf_var.to_f32().unwrap() * (self.neg_half.to_f32().unwrap() * d2).exp();
+
+        let denom_sq = (p_diag[idx_1] * p_diag[idx_2]).max(eps * eps);
+        let denom = denom_sq.sqrt();
+
+        let dot = if self.parity_mode {
+            parity_dot_f32(v_mat.row(idx_1), v_mat.row(idx_2))
+                .unwrap_or_else(|| v_mat.row(idx_1).dot(&v_mat.row(idx_2)))
+        } else {
+            dot_product_simd(v_mat.row(idx_1), v_mat.row(idx_2))
+        };
+        let rho = if denom > 0.0 { (k_val - dot) / denom } else { 0.0 };
+        let rho_clamped = rho.max(neg_one).min(one);
+        let dist_sq = one - rho_clamped.abs();
+        let dist_sq = if dist_sq > 0.0 { dist_sq } else { 0.0 };
+        NumCast::from(dist_sq).unwrap()
     }
 
     pub fn distance_idx(&self, idx_1: usize, idx_2: usize) -> T {
@@ -487,7 +737,7 @@ where
 
 impl<'a, T> Metric<T> for ResidualMetric<'a, T>
 where
-    T: Float + Debug + Send + Sync + std::iter::Sum + 'a,
+    T: Float + Debug + Send + Sync + std::iter::Sum + 'a + 'static,
 {
     fn distance(&self, p1: &[T], p2: &[T]) -> T {
         // Assume points are 1D arrays containing a single value which is the index
@@ -503,8 +753,8 @@ where
     }
 
     fn max_distance_hint(&self) -> Option<T> {
-        // Residual correlation distance is bounded by sqrt(2).
-        Some(T::from(2.0).unwrap().sqrt())
+        // Residual correlation distance is bounded by 1 (sqrt(1 - |rho|), |rho|<=1).
+        Some(T::one())
     }
 }
 
@@ -525,6 +775,34 @@ where
         }
     }
     dot
+}
+
+#[inline(always)]
+fn dot_parity_f32(a: ndarray::ArrayView1<f32>, b: ndarray::ArrayView1<f32>) -> f32 {
+    // Use f64 accumulation to minimize rounding errors, hoping to align better with BLAS
+    a.iter().zip(b.iter()).map(|(&x, &y)| (x as f64) * (y as f64)).sum::<f64>() as f32
+}
+
+#[inline(always)]
+fn parity_dot_f32<T>(a: ndarray::ArrayView1<T>, b: ndarray::ArrayView1<T>) -> Option<T>
+where
+    T: Float + Debug + Send + Sync + std::iter::Sum + NumCast,
+{
+    if std::mem::size_of::<T>() != 4 {
+        return None;
+    }
+    if let (Some(a_slice), Some(b_slice)) = (a.as_slice(), b.as_slice()) {
+        // Safe because we only reinterpret f32 data.
+        let a_f = unsafe {
+            std::slice::from_raw_parts(a_slice.as_ptr() as *const f32, a_slice.len())
+        };
+        let b_f = unsafe {
+            std::slice::from_raw_parts(b_slice.as_ptr() as *const f32, b_slice.len())
+        };
+        let dot = dot_parity_f32(ndarray::ArrayView1::from(a_f), ndarray::ArrayView1::from(b_f));
+        return NumCast::from(dot);
+    }
+    None
 }
 
 #[inline(always)]

@@ -121,6 +121,11 @@ if NUMBA_RESIDUAL_AVAILABLE:
                 denom = math.sqrt(max(p_i * p_cand, eps * eps))
                 numerator = kernel_val - partial
                 
+                if query_idx == cand_idx:
+                    distances[qi, cj] = 0.0
+                    mask[qi, cj] = 1
+                    continue
+
                 if denom > 0.0:
                     rho = numerator / denom
                 else:
@@ -256,6 +261,11 @@ def distance_block_no_gate(
             denom = math.sqrt(max(p_i * p_cand, eps * eps))
             numerator = kernel_val - partial
             
+            if query_idx == cand_idx:
+                distances[qi, cj] = 0.0
+                mask[qi, cj] = 1
+                continue
+
             if denom > 0.0:
                 rho = numerator / denom
             else:
