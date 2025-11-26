@@ -365,6 +365,16 @@ impl CoverTreeWrapper {
                 // Reorder data if inverse order is available (Hilbert optimization)
                 let (v_view, coords_view, q_mapped, p_diag_reordered) = if let Some(inv) = &self.inv_order {
                     let n_points = node_to_dataset.len();
+                    // Debug prints
+                    println!("[Rust] knn_query_residual reordering: n_points={}, inv_len={}, k={}, rbf_var={}", 
+                        n_points, inv.len(), k, rbf_var);
+                    if inv.len() > 0 {
+                        println!("[Rust] inv[0..min(5)] = {:?}", &inv[0..std::cmp::min(5, inv.len())]);
+                    }
+                    if node_to_dataset.len() > 0 {
+                        println!("[Rust] node_to_dataset[0..min(5)] = {:?}", &node_to_dataset[0..std::cmp::min(5, node_to_dataset.len())]);
+                    }
+
                     // Ideally we avoid allocation if possible, but reordering requires a copy.
                     let mut v_ordered = Array2::<f32>::zeros((n_points, v_matrix_arr.ncols()));
                     let mut c_ordered = Array2::<f32>::zeros((n_points, coords_arr.ncols()));
@@ -389,6 +399,11 @@ impl CoverTreeWrapper {
                             mapped_q.push(0); // Fallback/Error
                         }
                     }
+                    
+                    if mapped_q.len() > 0 {
+                        println!("[Rust] mapped_q[0..min(5)] = {:?}", &mapped_q[0..std::cmp::min(5, mapped_q.len())]);
+                    }
+
                     (
                         v_ordered,
                         c_ordered,
@@ -436,7 +451,7 @@ impl CoverTreeWrapper {
                     &node_to_dataset
                 };
 
-                let (indices, dists) = if telemetry_enabled {
+                let (mut indices, dists) = if telemetry_enabled {
                     let mut telem = ResidualQueryTelemetry::default();
                     let res = batch_residual_knn_query(
                         data,
@@ -460,6 +475,14 @@ impl CoverTreeWrapper {
                         None,
                     )
                 };
+                
+                // Map internal node indices back to original dataset indices
+                for row in indices.iter_mut() {
+                    for idx in row.iter_mut() {
+                        *idx = node_to_dataset[*idx as usize];
+                    }
+                }
+
                 self.last_query_telemetry = telemetry_rec;
                 let (idx, dst) = to_py_arrays(py, indices, dists);
                 Ok((idx, dst.into_any().into()))
@@ -480,12 +503,6 @@ impl CoverTreeWrapper {
                 );
 
                 let scope_caps = load_scope_caps(py);
-                // Convert f32 caps to f64 if needed, or just implement similar logic for F64
-                // Since scope_caps is HashMap<i32, f32>, we might need to map it or change signature.
-                // batch_residual_knn_query is generic on T.
-                // But scope_caps map is f32.
-                // We need to convert it or make it generic?
-                // Simpler: just map it for f64 case.
                 let caps_f64: Option<HashMap<i32, f64>> =
                     scope_caps.map(|m| m.into_iter().map(|(k, v)| (k, v as f64)).collect());
 
@@ -494,7 +511,7 @@ impl CoverTreeWrapper {
                     .unwrap_or(false);
                 let mut telemetry_rec: Option<ResidualQueryTelemetry> = None;
 
-                let (indices, dists) = if telemetry_enabled {
+                let (mut indices, dists) = if telemetry_enabled {
                     let mut telem = ResidualQueryTelemetry::default();
                     let res = batch_residual_knn_query(
                         data,
@@ -518,6 +535,14 @@ impl CoverTreeWrapper {
                         None,
                     )
                 };
+
+                // Map internal node indices back to original dataset indices
+                for row in indices.iter_mut() {
+                    for idx in row.iter_mut() {
+                        *idx = node_to_dataset[*idx as usize];
+                    }
+                }
+
                 self.last_query_telemetry = telemetry_rec;
                 let (idx, dst) = to_py_arrays(py, indices, dists);
                 Ok((idx, dst.into_any().into()))
