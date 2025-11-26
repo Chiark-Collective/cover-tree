@@ -78,26 +78,35 @@ run_suite() {
 
   export COVERTREEX_ENABLE_RUST="$enable_rust"
 
-  builds=()
-  qps_list=()
-
-  : > "$summary_path"  # truncate summary for this suite
-
-  for i in $(seq 1 "$RUNS"); do
-    run_log="${log_prefix}_run${i}.log"
-    echo "[run_residual_gold_standard] run $i/$RUNS engine=$engine_label logging to $run_log"
-    python -m cli.pcct query \
-      --dimension 3 \
-      --tree-points 32768 \
-      --batch-size 512 \
-      --queries 1024 \
-      --k 50 \
-      --metric residual \
-      --baseline gpboost \
-      --seed 42 \
-      --engine "$engine_label" \
-      --residual-chunk-size "$RESIDUAL_CHUNK_SIZE" | tee "$run_log" | tee -a "$summary_path"
-
+      # Optional residual kernel type for comparison engine.
+      RESIDUAL_KERNEL_TYPE="${RESIDUAL_KERNEL_TYPE:-}"
+  
+      builds=()
+      qps_list=()
+  
+      : > "$summary_path"  # truncate summary for this suite
+  
+      for i in $(seq 1 "$RUNS"); do
+        run_log="${log_prefix}_run${i}.log"
+        echo "[run_residual_gold_standard] run $i/$RUNS engine=$engine_label logging to $run_log"
+        CMD=(
+          python -m cli.pcct query
+          --dimension 3
+          --tree-points 32768
+          --batch-size 512
+          --queries 1024
+          --k 50
+          --metric residual
+          --baseline gpboost
+          --seed 42
+          --engine "$engine_label"
+          --residual-chunk-size "$RESIDUAL_CHUNK_SIZE"
+        )
+        if [[ -n "$RESIDUAL_KERNEL_TYPE" ]]; then
+          CMD+=(--residual-kernel-type "$RESIDUAL_KERNEL_TYPE")
+        fi
+        "${CMD[@]}" | tee "$run_log" | tee -a "$summary_path"
+  
     read -r build_val qps_val <<<"$(parse_metrics "$run_log")"
     builds+=("$build_val")
     qps_list+=("$qps_val")
