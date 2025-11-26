@@ -535,23 +535,8 @@ where
         return empty();
     }
 
-    // Root index is always 0 for now; keep this in scope for bounded-metric fallbacks
-    let root_idx = 0;
-
-    // For bounded metrics (e.g., residual correlation) the standard near/far
-    // hierarchy can collapse because distances are small and the upper-bound
-    // shortcut keeps everything "near" the root. In that case, fall back to a
-    // shallow star: attach all nodes to the root at level 0 so downstream
-    // traversals have a usable topology.
-    if metric.max_distance_hint().is_some() {
-        for &q_idx in candidates.iter() {
-            tree.set_level(q_idx, 0);
-            tree.set_parent(q_idx, root_idx as i64);
-        }
-        return empty();
-    }
-
     // 2. Initialize Active Sets
+    let root_idx = 0;
     let mut active_sets: Vec<Vec<usize>> = vec![vec![root_idx]; candidates.len()];
 
     let mut current_level: i32 = tree.max_level - 1;
@@ -589,7 +574,7 @@ where
         // Using the max-distance hint here can collapse bounded metrics
         // (e.g., residual correlation) into a degenerate tree where all points
         // stay “near” the root and no parents/levels are set. Skip the shortcut.
-        let covers_all = false;
+        // let covers_all = false;
 
         // 3. Filter: Near vs Far
         let filter_results: Vec<(bool, Vec<usize>)> = candidates
@@ -600,14 +585,6 @@ where
                 let mut best_dist_sq = T::max_value();
                 let mut best_node = usize::MAX;
                 let mut is_near = false;
-
-                if covers_all && !covers.is_empty() {
-                    // Residual metric distance is bounded; if the current radius already
-                    // exceeds that bound, every candidate is automatically "near" its
-                    // first cover. This avoids expensive distance evaluations at coarse
-                    // levels.
-                    return (true, vec![covers[0]]);
-                }
 
                 for &p_idx in covers {
                     let p_point = tree.get_point_row(p_idx);
