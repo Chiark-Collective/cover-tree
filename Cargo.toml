@@ -16,3 +16,6 @@ rayon = "1.10"
 ndarray = { version = "0.15", features = ["rayon"] }
 num-traits = "0.2"
 wide = "0.7"
+
+[profile.dev]
+opt-level = 3
