@@ -297,6 +297,59 @@ where
 // Residual Query
 // -----------------------------------------------------------------------------
 
+struct SearchContext<T> {
+    cached_lb: Vec<T>,
+    visited: Vec<u64>,
+    frontier: Vec<(usize, T)>,
+    next_frontier: Vec<(usize, T)>,
+    children_nodes: Vec<usize>,
+    children_ds_idx: Vec<usize>,
+    children_parent_lb: Vec<T>,
+    distance_buffer: Vec<T>,
+    eval_targets: Vec<usize>,
+    eval_positions: Vec<usize>,
+    dist_tmp: Vec<T>,
+}
+
+impl<T: Float + Debug + Send + Sync + std::iter::Sum + 'static> SearchContext<T> {
+    fn new(n_points: usize, n_nodes: usize) -> Self {
+        let bitset_len = (n_nodes + 63) / 64;
+        Self {
+            cached_lb: vec![T::max_value(); n_points],
+            visited: vec![0; bitset_len],
+            frontier: Vec::with_capacity(128),
+            next_frontier: Vec::with_capacity(128),
+            children_nodes: Vec::with_capacity(128),
+            children_ds_idx: Vec::with_capacity(128),
+            children_parent_lb: Vec::with_capacity(128),
+            distance_buffer: Vec::with_capacity(128),
+            eval_targets: Vec::with_capacity(128),
+            eval_positions: Vec::with_capacity(128),
+            dist_tmp: Vec::with_capacity(128),
+        }
+    }
+}
+
+#[inline(always)]
+fn bitset_set(bitset: &mut [u64], index: usize) {
+    let word = index / 64;
+    let bit = index % 64;
+    if let Some(w) = bitset.get_mut(word) {
+        *w |= 1u64 << bit;
+    }
+}
+
+#[inline(always)]
+fn bitset_check(bitset: &[u64], index: usize) -> bool {
+    let word = index / 64;
+    let bit = index % 64;
+    if let Some(w) = bitset.get(word) {
+        (w & (1u64 << bit)) != 0
+    } else {
+        false
+    }
+}
+
 pub fn batch_residual_knn_query<'a, T>(
     tree: &'a CoverTreeData<T>,
     query_indices: ndarray::ArrayView1<i64>,
@@ -310,17 +363,15 @@ where
     T: Float + Debug + Send + Sync + std::iter::Sum + 'a + 'static,
 {
     let n_points = node_to_dataset.len();
-    let max_val = T::max_value();
+    let tree_len = tree.len();
 
     // Opt-in telemetry: disable parallelism to aggregate counts deterministically
     let results: Vec<(Vec<i64>, Vec<T>)> = if let Some(tele) = telemetry {
+        let mut ctx = SearchContext::new(n_points, tree_len);
         let mut out = Vec::with_capacity(query_indices.len());
-        let mut cached_lb = vec![max_val; n_points];
         
         for &q_idx in query_indices.iter() {
             let mut local = ResidualQueryTelemetry::default();
-            // Reset buffer
-            cached_lb.fill(max_val);
             
             let res = single_residual_knn_query(
                 tree,
@@ -330,38 +381,39 @@ where
                 k,
                 scope_caps,
                 Some(&mut local),
-                &mut cached_lb,
+                &mut ctx,
             );
             tele.add_from(&local);
             out.push(res);
         }
         out
     } else {
-        // Parallel chunk processing to reuse buffer
+        // Parallel chunk processing reusing thread-local context
         let q_slice = query_indices.as_slice().expect("contiguous query indices");
         let chunk_size = 64; // Match stream_tile default
         
         q_slice.par_chunks(chunk_size)
-            .flat_map(|chunk| {
-                let mut cached_lb = vec![max_val; n_points];
-                let mut chunk_results = Vec::with_capacity(chunk.len());
-                
-                for &q_idx in chunk {
-                    cached_lb.fill(max_val);
-                    let res = single_residual_knn_query(
-                        tree,
-                        node_to_dataset,
-                        metric,
-                        q_idx as usize,
-                        k,
-                        scope_caps,
-                        None,
-                        &mut cached_lb,
-                    );
-                    chunk_results.push(res);
+            .map_init(
+                || SearchContext::new(n_points, tree_len),
+                |ctx, chunk| {
+                    let mut chunk_results = Vec::with_capacity(chunk.len());
+                    for &q_idx in chunk {
+                        let res = single_residual_knn_query(
+                            tree,
+                            node_to_dataset,
+                            metric,
+                            q_idx as usize,
+                            k,
+                            scope_caps,
+                            None,
+                            ctx,
+                        );
+                        chunk_results.push(res);
+                    }
+                    chunk_results
                 }
-                chunk_results
-            })
+            )
+            .flat_map(|x| x)
             .collect()
     };
 
@@ -525,7 +577,7 @@ fn single_residual_knn_query<'a, T>(
     k: usize,
     scope_caps: Option<&HashMap<i32, T>>,
     mut telemetry: Option<&mut ResidualQueryTelemetry>,
-    cached_lb: &mut [T],
+    ctx: &mut SearchContext<T>,
 ) -> (Vec<i64>, Vec<T>)
 where
     T: Float + Debug + Send + Sync + std::iter::Sum + 'a + 'static,
@@ -535,6 +587,9 @@ where
     if tree.len() == 0 {
         return (vec![], vec![]);
     }
+
+    // Reset Context per query
+    ctx.cached_lb.fill(T::max_value());
 
     let parity_mode = std::env::var("COVERTREEX_RESIDUAL_PARITY")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -602,14 +657,16 @@ where
             .unwrap_or(64)
     };
     
-    // Optimization: Removed per-query O(N) allocations (seen_mask, cached_lb)
-    // Assuming tree structure guarantees unique visits per level.
-    let _use_masked_append = false;
-
     let use_visited = parity_mode
         || std::env::var("COVERTREEX_RESIDUAL_VISITED_SET")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
+            
+    if use_visited {
+        ctx.visited.fill(0);
+        bitset_set(&mut ctx.visited, 0);
+    }
+
     let scope_member_limit_env = std::env::var("COVERTREEX_RESIDUAL_SCOPE_MEMBER_LIMIT")
         .ok()
         .and_then(|v| v.parse::<isize>().ok())
@@ -636,7 +693,7 @@ where
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(true)
     };
-    let level_cache_batching = if parity_mode {
+    let _level_cache_batching = if parity_mode {
         false
     } else {
         std::env::var("COVERTREEX_RESIDUAL_LEVEL_CACHE_BATCHING")
@@ -651,33 +708,17 @@ where
         .ok()
         .and_then(|v| v.parse::<f64>().ok())
         .map(|v| T::from(v).unwrap_or(T::zero()))
-        .unwrap_or_else(|| T::from(1e-3).unwrap()); // match gold Numba floor
-    let _max_hint = metric.max_distance_hint();
+        .unwrap_or_else(|| T::from(1e-3).unwrap());
     let two = T::from(2.0).unwrap();
 
-    let mut frontier: Vec<(usize, T)> = vec![(0usize, root_dist)];
-    let mut next_frontier: Vec<(usize, T)> = Vec::with_capacity(stream_tile);
-    let mut children_nodes: Vec<usize> = Vec::with_capacity(stream_tile);
-    let mut children_ds_idx: Vec<usize> = Vec::with_capacity(stream_tile);
-    let mut children_parent_lb: Vec<T> = Vec::with_capacity(stream_tile);
-    let mut distance_buffer: Vec<T> = Vec::with_capacity(stream_tile);
-    
-    // Optimization: Removed per-query O(N) allocations (seen_mask, cached_lb)
-    // Assuming tree structure guarantees unique visits per level.
-    let mut visited_nodes: Vec<bool> = if use_visited {
-        vec![false; tree.len()]
-    } else {
-        Vec::new()
-    };
-    if use_visited && !visited_nodes.is_empty() {
-        visited_nodes[0] = true;
-    }
+    ctx.frontier.clear();
+    ctx.frontier.push((0usize, root_dist));
 
-    while !frontier.is_empty() && survivors_count < budget_limit {
+    while !ctx.frontier.is_empty() && survivors_count < budget_limit {
         if parity_mode && result_heap.len() == k {
             // Early stop if frontier cannot beat current kth
             let mut min_lb = T::max_value();
-            for &(parent, parent_dist) in frontier.iter() {
+            for &(parent, parent_dist) in ctx.frontier.iter() {
                 let parent_level = tree.levels[parent];
                 let mut parent_radius = if !tree.si_cache.is_empty() && parent < tree.si_cache.len()
                 {
@@ -698,98 +739,89 @@ where
             }
         }
         if let Some(t) = telemetry.as_mut() {
-            t.record_frontier(frontier.len(), children_nodes.len());
+            t.record_frontier(ctx.frontier.len(), ctx.children_nodes.len());
         }
-        children_nodes.clear();
-        children_ds_idx.clear();
-        children_parent_lb.clear();
+        ctx.children_nodes.clear();
+        ctx.children_ds_idx.clear();
+        ctx.children_parent_lb.clear();
 
-                    // Gather children of the current frontier (level cache: process once per level)
-                for &(parent, parent_dist) in frontier.iter() {
-                    let parent_level = tree.levels[parent];
-                    let mut parent_radius = if !tree.si_cache.is_empty() && parent < tree.si_cache.len() {
-                        tree.si_cache[parent]
-                    } else {
-                        two.powi(parent_level + 1)
-                    };
-                    let capped_parent = if parity_mode {
-                        parent_radius
-                    } else {
-                        metric.apply_level_cap(parent_level, scope_caps, parent_radius)
-                    };
-                    if let Some(t) = telemetry.as_mut() {
-                        if capped_parent < parent_radius {
-                            t.caps_applied += 1;
-                        }
-                    }
-                    parent_radius = capped_parent;
-                    if parent_radius < radius_floor {
-                        parent_radius = radius_floor;
-                    }
-                    let parent_lb = parent_dist - parent_radius;
-                    if result_heap.len() == k && parent_lb > kth_dist {
+        // Gather children of the current frontier (level cache: process once per level)
+        for &(parent, parent_dist) in ctx.frontier.iter() {
+            let parent_level = tree.levels[parent];
+            let mut parent_radius = if !tree.si_cache.is_empty() && parent < tree.si_cache.len() {
+                tree.si_cache[parent]
+            } else {
+                two.powi(parent_level + 1)
+            };
+            let capped_parent = if parity_mode {
+                parent_radius
+            } else {
+                metric.apply_level_cap(parent_level, scope_caps, parent_radius)
+            };
+            if let Some(t) = telemetry.as_mut() {
+                if capped_parent < parent_radius {
+                    t.caps_applied += 1;
+                }
+            }
+            parent_radius = capped_parent;
+            if parent_radius < radius_floor {
+                parent_radius = radius_floor;
+            }
+            let parent_lb = parent_dist - parent_radius;
+            if result_heap.len() == k && parent_lb > kth_dist {
+                if let Some(t) = telemetry.as_mut() {
+                    t.prunes_lower_bound += 1;
+                }
+                continue;
+            }
+
+            // Iterate children directly (no allocation)
+            let mut child = tree.children[parent];
+            while child != -1 {
+                let child_idx = child as usize;
+                let ds_idx = node_to_dataset[child_idx] as usize;
+                
+                // Visited check
+                if use_visited {
+                    if bitset_check(&ctx.visited, child_idx) {
                         if let Some(t) = telemetry.as_mut() {
-                            t.prunes_lower_bound += 1;
+                            t.masked_dedup += 1;
                         }
-                        continue;
+                    } else {
+                        bitset_set(&mut ctx.visited, child_idx);
+                        ctx.children_nodes.push(child_idx);
+                        ctx.children_ds_idx.push(ds_idx);
+                        ctx.children_parent_lb.push(parent_lb);
+                        if ds_idx < ctx.cached_lb.len() && ctx.cached_lb[ds_idx] > parent_lb {
+                            ctx.cached_lb[ds_idx] = parent_lb;
+                        }
                     }
-        
-                    // Iterate children directly (no allocation)
-                    let mut child = tree.children[parent];
-                    while child != -1 {
-                        let child_idx = child as usize;
-                        let ds_idx = node_to_dataset[child_idx] as usize;
-                        
-                        // Visited check
-                        if use_visited {
-                            let visited = if let Some(already) = visited_nodes.get(child_idx) {
-                                *already
-                            } else {
-                                false
-                            };
-                            
-                            if visited {
-                                if let Some(t) = telemetry.as_mut() {
-                                    t.masked_dedup += 1;
-                                }
-                            } else {
-                                if let Some(slot) = visited_nodes.get_mut(child_idx) {
-                                    *slot = true;
-                                }
-                                children_nodes.push(child_idx);
-                                children_ds_idx.push(ds_idx);
-                                children_parent_lb.push(parent_lb);
-                                if ds_idx < cached_lb.len() && cached_lb[ds_idx] > parent_lb {
-                                    cached_lb[ds_idx] = parent_lb;
-                                }
-                            }
-                        } else {
-                            children_nodes.push(child_idx);
-                            children_ds_idx.push(ds_idx);
-                            children_parent_lb.push(parent_lb);
-                            if ds_idx < cached_lb.len() && cached_lb[ds_idx] > parent_lb {
-                                cached_lb[ds_idx] = parent_lb;
-                            }
-                        }
-        
-                        let next = tree.next_node[child_idx];
-                        if next == child {
-                            break;
-                        }
-                        child = next;
-                        if child == tree.children[parent] {
-                            break;
-                        }
+                } else {
+                    ctx.children_nodes.push(child_idx);
+                    ctx.children_ds_idx.push(ds_idx);
+                    ctx.children_parent_lb.push(parent_lb);
+                    if ds_idx < ctx.cached_lb.len() && ctx.cached_lb[ds_idx] > parent_lb {
+                        ctx.cached_lb[ds_idx] = parent_lb;
                     }
                 }
+
+                let next = tree.next_node[child_idx];
+                if next == child {
+                    break;
+                }
+                child = next;
+                if child == tree.children[parent] {
+                    break;
+                }
+            }
+        }
         // Process children in tiles
         let mut start = 0;
-        while start < children_nodes.len() && survivors_count < budget_limit {
-            let active = children_nodes.len().saturating_sub(start);
+        while start < ctx.children_nodes.len() && survivors_count < budget_limit {
+            let active = ctx.children_nodes.len().saturating_sub(start);
             let mut tile = if dynamic_query_block {
-                // Adaptive tile: shrink when active set is small, grow when large.
-                // Use frontier size + remaining active to scale smoothly.
-                let wave = frontier.len().max(1);
+                // Adaptive tile
+                let wave = ctx.frontier.len().max(1);
                 let combined = active + wave;
                 let adaptive = if combined <= 32 {
                     16
@@ -811,12 +843,12 @@ where
             if let Some(t) = telemetry.as_mut() {
                 t.record_block(tile);
             }
-            let end = usize::min(start + tile, children_nodes.len());
-            let nodes_chunk = &children_nodes[start..end];
-            let ds_chunk = &children_ds_idx[start..end];
-            let lb_chunk = &children_parent_lb[start..end];
+            let end = usize::min(start + tile, ctx.children_nodes.len());
+            let nodes_chunk = &ctx.children_nodes[start..end];
+            let ds_chunk = &ctx.children_ds_idx[start..end];
+            let lb_chunk = &ctx.children_parent_lb[start..end];
 
-            // Pre-distance pruning: skip entire chunk if cached parent lower bounds exceed kth.
+            // Pre-distance pruning
             if result_heap.len() == k {
                 if let Some(&min_lb) = lb_chunk
                     .iter()
@@ -832,14 +864,16 @@ where
                 }
             }
 
-            distance_buffer.clear();
-            distance_buffer.resize(nodes_chunk.len(), prune_sentinel);
-            let mut eval_targets: Vec<usize> = Vec::with_capacity(nodes_chunk.len());
-            let mut eval_positions: Vec<usize> = Vec::with_capacity(nodes_chunk.len());
+            ctx.distance_buffer.clear();
+            ctx.distance_buffer.resize(nodes_chunk.len(), prune_sentinel);
+            
+            ctx.eval_targets.clear();
+            ctx.eval_positions.clear();
+
             for (j, &ds_idx) in ds_chunk.iter().enumerate() {
                 if result_heap.len() == k
-                    && ds_idx < cached_lb.len()
-                    && cached_lb[ds_idx] > kth_dist
+                    && ds_idx < ctx.cached_lb.len()
+                    && ctx.cached_lb[ds_idx] > kth_dist
                 {
                     if let Some(t) = telemetry.as_mut() {
                         t.prunes_lower_bound += 1;
@@ -847,29 +881,31 @@ where
                     }
                     continue;
                 }
-                eval_targets.push(ds_idx);
-                eval_positions.push(j);
+                ctx.eval_targets.push(ds_idx);
+                ctx.eval_positions.push(j);
             }
-            let mut tmp: Vec<T> = Vec::with_capacity(eval_targets.len());
+            
+            // Reuse dist_tmp buffer to avoid allocation
+            ctx.dist_tmp.clear();
             metric.distances_sq_batch_idx_into_with_kth(
                 q_dataset_idx,
-                &eval_targets,
+                &ctx.eval_targets,
                 if use_pruning { Some(kth_dist) } else { None },
-                &mut tmp,
+                &mut ctx.dist_tmp,
             );
-            for (val, pos) in tmp.into_iter().zip(eval_positions.into_iter()) {
-                distance_buffer[pos] = val;
+            for (val, pos) in ctx.dist_tmp.iter().zip(ctx.eval_positions.iter()) {
+                ctx.distance_buffer[*pos] = *val;
             }
 
             if emit_stats {
-                let evals = distance_buffer
+                let evals = ctx.distance_buffer
                     .iter()
                     .filter(|&&d| d != prune_sentinel)
                     .count();
                 DIST_EVALS.fetch_add(evals, AtomicOrdering::Relaxed);
             }
             if let Some(t) = telemetry.as_mut() {
-                t.distance_evals += distance_buffer
+                t.distance_evals += ctx.distance_buffer
                     .iter()
                     .filter(|&&d| d != prune_sentinel)
                     .count();
@@ -877,10 +913,17 @@ where
 
             let mut added_in_chunk = 0;
             // Process closer children first to tighten kth early
+            // Allocation here: `ordered` vector. 
+            // Can we avoid this? `nodes_chunk` is small (64).
+            // Maybe reuse another buffer or sort in place?
+            // `distance_buffer` aligns with `nodes_chunk`.
+            // If we sort indices based on distance, we need a buffer for indices.
+            // For now, keeping the small allocation is okay, or I can add `sort_buffer` to Context.
+            // But `ordered` contains tuples.
             let mut ordered: Vec<(T, usize, T)> = nodes_chunk
                 .iter()
                 .enumerate()
-                .map(|(j, &idx)| (distance_buffer[j], idx, lb_chunk[j]))
+                .map(|(j, &idx)| (ctx.distance_buffer[j], idx, lb_chunk[j]))
                 .filter(|(d, _, _)| *d != prune_sentinel)
                 .collect();
             ordered.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -918,7 +961,7 @@ where
                     }
                 }
 
-                if let Some(slot) = cached_lb.get_mut(node_to_dataset[child_idx] as usize) {
+                if let Some(slot) = ctx.cached_lb.get_mut(node_to_dataset[child_idx] as usize) {
                     let new_lb = dist - child_radius;
                     if new_lb < *slot {
                         *slot = new_lb;
@@ -940,13 +983,13 @@ where
                 added_in_chunk += 1;
 
                 if survivors_count < budget_limit {
-                    next_frontier.push((child_idx, dist));
+                    ctx.next_frontier.push((child_idx, dist));
                 } else {
                     break;
                 }
             }
 
-            // Budget ladder update (yield-based)
+            // Budget ladder update
             if !parity_mode && !budget_schedule.is_empty() && !nodes_chunk.is_empty() {
                 let ratio = added_in_chunk as f64 / nodes_chunk.len() as f64;
                 if let Some(t) = telemetry.as_mut() {
@@ -977,12 +1020,12 @@ where
             start = end;
         }
 
-        frontier.clear();
-        std::mem::swap(&mut frontier, &mut next_frontier);
+        ctx.frontier.clear();
+        std::mem::swap(&mut ctx.frontier, &mut ctx.next_frontier);
     }
     if let Some(t) = telemetry {
         // final frontier expansion count (expanded = children processed)
-        t.record_frontier(0, children_nodes.len());
+        t.record_frontier(0, ctx.children_nodes.len());
     }
 
     let sorted_results = result_heap.into_sorted_vec();
@@ -995,5 +1038,3 @@ where
 
     (indices, dists)
 }
-
-
