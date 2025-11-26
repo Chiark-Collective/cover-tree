@@ -56,6 +56,7 @@ struct CoverTreeWrapper {
     inner: CoverTreeInner,
     survivors: Vec<i64>,
     last_query_telemetry: Option<ResidualQueryTelemetry>,
+    inv_order: Option<Vec<i64>>,
 }
 
 enum CoverTreeInner {
@@ -158,6 +159,7 @@ impl CoverTreeWrapper {
                 inner: CoverTreeInner::F32(data),
                 survivors: Vec::new(),
                 last_query_telemetry: None,
+                inv_order: None,
             });
         }
 
@@ -176,6 +178,7 @@ impl CoverTreeWrapper {
                 inner: CoverTreeInner::F64(data),
                 survivors: Vec::new(),
                 last_query_telemetry: None,
+                inv_order: None,
             });
         }
 
@@ -359,10 +362,52 @@ impl CoverTreeWrapper {
                 let coords_arr = to_array2_f32(&coords.bind(py))?;
                 let rbf_ls_arr = to_array1_f32(&rbf_ls.bind(py))?;
 
+                // Reorder data if inverse order is available (Hilbert optimization)
+                let (v_view, coords_view, q_mapped, p_diag_reordered) = if let Some(inv) = &self.inv_order {
+                    let n_points = node_to_dataset.len();
+                    // Ideally we avoid allocation if possible, but reordering requires a copy.
+                    let mut v_ordered = Array2::<f32>::zeros((n_points, v_matrix_arr.ncols()));
+                    let mut c_ordered = Array2::<f32>::zeros((n_points, coords_arr.ncols()));
+                    let mut p_ordered = Vec::with_capacity(n_points);
+                    
+                    // node_to_dataset maps node_idx -> old_idx.
+                    // We want ordered[node_idx] = original[old_idx].
+                    for (i, &old_idx) in node_to_dataset.iter().enumerate() {
+                        let old = old_idx as usize;
+                        v_ordered.row_mut(i).assign(&v_matrix_arr.row(old));
+                        c_ordered.row_mut(i).assign(&coords_arr.row(old));
+                        p_ordered.push(p_diag_arr[old]);
+                    }
+
+                    // Map queries
+                    let queries = query_indices.as_array();
+                    let mut mapped_q = Vec::with_capacity(queries.len());
+                    for &q in queries {
+                        if q >= 0 && (q as usize) < inv.len() {
+                            mapped_q.push(inv[q as usize]);
+                        } else {
+                            mapped_q.push(0); // Fallback/Error
+                        }
+                    }
+                    (
+                        v_ordered,
+                        c_ordered,
+                        Some(ndarray::Array1::from_vec(mapped_q)),
+                        p_ordered,
+                    )
+                } else {
+                    (
+                        v_matrix_arr,
+                        coords_arr,
+                        None,
+                        p_diag_arr.to_vec(),
+                    )
+                };
+
                 let metric = ResidualMetric::new(
-                    v_matrix_arr.view(),
-                    p_diag_arr.as_slice().unwrap(),
-                    coords_arr.view(),
+                    v_view.view(),
+                    p_diag_reordered.as_slice(),
+                    coords_view.view(),
                     rbf_var as f32,
                     rbf_ls_arr.as_slice().unwrap(),
                     None,
@@ -374,12 +419,29 @@ impl CoverTreeWrapper {
                     .unwrap_or(false);
                 let mut telemetry_rec: Option<ResidualQueryTelemetry> = None;
 
+                let q_input = if let Some(q) = &q_mapped {
+                    q.view()
+                } else {
+                    query_indices.as_array()
+                };
+
+                let identity_map = if q_mapped.is_some() {
+                    Some((0..node_to_dataset.len() as i64).collect::<Vec<i64>>())
+                } else {
+                    None
+                };
+                let node_map_ref = if let Some(id_map) = &identity_map {
+                    id_map
+                } else {
+                    &node_to_dataset
+                };
+
                 let (indices, dists) = if telemetry_enabled {
                     let mut telem = ResidualQueryTelemetry::default();
                     let res = batch_residual_knn_query(
                         data,
-                        query_indices.as_array(),
-                        &node_to_dataset,
+                        q_input,
+                        node_map_ref,
                         &metric,
                         k,
                         scope_caps.as_ref(),
@@ -390,8 +452,8 @@ impl CoverTreeWrapper {
                 } else {
                     batch_residual_knn_query(
                         data,
-                        query_indices.as_array(),
-                        &node_to_dataset,
+                        q_input,
+                        node_map_ref,
                         &metric,
                         k,
                         scope_caps.as_ref(),
@@ -816,6 +878,7 @@ fn build_pcct_residual_tree(
             )),
             survivors: Vec::new(),
             last_query_telemetry: None,
+            inv_order: None,
         }
     } else {
         let dummy = Array2::<f32>::zeros((0, 1));
@@ -831,6 +894,7 @@ fn build_pcct_residual_tree(
             )),
             survivors: Vec::new(),
             last_query_telemetry: None,
+            inv_order: None,
         }
     };
 
@@ -1107,6 +1171,14 @@ fn build_pcct2_residual_tree(
         _ => hilbert_like_order(coords_arr.view()),
     };
 
+    // Compute inverse order for query mapping
+    let mut inv_order = vec![0i64; order.len()];
+    for (new_idx, &old_idx) in order.iter().enumerate() {
+        if old_idx < inv_order.len() {
+            inv_order[old_idx] = new_idx as i64;
+        }
+    }
+
     let mut indices_f32 = Vec::with_capacity(order.len());
     for &idx in &order {
         indices_f32.push(idx as f32);
@@ -1156,6 +1228,7 @@ fn build_pcct2_residual_tree(
         )),
         survivors: Vec::new(),
         last_query_telemetry: None,
+        inv_order: Some(inv_order),
     };
 
     let metric = ResidualMetric::new(
@@ -1212,7 +1285,11 @@ fn build_pcct2_residual_tree(
         start = end;
     }
 
-    let node_to_dataset: Vec<i64> = order.iter().map(|&i| i as i64).collect();
+    // Correct node_to_dataset mapping: node_i -> survivors[i] (new_idx) -> order[survivors[i]] (old_idx)
+    let node_to_dataset: Vec<i64> = survivors
+        .iter()
+        .map(|&new_idx| order[new_idx as usize] as i64)
+        .collect();
     tree.survivors = survivors;
 
     let si_cache = compute_si_cache_residual(
