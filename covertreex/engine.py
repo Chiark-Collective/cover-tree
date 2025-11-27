@@ -546,6 +546,7 @@ class RustHybridResidualEngine:
         lengthscale = params.get("lengthscale", 1.0)
         inducing = int(params.get("inducing_count", 512))
         chunk_size = int(params.get("chunk_size", 512))
+        kernel_type = int(params.get("kernel_type", 0))
 
         seed_pack = runtime.seeds
         residual_seed = seed_pack.resolved("residual_grid", fallback=seed_pack.resolved("mis"))
@@ -556,6 +557,7 @@ class RustHybridResidualEngine:
             variance=variance,
             lengthscale=lengthscale,
             chunk_size=chunk_size,
+            kernel_type=kernel_type,
         )
         return backend, variance, lengthscale, chunk_size
 
@@ -721,6 +723,7 @@ class RustPcctEngine:
         lengthscale = params.get("lengthscale", 1.0)
         inducing = int(params.get("inducing_count", 512))
         chunk_size = int(params.get("chunk_size", 512))
+        kernel_type = int(params.get("kernel_type", 0))
 
         seed_pack = runtime.seeds
         residual_seed = seed_pack.resolved("residual_grid", fallback=seed_pack.resolved("mis"))
@@ -731,6 +734,7 @@ class RustPcctEngine:
             variance=variance,
             lengthscale=lengthscale,
             chunk_size=chunk_size,
+            kernel_type=kernel_type,
         )
         return backend, variance, lengthscale, chunk_size
 
@@ -890,6 +894,7 @@ class RustHilbertEngine:
         lengthscale = params.get("lengthscale", 1.0)
         inducing = int(params.get("inducing_count", 512))
         chunk_size = int(params.get("chunk_size", 512))
+        kernel_type = int(params.get("kernel_type", 0))
 
         seed_pack = runtime.seeds
         residual_seed = seed_pack.resolved("residual_grid", fallback=seed_pack.resolved("mis"))
@@ -900,6 +905,7 @@ class RustHilbertEngine:
             variance=variance,
             lengthscale=lengthscale,
             chunk_size=chunk_size,
+            kernel_type=kernel_type,
         )
         return backend, variance, lengthscale, chunk_size
 

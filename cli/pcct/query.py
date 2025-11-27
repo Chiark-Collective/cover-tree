@@ -48,6 +48,7 @@ def _run_residual_backend(options: "QueryCLIOptions", points: np.ndarray, *, con
         variance=options.residual_variance,
         lengthscale=options.residual_lengthscale,
         chunk_size=options.residual_chunk_size,
+        kernel_type=options.residual_kernel_type,
     )
     configure_residual_correlation(residual_backend, context=context)
     gate_active = False

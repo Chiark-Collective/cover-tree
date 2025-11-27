@@ -1,211 +1,93 @@
 # Covertreex
 
-Parallel compressed cover tree (PCCT) library engineered for Vecchia-style Gaussian process pipelines. The current focus is an efficient **CPU + NumPy/Numba** implementation; GPU/JAX execution has been intentionally disabled until the CPU path meets the audited performance envelope. This repository is the implementation companion to `PARALLEL_COMPRESSED_PLAN.md`.
+A parallel compressed cover tree (PCCT) library optimized for Vecchia-style Gaussian process pipelines. Features a hybrid Python/Numba + Rust implementation for high-performance CPU workloads.
 
-> Status: housekeeping phase. Expect rapid iteration across runtime knobs, telemetry, and traversal optimisations, but avoid destructive changes (see `AGENTS.md`).
+[![PyPI version](https://badge.fury.io/py/covertreex.svg)](https://pypi.org/project/covertreex/)
 
-## Getting Started
-
-Within a Python 3.12 environment:
+## Installation
 
 ```bash
-pip install -e ".[dev]"
+pip install covertreex
 ```
 
-The default backend is `numpy` (CPU). Optional acceleration hooks leverage `numba` when the `numba` extra is installed.
+For development:
+```bash
+pip install -e ".[dev]"
+maturin develop --release  # Build Rust backend
+```
 
-The Typer-powered benchmark CLI surfaces every runtime knob so runs are reproducible and discoverable via curated profiles:
+## Quick Start
+
+```python
+from covertreex.api import PCCT, Runtime
+
+# Configure runtime
+runtime = Runtime(metric="euclidean", enable_numba=True)
+
+# Build tree and query
+with runtime.activate() as ctx:
+    tree = PCCT(runtime).fit(points)
+    indices, distances = tree.knn(queries, k=10, return_distances=True)
+```
+
+## CLI Usage
 
 ```bash
-python -m cli.pcct --help
-
-# List curated profiles and inspect their payloads
+# List available profiles
 python -m cli.pcct profile list
-python -m cli.pcct profile describe residual-gold --format json
 
-# Profile-driven residual sweep with overrides
-python -m cli.pcct query \
-  --profile residual-gold \
-  --dimension 8 --tree-points 32768 --queries 1024 \
-  --batch-size 512 --k 8 --baseline both \
-  --set diagnostics.enabled=true \
-  --set residual.scope_member_limit=32768
+# Run k-NN benchmark
+python -m cli.pcct query --dimension 8 --tree-points 8192 --queries 512 --k 8
 
-# Build-only (no query phase)
-python -m cli.pcct build --dimension 8 --tree-points 65536 --batch-size 1024 --profile default
+# Build tree only
+python -m cli.pcct build --dimension 8 --tree-points 65536 --batch-size 1024
 
-# Aggregate multiple runs and summarise latency
-python -m cli.pcct benchmark --repeat 5 --dimension 8 --tree-points 8192 --queries 1024
-
-# Environment guardrails
+# Environment check
 python -m cli.pcct doctor --profile default
 ```
 
-`python -m cli.queries` remains available for one release and issues a compatibility warning
-before dispatching to `pcct query`, and `python -m cli.pcct legacy-query ...` exposes the full
-legacy flag firehose for scripts that still depend on it. For a guided checklist that maps legacy
-flags/environment variables to the new profile-driven workflow, see
-`docs/migrations/runtime_v_next.md`. Every invocation writes JSONL telemetry under
-`artifacts/benchmarks/` unless `--no-log-file` is passed, making audits deterministic, and
-`python -m cli.pcct telemetry render ...` can turn those logs into JSON/Markdown/CSV summaries.
+## Execution Engines
 
-## Profile-driven workflows
+Three engines are available via `--engine`:
 
-Profiles under `profiles/*.yaml` capture the supported runtime combinations (default dense,
-residual-fast, audit, CPU-debug, etc.). Use `Runtime.from_profile("default", overrides=[...])` or the
-CLI snippets above to load one configuration and tweak dot-path overrides in a reproducible way. The
-new examples in `docs/examples/profile_workflows.md` illustrate how to:
+| Engine | Description |
+|--------|-------------|
+| `python-numba` | Reference Python/Numba implementation with full telemetry |
+| `rust-natural` | Rust backend with natural point ordering |
+| `rust-hilbert` | Rust backend with Hilbert curve reordering (fastest builds) |
 
-- Build and query with the same `RuntimeContext` from Python without mutating globals.
-- Record telemetry for every batch and render summaries for audit trails.
-- Derive deterministic `SeedPack` values (global, batch order, MIS, residual grid) so multiple runs
-  can be compared by hash alone.
+The Rust backend is enabled by default. Disable with `COVERTREEX_ENABLE_RUST=0`.
 
-## Runtime Controls
+## Residual Correlation Metric
 
-The `covertreex.api.Runtime` façade now mirrors every CLI flag (backend, precision, scope caps, residual gates, prefilters, stream tiling, etc.). For non-CLI consumers, configuration can still be driven by environment variables read during import, but the CLI is the source of truth for supported knobs. Highlights:
-
-- `Runtime(...).activate()` installs an in-process configuration without mutating `os.environ`.
-- All residual settings (membership caps, forced whitening, etc.) are addressable via CLI flags or `Runtime` keyword arguments.
-- CLI runs always emit batch-level telemetry (`BenchmarkLogWriter`) unless `--no-log-file` is passed, so reproductions include scope budgets, kernel/whitened counters, and resource snapshots. Render those logs with `pcct telemetry render ...` for Markdown/JSON/CSV views.
-- Seed handling is unified through `Runtime.seeds` / `SeedPack`; reuse the same values (or `--global-seed`) to regenerate runs that should match byte-for-byte.
-
-Residual metrics remain lazy: call `configure_residual_correlation(...)` after import to supply Vecchia backends; `reset_residual_metric()` clears hooks for tests. Use `covertreex.config.describe_runtime()` or the CLI JSONL headers to inspect the active runtime.
-
-## Rust Backend
-
-The library now includes a high-performance Rust backend (`covertreex_backend`) that replaces the core Python/Numba algorithms for tree construction and traversal. This backend is **enabled by default** if the extension is successfully built and installed.
-
-- **Performance:** 10x-50x faster tree construction (batch insert) and competitive query throughput compared to the Python/Numba implementation.
-- **Control:** Use `COVERTREEX_ENABLE_RUST=0` (or `--no-enable-rust` in CLI) to force the legacy Python/Numba path if needed.
-- **Build:** The backend is built automatically via `maturin` when installing the package. Ensure you have a Rust toolchain installed (`cargo`) if building from source.
-
-## High-Level API
-
-The `covertreex.api` façade keeps ergonomics tight while still delegating to the same batch kernels:
-
-```python
-from covertreex.api import PCCT, Runtime, Residual
-
-rt = Runtime(
-    backend="numpy",
-    precision="float64",
-    conflict_graph="grid",
-    batch_order="hilbert",
-    residual=Residual(),
-)
-
-points = [[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]]
-tree = PCCT(rt).fit(points)
-tree = PCCT(rt, tree).insert([[2.5, 2.5]])
-indices, distances = PCCT(rt, tree).knn([[0.25, 0.25]], k=2, return_distances=True)
-```
-
-`Runtime.activate()` installs the configuration without fiddling with environment variables, and every `PCCT` method returns immutable `PCCTree` instances so downstream pipelines can treat updates as pure functions.
-
-## Benchmarks
-
-Smoke benchmarks live under `benchmarks/` and the Typer CLI (`python -m cli.pcct query`) emits structured telemetry by default (`artifacts/benchmarks/*.jsonl`). Example:
+For Gaussian process applications, the library supports residual correlation with configurable kernels:
 
 ```bash
-UV_CACHE_DIR=$PWD/.uv-cache uv run python -m benchmarks.batch_ops insert --dimension 8 --batch-size 64 --batches 4
+python -m cli.pcct query \
+    --metric residual \
+    --residual-kernel-type 1 \  # 0=RBF, 1=Matern52
+    --engine rust-hilbert
 ```
 
-The k-NN benchmark supports baseline comparisons against the in-repo sequential tree, PyPI's `covertree`, and the mlpack cover-tree implementation:
+## Benchmark Suite
 
 ```bash
-# Optional extras for the external baselines
-pip install -e '.[baseline]'
+# Gold standard benchmark (N=32k, D=3, residual)
+./benchmarks/run_residual_gold_standard.sh
 
-UV_CACHE_DIR=$PWD/.uv-cache uv run python -m cli.pcct query \
-  --dimension 8 --tree-points 2048 --queries 512 --k 8 --baseline cover
+# Rust vs Python comparison
+python benchmarks/comprehensive_residual_benchmark.py
+
+# Reference benchmarks for CI
+python tools/run_reference_benchmarks.py
 ```
 
-Baseline outputs list build/query timings, throughput, and slowdown ratios alongside the PCCT
-measurements so you can quantify gains from the compressed parallel design. The legacy
-`python -m benchmarks.queries` shim still works, and `python -m cli.queries` now prints a
-compatibility notice before delegating to the Typer `pcct` subcommand so scripts share one runtime
-configuration layer.
+## Documentation
 
-CLI documentation (flag reference, input/output description, telemetry schema) lives in `docs/CLI.md`.
+- `CLAUDE.md` — Development guide and commands
+- `CHANGELOG.md` — Release notes
+- `docs/` — API reference and examples
 
-Additional profile-driven walkthroughs live in `docs/examples/profile_workflows.md`, and migration
-notes for legacy scripts are in `docs/migrations/runtime_v_next.md`. When you run with `--metric residual`
-and omit `--profile`, the CLI automatically loads the dense `residual-gold` preset that matches
-`benchmarks/run_residual_gold_standard.sh`. Pass `--profile residual-fast` (or another residual profile)
-only when you explicitly need the throughput/sparse variants. If you just want a pure distance-function
-variant without Vecchia backends or gate/whitening plumbing, opt into `--metric residual-lite`. That mode
-maps to the registered `residual_correlation_lite` metric and simply computes correlation distances from
-the payload vectors, so it stays self-contained and strictly opt-in.
+## License
 
-For larger sweeps (or to exercise mlpack on a toy problem) use the automated runner in `tools/baseline_matrix.py`.
-It shells out to `cli.pcct query`, samples CPU/RAM via `psutil`, and appends JSONL rows under `artifacts/`. To compare
-the gold residual run against external cover trees, invoke the helper twice: first with `--baseline-mode none` to
-capture the pure PCCT numbers, and again with `--baseline-mode cover` (PyPI + mlpack). Because the script defaults to
-`residual-gold` whenever `--metric residual` is supplied, both runs match `benchmarks/run_residual_gold_standard.sh`.
-
-```bash
-# Toy Euclidean comparison against PyPI + mlpack cover trees
-python tools/baseline_matrix.py \
-  --profile default \
-  --metric euclidean \
-  --dimension 3 \
-  --tree-points 512 \
-  --queries 64 \
-  --k 4 \
-  --baseline-mode cover \
-  --output artifacts/benchmarks/baseline_toy.jsonl
-
-# Residual-only sweeps reuse the same CLI plumbing (PCCT-only gold reference)
-python tools/baseline_matrix.py \
-  --profile residual-gold \
-  --metric residual \
-  --dimension 6 \
-  --tree-points 2048 \
-  --queries 256 \
-  --k 8 \
-  --baseline-mode none
-
-# …and to capture the matching mlpack/PyPI baselines for the same shape:
-python tools/baseline_matrix.py \
-  --profile residual-gold \
-  --metric residual \
-  --dimension 6 \
-  --tree-points 2048 \
-  --queries 256 \
-  --k 8 \
-  --baseline-mode cover
-```
-
-Each JSONL entry includes the CLI command, PCCT timings, external baseline timings (PyPI + mlpack when
-`--baseline-mode cover` is used), and resource telemetry (wall, CPU seconds, and RSS watermark).
-
-## Benchmark Suite (Sources of Truth)
-
-The repository maintains a few canonical scripts for validating performance and correctness. Please rely on these rather than creating ad-hoc scripts.
-
-1.  **`benchmarks/run_residual_gold_standard.sh`** (The "Gold Standard")
-    *   **Purpose:** Reproduces the definitive historical benchmark result (24.2s build / 0.046s query) for N=32k, D=3, Residual Metric.
-    *   **Usage:** `./benchmarks/run_residual_gold_standard.sh [log_path]`
-    *   **When to use:** Verifying that a change hasn't regressed the primary optimization target.
-
-2.  **`tools/run_reference_benchmarks.py`** (Automated Regression)
-    *   **Purpose:** Runs a suite of diverse jobs (smoke tests, scaling tests, various configurations) for CI/CD.
-    *   **Usage:** `python tools/run_reference_benchmarks.py`
-    *   **When to use:** Comprehensive stability checks before merging.
-
-3.  **`benchmarks/comprehensive_residual_benchmark.py`** (Rust vs Python)
-    *   **Purpose:** Comparative benchmark between Python/Numba and Rust backends, handling the data discrepancies (indices vs coordinates) correctly.
-    *   **Usage:** `python benchmarks/comprehensive_residual_benchmark.py`
-    *   **When to use:** Testing the new Rust backend's performance.
-
-### Agents / Contributors
-
-Automated agents or contributors must follow `AGENTS.md`: do **not** remove code paths, telemetry, or historical artefacts unless explicitly requested. Prefer additive feature flags and keep runs reproducible.
-
-## Reference Material
-
-- `PARALLEL_COMPRESSED_PLAN.md` &mdash; architecture, milestones, and testing ladder.
-- `docs/API.md` &mdash; public runtime/PCCT façade usage and CLI entrypoints.
-- `docs/feature_static_tree_dynamic_query.md` &mdash; experimental Static Tree/Dynamic Query strategy for VIF.
-- `notes/` &mdash; upstream context and domain-specific constraints gathered during planning.
+MIT
