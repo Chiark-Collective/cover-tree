@@ -213,3 +213,4 @@ packages/survi/reports/
 
 # pytest-chronicle (local test history DB)
 .pytest-chronicle/
+.pypi_token.env

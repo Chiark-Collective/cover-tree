@@ -7,13 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.0.4] - 2025-11-27
+## [0.1.0] - 2025-11-27
+
+First stable release with production-ready performance.
+
+### Highlights
+- **170x faster** than GPBoost for residual correlation k-NN queries
+- **47,000 queries/second** on the gold standard benchmark (N=32k, D=3, k=50)
+- AVX2 SIMD optimized V-matrix dot products
+- Comprehensive documentation and benchmarks
 
 ### Added
-- Explicit AVX2 SIMD (f32x8) optimization for V-matrix dot product in Rust backend (~5% query throughput improvement)
+- Explicit AVX2 SIMD (f32x8) optimization for V-matrix dot product (~5% improvement)
+- Improved README with performance numbers, features list, and usage examples
+- License badge and proper Apache 2.0 attribution
 
 ### Changed
-- V-matrix dot product now uses hand-optimized SIMD with 2x loop unrolling instead of relying on auto-vectorization
+- V-matrix dot product uses hand-optimized SIMD with 2x loop unrolling
 
 ## [0.0.3] - 2025-11-27
 
