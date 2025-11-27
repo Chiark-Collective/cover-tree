@@ -226,6 +226,7 @@ class CoverTree:
         *,
         k: int,
         return_distances: bool = False,
+        predecessor_mode: bool = False,
     ) -> Any:
         """Find k nearest neighbors for query points.
 
@@ -237,6 +238,10 @@ class CoverTree:
             Number of neighbors to return per query.
         return_distances : bool, default False
             If True, also return distances to neighbors.
+        predecessor_mode : bool, default False
+            If True, for query at index i, only return neighbors with index j < i.
+            This is required for Vecchia GP approximations. Query 0 will have no
+            valid neighbors, query 1 can only return index 0, etc.
 
         Returns
         -------
@@ -250,6 +255,8 @@ class CoverTree:
         --------
         >>> neighbors = tree.knn(query_points, k=10)
         >>> neighbors, distances = tree.knn(query_points, k=10, return_distances=True)
+        >>> # Vecchia-style predecessor constraint
+        >>> neighbors = tree.knn(indices, k=10, predecessor_mode=True)
 
         Notes
         -----
@@ -266,6 +273,7 @@ class CoverTree:
             queries,
             k=k,
             return_distances=return_distances,
+            predecessor_mode=predecessor_mode,
             backend=tree_backend.backend,
             context=context,
         )

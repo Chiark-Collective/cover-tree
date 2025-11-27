@@ -72,6 +72,7 @@ class CoverTree:
         *,
         k: int,
         return_distances: bool = False,
+        predecessor_mode: bool = False,
         context: cx_config.RuntimeContext | None = None,
     ) -> Any:
         resolved_context = context or cx_config.current_runtime_context()
@@ -82,6 +83,7 @@ class CoverTree:
             query_points,
             k=k,
             return_distances=return_distances,
+            predecessor_mode=predecessor_mode,
             context=resolved_context,
             runtime=resolved_context.config,
         )
@@ -121,6 +123,7 @@ class TreeEngine(Protocol):
         *,
         k: int,
         return_distances: bool,
+        predecessor_mode: bool = False,
         context: cx_config.RuntimeContext,
         runtime: RuntimeConfig,
     ) -> Any:
@@ -292,6 +295,7 @@ class PythonNumbaEngine:
         *,
         k: int,
         return_distances: bool,
+        predecessor_mode: bool = False,
         context: cx_config.RuntimeContext,
         runtime: RuntimeConfig,
     ) -> Any:
@@ -303,6 +307,7 @@ class PythonNumbaEngine:
             query_points,
             k=k,
             return_distances=return_distances,
+            predecessor_mode=predecessor_mode,
             backend=backend,
             context=context,
         )
@@ -411,6 +416,7 @@ class RustNaturalEngine:
         *,
         k: int,
         return_distances: bool,
+        predecessor_mode: bool = False,
         context: cx_config.RuntimeContext,
         runtime: RuntimeConfig,
     ) -> Any:
@@ -430,6 +436,7 @@ class RustNaturalEngine:
             float(handle.rbf_variance),
             np.asarray(handle.rbf_lengthscale, dtype=handle.dtype),
             int(k),
+            predecessor_mode=predecessor_mode,
         )
         sorted_indices = np.asarray(indices, dtype=np.int64)
         sorted_distances = np.asarray(distances, dtype=handle.dtype)
@@ -668,6 +675,7 @@ class RustHybridResidualEngine:
         *,
         k: int,
         return_distances: bool,
+        predecessor_mode: bool = False,
         context: cx_config.RuntimeContext,
         runtime: RuntimeConfig,
     ) -> Any:
@@ -678,9 +686,9 @@ class RustHybridResidualEngine:
         if queries.dtype.kind not in {"i", "u"}:
             raise ValueError("rust-hybrid engine expects integer query payloads representing dataset indices.")
         query_indices = np.asarray(queries, dtype=np.int64).reshape(-1)
-        
+
         kernel_type = int(tree.meta.get("kernel_type", 0))
-        
+
         indices, distances = handle.tree.knn_query_residual(
             query_indices,
             handle.node_to_dataset,
@@ -691,6 +699,7 @@ class RustHybridResidualEngine:
             np.asarray(handle.rbf_lengthscale, dtype=handle.dtype),
             int(k),
             kernel_type,
+            predecessor_mode,
         )
         sorted_indices = np.asarray(indices, dtype=np.int64)
         sorted_distances = np.asarray(distances, dtype=handle.dtype)
@@ -844,6 +853,7 @@ class RustPcctEngine:
         *,
         k: int,
         return_distances: bool,
+        predecessor_mode: bool = False,
         context: cx_config.RuntimeContext,
         runtime: RuntimeConfig,
     ) -> Any:
@@ -854,10 +864,11 @@ class RustPcctEngine:
         if queries.dtype.kind not in {"i", "u"}:
             raise ValueError("rust-pcct engine expects integer query payloads representing dataset indices.")
         query_indices = np.asarray(queries, dtype=np.int64).reshape(-1)
-        
+
         kernel_type = int(tree.meta.get("kernel_type", 0))
-        
+
         # Block-scanned residual query; bypass cover tree traversal for now.
+        # Note: predecessor_mode not yet supported in block path
         indices, distances = handle.tree.knn_query_residual_block(
             query_indices,
             handle.node_to_dataset,
@@ -1026,6 +1037,7 @@ class RustHilbertEngine:
         *,
         k: int,
         return_distances: bool,
+        predecessor_mode: bool = False,
         context: cx_config.RuntimeContext,
         runtime: RuntimeConfig,
     ) -> Any:
@@ -1036,7 +1048,7 @@ class RustHilbertEngine:
         if queries.dtype.kind not in {"i", "u"}:
             raise ValueError("rust-hilbert engine expects integer query payloads representing dataset indices.")
         query_indices = np.asarray(queries, dtype=np.int64).reshape(-1)
-        
+
         kernel_type = int(tree.meta.get("kernel_type", 0))
 
         indices, distances = handle.tree.knn_query_residual(
@@ -1049,6 +1061,7 @@ class RustHilbertEngine:
             np.asarray(handle.rbf_lengthscale, dtype=handle.dtype),
             int(k),
             kernel_type,
+            predecessor_mode,
         )
 
         # Pull telemetry when enabled so it lands in op logs.

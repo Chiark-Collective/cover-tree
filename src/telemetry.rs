@@ -14,6 +14,7 @@ pub struct ResidualQueryTelemetry {
     pub level_cache_hits: usize,
     pub level_cache_misses: usize,
     pub block_sizes: Vec<usize>,
+    pub predecessor_filtered: usize,
 }
 
 impl ResidualQueryTelemetry {
@@ -52,5 +53,6 @@ impl ResidualQueryTelemetry {
         self.level_cache_misses += other.level_cache_misses;
         self.block_sizes
             .extend_from_slice(other.block_sizes.as_slice());
+        self.predecessor_filtered += other.predecessor_filtered;
     }
 }

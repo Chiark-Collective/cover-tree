@@ -362,7 +362,7 @@ impl CoverTreeWrapper {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (query_indices, node_to_dataset, v_matrix, p_diag, coords, rbf_var, rbf_ls, k, kernel_type=None))]
+    #[pyo3(signature = (query_indices, node_to_dataset, v_matrix, p_diag, coords, rbf_var, rbf_ls, k, kernel_type=None, predecessor_mode=None))]
     fn knn_query_residual<'py>(
         &mut self,
         py: Python<'py>,
@@ -375,7 +375,9 @@ impl CoverTreeWrapper {
         rbf_ls: PyObject,
         k: usize,
         kernel_type: Option<i32>,
+        predecessor_mode: Option<bool>,
     ) -> PyResult<(Bound<'py, numpy::PyArray2<i64>>, PyObject)> {
+        let pred_mode = predecessor_mode.unwrap_or(false);
         let k_type = kernel_type.unwrap_or(0);
         // Reuse cached data if available (fast path)
         if let Some(cached) = &self.cached_data {
@@ -431,6 +433,7 @@ impl CoverTreeWrapper {
                             &metric,
                             k,
                             scope_caps.as_ref(),
+                            pred_mode,
                             Some(&mut telem),
                         );
                         telemetry_rec = Some(telem);
@@ -443,6 +446,7 @@ impl CoverTreeWrapper {
                             &metric,
                             k,
                             scope_caps.as_ref(),
+                            pred_mode,
                             None,
                         )
                     };
@@ -507,6 +511,7 @@ impl CoverTreeWrapper {
                         &metric,
                         k,
                         scope_caps.as_ref(),
+                        pred_mode,
                         Some(&mut telem),
                     );
                     telemetry_rec = Some(telem);
@@ -519,10 +524,11 @@ impl CoverTreeWrapper {
                         &metric,
                         k,
                         scope_caps.as_ref(),
+                        pred_mode,
                         None,
                     )
                 };
-                
+
                 // Map internal node indices back to original dataset indices
                 for row in indices.iter_mut() {
                     for idx in row.iter_mut() {
@@ -568,6 +574,7 @@ impl CoverTreeWrapper {
                         &metric,
                         k,
                         caps_f64.as_ref(),
+                        pred_mode,
                         Some(&mut telem),
                     );
                     telemetry_rec = Some(telem);
@@ -580,6 +587,7 @@ impl CoverTreeWrapper {
                         &metric,
                         k,
                         caps_f64.as_ref(),
+                        pred_mode,
                         None,
                     )
                 };
@@ -682,6 +690,7 @@ impl CoverTreeWrapper {
                             &metric,
                             k,
                             scope_caps.as_ref(),
+                            false,  // predecessor_mode not supported in block path
                             None,
                         );
                         if !survivors.is_empty() {
@@ -706,6 +715,7 @@ impl CoverTreeWrapper {
                         &metric,
                         k,
                         scope_caps.as_ref(),
+                        false,  // predecessor_mode not supported in block path
                         None,
                     ),
                 };
@@ -803,7 +813,7 @@ impl CoverTreeWrapper {
     }
 }
 
-fn to_py_arrays<'py, T: numpy::Element + Copy + num_traits::Zero>(
+fn to_py_arrays<'py, T: numpy::Element + Copy + num_traits::Zero + num_traits::Float>(
     py: Python<'py>,
     indices: Vec<Vec<i64>>,
     dists: Vec<Vec<T>>,
@@ -812,10 +822,12 @@ fn to_py_arrays<'py, T: numpy::Element + Copy + num_traits::Zero>(
     Bound<'py, numpy::PyArray2<T>>,
 ) {
     let n_queries = indices.len();
-    let dim_k = if n_queries > 0 { indices[0].len() } else { 0 };
+    // Find maximum row length (needed for predecessor_mode where early queries have fewer results)
+    let dim_k = indices.iter().map(|v| v.len()).max().unwrap_or(0);
 
-    let mut idx_array = ndarray::Array2::<i64>::zeros((n_queries, dim_k));
-    let mut dst_array = ndarray::Array2::<T>::zeros((n_queries, dim_k));
+    // Initialize with padding values: -1 for indices, max value for distances
+    let mut idx_array = ndarray::Array2::<i64>::from_elem((n_queries, dim_k), -1);
+    let mut dst_array = ndarray::Array2::<T>::from_elem((n_queries, dim_k), T::max_value());
 
     for i in 0..n_queries {
         for j in 0..indices[i].len() {

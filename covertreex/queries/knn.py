@@ -125,6 +125,7 @@ def knn(
     *,
     k: int,
     return_distances: bool = False,
+    predecessor_mode: bool = False,
     backend: TreeBackend | None = None,
     context: cx_config.RuntimeContext | None = None,
 ) -> Tuple[Any, Any] | Any:
@@ -142,6 +143,7 @@ def knn(
             query_points,
             k=k,
             return_distances=return_distances,
+            predecessor_mode=predecessor_mode,
             context=context,
         )
 
@@ -156,6 +158,7 @@ def knn(
             query_points,
             k=k,
             return_distances=return_distances,
+            predecessor_mode=predecessor_mode,
             backend=backend,
             context=resolved_context,
         )
@@ -168,6 +171,7 @@ def _knn_impl(
     *,
     k: int,
     return_distances: bool,
+    predecessor_mode: bool,
     backend: TreeBackend,
     context: cx_config.RuntimeContext | None,
 ) -> Tuple[Any, Any] | Any:
@@ -197,6 +201,7 @@ def _knn_impl(
                 batch,
                 k=k,
                 return_distances=return_distances,
+                predecessor_mode=predecessor_mode,
                 backend=backend,
                 context=context,
                 op_log=op_log,
@@ -296,6 +301,7 @@ def _rust_knn_query(
     *,
     k: int,
     return_distances: bool,
+    predecessor_mode: bool = False,
     backend: TreeBackend,
     context: cx_config.RuntimeContext,
     op_log: Any | None = None,
@@ -378,7 +384,8 @@ def _rust_knn_query(
             coords,
             rbf_var,
             rbf_ls,
-            k
+            k,
+            predecessor_mode=predecessor_mode,
         )
     else:
         indices, dists = wrapper.knn_query(queries_np, k)

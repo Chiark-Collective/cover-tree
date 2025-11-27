@@ -357,6 +357,7 @@ pub fn batch_residual_knn_query<'a, T>(
     metric: &ResidualMetric<'a, T>,
     k: usize,
     scope_caps: Option<&HashMap<i32, T>>,
+    predecessor_mode: bool,
     telemetry: Option<&mut ResidualQueryTelemetry>,
 ) -> (Vec<Vec<i64>>, Vec<Vec<T>>)
 where
@@ -369,10 +370,17 @@ where
     let results: Vec<(Vec<i64>, Vec<T>)> = if let Some(tele) = telemetry {
         let mut ctx = SearchContext::new(n_points, tree_len);
         let mut out = Vec::with_capacity(query_indices.len());
-        
+
         for &q_idx in query_indices.iter() {
             let mut local = ResidualQueryTelemetry::default();
-            
+
+            // Predecessor mode: only neighbors with index < query index allowed
+            let max_neighbor = if predecessor_mode {
+                Some(q_idx as usize)
+            } else {
+                None
+            };
+
             let res = single_residual_knn_query(
                 tree,
                 node_to_dataset,
@@ -380,6 +388,7 @@ where
                 q_idx as usize,
                 k,
                 scope_caps,
+                max_neighbor,
                 Some(&mut local),
                 &mut ctx,
             );
@@ -391,13 +400,18 @@ where
         // Parallel chunk processing reusing thread-local context
         let q_slice = query_indices.as_slice().expect("contiguous query indices");
         let chunk_size = 64; // Match stream_tile default
-        
+
         q_slice.par_chunks(chunk_size)
             .map_init(
                 || SearchContext::new(n_points, tree_len),
                 |ctx, chunk| {
                     let mut chunk_results = Vec::with_capacity(chunk.len());
                     for &q_idx in chunk {
+                        let max_neighbor = if predecessor_mode {
+                            Some(q_idx as usize)
+                        } else {
+                            None
+                        };
                         let res = single_residual_knn_query(
                             tree,
                             node_to_dataset,
@@ -405,6 +419,7 @@ where
                             q_idx as usize,
                             k,
                             scope_caps,
+                            max_neighbor,
                             None,
                             ctx,
                         );
@@ -573,6 +588,7 @@ fn single_residual_knn_query<'a, T>(
     q_dataset_idx: usize,
     k: usize,
     scope_caps: Option<&HashMap<i32, T>>,
+    max_neighbor_idx: Option<usize>,
     mut telemetry: Option<&mut ResidualQueryTelemetry>,
     ctx: &mut SearchContext<T>,
 ) -> (Vec<i64>, Vec<T>)
@@ -583,6 +599,13 @@ where
 
     if tree.len() == 0 {
         return (vec![], vec![]);
+    }
+
+    // Predecessor constraint fast-path: query 0 has no valid predecessors
+    if let Some(max_idx) = max_neighbor_idx {
+        if max_idx == 0 {
+            return (vec![], vec![]);
+        }
     }
 
     // Reset Context per query
@@ -635,13 +658,25 @@ where
     // Root distance and seed result heap
     let root_payload = tree.get_point_row(0);
     let root_dataset_idx = root_payload[0].to_usize().unwrap();
+
+    // Check predecessor constraint for root
+    let root_valid = match max_neighbor_idx {
+        Some(max_idx) => root_dataset_idx < max_idx,
+        None => true,
+    };
+
     let root_dist = metric.distance_idx(q_dataset_idx, root_dataset_idx);
-    result_heap.push(Neighbor {
-        dist: OrderedFloat(root_dist),
-        node_idx: 0,
-    });
-    let mut kth_dist = if k > 0 { root_dist } else { T::max_value() };
-    survivors_count += 1;
+    let mut kth_dist = if root_valid && k > 0 { root_dist } else { T::max_value() };
+
+    if root_valid {
+        result_heap.push(Neighbor {
+            dist: OrderedFloat(root_dist),
+            node_idx: 0,
+        });
+        survivors_count += 1;
+    } else if let Some(t) = telemetry.as_mut() {
+        t.predecessor_filtered += 1;
+    }
 
     // Buffers and frontier
     let stream_tile = if parity_mode {
@@ -777,7 +812,30 @@ where
             while child != -1 {
                 let child_idx = child as usize;
                 let ds_idx = node_to_dataset[child_idx] as usize;
-                
+
+                // Predecessor constraint: skip if ds_idx >= max_neighbor_idx
+                // But still need to traverse siblings (children are still in tree)
+                let predecessor_ok = match max_neighbor_idx {
+                    Some(max_idx) => ds_idx < max_idx,
+                    None => true,
+                };
+
+                if !predecessor_ok {
+                    if let Some(t) = telemetry.as_mut() {
+                        t.predecessor_filtered += 1;
+                    }
+                    // Still traverse to next sibling
+                    let next = tree.next_node[child_idx];
+                    if next == child || next == -1 {
+                        break;
+                    }
+                    child = next;
+                    if child == tree.children[parent] {
+                        break;
+                    }
+                    continue;
+                }
+
                 // Visited check
                 if use_visited {
                     if bitset_check(&ctx.visited, child_idx) {

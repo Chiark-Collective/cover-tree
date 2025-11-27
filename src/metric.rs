@@ -565,6 +565,11 @@ where
     pub fn distance_idx(&self, idx_1: usize, idx_2: usize) -> T {
         self.distance_sq_idx(idx_1, idx_2).sqrt()
     }
+
+    /// Returns the number of points this metric is configured for.
+    pub fn num_points(&self) -> usize {
+        self.v_matrix.nrows()
+    }
 }
 
 impl<'a, T> Metric<T> for ResidualMetric<'a, T>

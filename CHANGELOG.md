@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Predecessor constraint** for Vecchia GP neighbor selection: `tree.knn(indices, k=10, predecessor_mode=True)` ensures query `i` only returns neighbors with index `j < i`
+- New `predecessor_filtered` telemetry counter tracks nodes filtered by the predecessor constraint
+
 ## [0.2.1] - 2025-11-27
 
 ### Added
