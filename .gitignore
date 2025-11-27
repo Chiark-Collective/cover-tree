@@ -210,3 +210,6 @@ presign-override-*.yml
 packages/survi/reports/
 !packages/survi/reports/latest.json
 .github_token.env
+
+# pytest-chronicle (local test history DB)
+.pytest-chronicle/

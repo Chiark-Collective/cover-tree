@@ -1,0 +1,3 @@
+[chronicle]
+database_url = "sqlite+aiosqlite:////home/liam/projects/chiark/cover-tree/.pytest-chronicle/chronicle.db"
+project = "covertreex"
