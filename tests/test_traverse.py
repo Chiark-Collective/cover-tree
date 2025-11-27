@@ -48,25 +48,18 @@ def _sample_tree():
     )
 
 
-def _install_stub_residual_backend(chunk_size: int = 2) -> None:
-    v_matrix = np.array(
-        [
-            [1.0, 0.0],
-            [0.5, 0.5],
-            [0.2, 0.8],
-        ],
-        dtype=np.float64,
-    )
-    p_diag = np.array([0.9, 1.1, 1.2], dtype=np.float64)
-    kernel_diag = np.array([1.1, 1.0, 1.2], dtype=np.float64)
-    kernel_full = np.array(
-        [
-            [1.1, 0.7, 0.4],
-            [0.7, 1.0, 0.6],
-            [0.4, 0.6, 1.2],
-        ],
-        dtype=np.float64,
-    )
+def _install_stub_residual_backend(chunk_size: int = 2, num_points: int = 3) -> None:
+    # Generate synthetic residual backend data for num_points
+    v_matrix = np.random.RandomState(42).randn(num_points, 2).astype(np.float64)
+    p_diag = np.abs(np.random.RandomState(43).randn(num_points)).astype(np.float64) + 0.5
+    kernel_diag = np.abs(np.random.RandomState(44).randn(num_points)).astype(np.float64) + 0.5
+    # Build symmetric positive kernel matrix
+    kernel_full = np.eye(num_points, dtype=np.float64) * kernel_diag
+    for i in range(num_points):
+        for j in range(i + 1, num_points):
+            val = 0.5 * np.exp(-0.1 * abs(i - j))
+            kernel_full[i, j] = val
+            kernel_full[j, i] = val
 
     def kernel_provider(rows: np.ndarray, cols: np.ndarray) -> np.ndarray:
         return kernel_full[np.ix_(rows, cols)]
@@ -339,7 +332,7 @@ def test_residual_scope_cache_hits(monkeypatch: pytest.MonkeyPatch):
         backend=backend,
     )
 
-    _install_stub_residual_backend(chunk_size=4)
+    _install_stub_residual_backend(chunk_size=4, num_points=4)
 
     batch_points = [[0.0], [0.1]]
 

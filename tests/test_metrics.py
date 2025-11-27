@@ -141,6 +141,10 @@ def test_residual_lite_pointwise_handles_vectors():
 
 
 def test_residual_metric_requires_configuration():
+    # Ensure clean state (prior tests may have configured residual backend)
+    reset_residual_metric()
+    set_residual_backend(None)
+
     backend = get_runtime_backend()
     metric = get_metric("residual_correlation")
     lhs = backend.asarray([[0.0, 0.0]], dtype=backend.default_float)
