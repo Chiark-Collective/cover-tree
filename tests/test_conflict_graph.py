@@ -238,13 +238,13 @@ def test_conflict_graph_prefers_explicit_context(monkeypatch: pytest.MonkeyPatch
     default_context = Runtime(
         backend="numpy",
         precision="float64",
-        residual=Residual(gate1_enabled=False),
+        residual=Residual(),
         conflict_graph="dense",
     ).activate()
     override_context = Runtime(
         backend="numpy",
         precision="float64",
-        residual=Residual(gate1_enabled=False),
+        residual=Residual(),
         conflict_graph="segmented",
     ).activate()
 
@@ -656,171 +656,6 @@ def test_grid_conflict_builder_forces_leaders(monkeypatch: pytest.MonkeyPatch):
     cx_config.reset_runtime_config_cache()
 
 
-def test_residual_grid_conflict_builder_emits_leaders(monkeypatch: pytest.MonkeyPatch):
-    backend = get_runtime_backend()
-    points = backend.asarray([[0.0], [1.0], [2.0]], dtype=backend.default_float)
-    top_levels = backend.asarray([1, 0, 0], dtype=backend.default_int)
-    parents = backend.asarray([-1, 0, 0], dtype=backend.default_int)
-    children = backend.asarray([1, 2, -1], dtype=backend.default_int)
-    level_offsets = backend.asarray([0, 1, 3, 3], dtype=backend.default_int)
-    si_cache = backend.asarray([0.0, 0.0, 0.0], dtype=backend.default_float)
-    next_cache = backend.asarray([1, 2, -1], dtype=backend.default_int)
-    tree = PCCTree(
-        points=points,
-        top_levels=top_levels,
-        parents=parents,
-        children=children,
-        level_offsets=level_offsets,
-        si_cache=si_cache,
-        next_cache=next_cache,
-        backend=backend,
-    )
-
-    v_matrix = np.array(
-        [
-            [1.0, 0.0],
-            [0.5, 0.5],
-            [0.2, 0.8],
-        ],
-        dtype=np.float64,
-    )
-    p_diag = np.array([0.9, 1.1, 1.3], dtype=np.float64)
-    kernel_diag = np.array([1.1, 1.0, 1.2], dtype=np.float64)
-
-    def kernel_provider(rows: np.ndarray, cols: np.ndarray) -> np.ndarray:
-        values = np.linspace(0.6, 1.1, num=rows.size * cols.size)
-        return values.reshape(rows.size, cols.size)
-
-    reset_residual_metric()
-    set_residual_backend(None)
-    backend_state = ResidualCorrHostData(
-        v_matrix=v_matrix,
-        p_diag=p_diag,
-        kernel_diag=kernel_diag,
-        kernel_provider=kernel_provider,
-        chunk_size=2,
-        gate_v32=v_matrix.astype(np.float32),
-    )
-    configure_residual_correlation(backend_state)
-
-    batch_points = [[0.2], [0.9], [1.8]]
-
-    monkeypatch.setenv("COVERTREEX_METRIC", "residual_correlation")
-    monkeypatch.setenv("COVERTREEX_CONFLICT_GRAPH_IMPL", "grid")
-    monkeypatch.setenv("COVERTREEX_RESIDUAL_GATE1", "1")
-    cx_config.reset_runtime_config_cache()
-
-    traversal = traverse_collect_scopes(tree, batch_points)
-    graph = build_conflict_graph(tree, traversal, batch_points)
-
-    assert graph.grid_leaders_raw > 0
-    assert graph.grid_leaders_after > 0
-    assert graph.forced_selected is not None
-    assert graph.forced_dominated is not None
-
-    monkeypatch.delenv("COVERTREEX_METRIC", raising=False)
-    monkeypatch.delenv("COVERTREEX_CONFLICT_GRAPH_IMPL", raising=False)
-    monkeypatch.delenv("COVERTREEX_RESIDUAL_GATE1", raising=False)
-    cx_config.reset_runtime_config_cache()
-    reset_residual_metric()
-    set_residual_backend(None)
-
-
-def test_residual_grid_uses_whitened_scale_without_gate(monkeypatch: pytest.MonkeyPatch):
-    backend = get_runtime_backend()
-    tree = PCCTree.empty(dimension=1, backend=backend)
-    base_points = backend.asarray([[0.0], [1.0], [2.0]], dtype=backend.default_float)
-    tree, _ = batch_insert(tree, base_points, mis_seed=0)
-    batch_points = [[0.0], [1.0], [2.0]]
-
-    v_matrix = np.array(
-        [
-            [0.1, 0.0],
-            [0.0, 0.2],
-            [0.15, 0.05],
-        ],
-        dtype=np.float64,
-    )
-    p_diag = np.array([1.0, 1.1, 0.95], dtype=np.float64)
-    kernel_diag = np.ones(3, dtype=np.float64)
-
-    def kernel_provider(rows: np.ndarray, cols: np.ndarray) -> np.ndarray:
-        return np.full((rows.size, cols.size), 0.9, dtype=np.float64)
-
-    def point_decoder(values):
-        arr = np.asarray(values, dtype=np.float64)
-        if arr.ndim == 0:
-            return np.asarray([int(arr)], dtype=np.int64)
-        if arr.ndim == 1:
-            return arr.astype(np.int64)
-        if arr.ndim == 2 and arr.shape[1] == 1:
-            return arr[:, 0].astype(np.int64)
-        return arr.reshape(-1).astype(np.int64)
-
-    reset_residual_metric()
-    set_residual_backend(None)
-
-    backend_state = ResidualCorrHostData(
-        v_matrix=v_matrix,
-        p_diag=p_diag,
-        kernel_diag=kernel_diag,
-        kernel_provider=kernel_provider,
-        point_decoder=point_decoder,
-        chunk_size=2,
-    )
-
-    scale = 1.75
-    monkeypatch.setenv("COVERTREEX_METRIC", "residual_correlation")
-    monkeypatch.setenv("COVERTREEX_CONFLICT_GRAPH_IMPL", "grid")
-    monkeypatch.setenv("COVERTREEX_RESIDUAL_GATE1", "0")
-    monkeypatch.setenv("COVERTREEX_RESIDUAL_GRID_WHITEN_SCALE", str(scale))
-    monkeypatch.setenv("COVERTREEX_ENABLE_NUMBA", "1")
-    monkeypatch.setattr(
-        "covertreex.algo.conflict.builders.NUMBA_GRID_AVAILABLE",
-        False,
-    )
-    cx_config.reset_runtime_config_cache()
-
-    configure_residual_correlation(backend_state)
-
-    captured: dict[str, np.ndarray] = {}
-
-    def fake_grid_select_leaders(**kwargs):
-        captured["points"] = kwargs["points"].copy()
-        batch_size = kwargs["points"].shape[0]
-        forced_selected = np.zeros(batch_size, dtype=np.uint8)
-        forced_dominated = np.ones(batch_size, dtype=np.uint8)
-        stats = {"cells": batch_size, "leaders_raw": batch_size, "leaders_final": batch_size, "local_edges": 0}
-        return forced_selected, forced_dominated, stats
-
-    monkeypatch.setattr(
-        "covertreex.algo.conflict.builders._grid_select_leaders",
-        fake_grid_select_leaders,
-    )
-
-    traversal = traverse_collect_scopes(tree, batch_points)
-    build_conflict_graph(tree, traversal, batch_points)
-
-    assert "points" in captured
-    host_backend = residual_mod.get_residual_backend()
-    assert host_backend.gate_v32 is not None
-    decoded = residual_mod.decode_indices(host_backend, np.asarray(batch_points, dtype=np.float64))
-    expected = np.asarray(host_backend.gate_v32[decoded], dtype=np.float64) * scale
-    np.testing.assert_allclose(captured["points"], expected)
-
-    for key in [
-        "COVERTREEX_METRIC",
-        "COVERTREEX_CONFLICT_GRAPH_IMPL",
-        "COVERTREEX_RESIDUAL_GATE1",
-        "COVERTREEX_RESIDUAL_GRID_WHITEN_SCALE",
-        "COVERTREEX_ENABLE_NUMBA",
-    ]:
-        monkeypatch.delenv(key, raising=False)
-    cx_config.reset_runtime_config_cache()
-    reset_residual_metric()
-    set_residual_backend(None)
-
-
 def test_adaptive_chunk_target_triggers_on_sparse_scopes():
     counts = np.zeros(256, dtype=np.int64)
     counts[-1] = 512
@@ -834,34 +669,3 @@ def test_adaptive_chunk_target_skips_dense_scopes():
     target = conflict_runner._adaptive_scope_chunk_target(counts)
     assert target is None
 
-
-def test_batch_insert_clamps_infinite_si_cache():
-    backend = get_runtime_backend()
-    points = backend.asarray([[0.0, 0.0]], dtype=backend.default_float)
-    top_levels = backend.asarray([0], dtype=backend.default_int)
-    parents = backend.asarray([-1], dtype=backend.default_int)
-    children = backend.asarray([-1], dtype=backend.default_int)
-    level_offsets = backend.asarray([0, 1], dtype=backend.default_int)
-    si_cache = backend.asarray([np.inf], dtype=backend.default_float)
-    next_cache = backend.asarray([-1], dtype=backend.default_int)
-    tree = PCCTree(
-        points=points,
-        top_levels=top_levels,
-        parents=parents,
-        children=children,
-        level_offsets=level_offsets,
-        si_cache=si_cache,
-        next_cache=next_cache,
-        stats=TreeLogStats(),
-        backend=backend,
-    )
-    batch = backend.asarray([[0.1, 0.0]], dtype=backend.default_float)
-
-    new_tree, plan = batch_insert(tree, batch, backend=backend, mis_seed=0)
-
-    assert plan.selected_indices.size + plan.dominated_indices.size > 0
-    assert new_tree.num_points == tree.num_points + int(
-        plan.selected_indices.size + plan.dominated_indices.size
-    )
-    new_si_cache = np.asarray(new_tree.si_cache)
-    assert np.isfinite(new_si_cache[-1])

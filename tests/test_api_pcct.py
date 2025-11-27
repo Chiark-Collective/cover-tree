@@ -42,14 +42,14 @@ def test_pcct_fit_insert_knn_roundtrip():
     assert isinstance(plan, BatchInsertPlan)
     assert tree.num_points == points.shape[0]
 
-    tree2 = PCCT(runtime, tree).insert([[3.0, 3.0]])
+    tree2 = tree.insert([[3.0, 3.0]])
     assert tree2.num_points == points.shape[0] + 1
 
-    indices, distances = PCCT(runtime, tree2).knn([[0.1, 0.1]], k=2, return_distances=True)
+    indices, distances = tree2.knn([[0.1, 0.1]], k=2, return_distances=True)
     assert indices.shape == (2,)
     assert distances.shape == (2,)
 
-    nearest = PCCT(runtime, tree2).nearest([0.1, 0.1])
+    nearest = tree2.nearest([0.1, 0.1])
     assert np.isscalar(nearest)
 
 
@@ -57,7 +57,7 @@ def test_pcct_delete_returns_plan():
     runtime = _runtime()
     base_tree = PCCT(runtime).fit([[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]])
 
-    new_tree, plan = PCCT(runtime, base_tree).delete([1], return_plan=True)
+    new_tree, plan = base_tree.delete([1], return_plan=True)
     assert isinstance(plan, BatchDeletePlan)
     assert new_tree.num_points == base_tree.num_points - 1
     assert int(plan.removed_indices.shape[0]) == 1
@@ -97,7 +97,7 @@ def test_pcct_delete_threads_runtime_context(monkeypatch: pytest.MonkeyPatch):
     batch_delete_module = importlib.import_module("covertreex.algo.batch_delete")
     monkeypatch.setattr(batch_delete_module, "batch_mis_seeds", _fake_batch_mis_seeds)
 
-    new_tree = PCCT(runtime, base_tree).delete([1])
+    new_tree = base_tree.delete([1])
     assert new_tree.num_points == base_tree.num_points - 1
     assert captured["runtime"] is not None
     assert captured["runtime"].mis_seed == 77

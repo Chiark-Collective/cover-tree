@@ -13,11 +13,30 @@ from . import option_defs as opts
 from .execution import benchmark_run
 from .options import QueryCLIOptions, resolve_metric_flag
 
+_BUILD_HELP = """Construct a cover tree and measure build time (no queries).
+
+[bold cyan]Examples[/bold cyan]
+
+  [dim]#[/dim] Build tree with 32K points
+  python -m cli.pcct build --tree-points 32768 --dimension 3
+
+  [dim]#[/dim] Export tree to .npz file
+  python -m cli.pcct build --tree-points 8192 --export-tree mytree.npz
+
+  [dim]#[/dim] Use Rust backend with Hilbert ordering
+  python -m cli.pcct build --engine rust-hilbert --tree-points 65536
+
+[bold cyan]Output[/bold cyan]
+
+  Reports build time in seconds. Use --export-tree to persist the tree
+  structure for later inspection or loading."""
+
 build_app = typer.Typer(
     add_completion=False,
     pretty_exceptions_enable=False,
     invoke_without_command=True,
-    help="Construct PCCTrees with profile-driven runtime settings.",
+    rich_markup_mode="rich",
+    help=_BUILD_HELP,
 )
 
 

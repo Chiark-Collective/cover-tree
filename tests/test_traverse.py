@@ -226,13 +226,13 @@ def test_traversal_prefers_explicit_context(monkeypatch: pytest.MonkeyPatch):
     default_context = Runtime(
         backend="numpy",
         precision="float64",
-        residual=Residual(gate1_enabled=False),
+        residual=Residual(),
     ).activate()
     override_context = Runtime(
         backend="numpy",
         precision="float64",
         enable_sparse_traversal=True,
-        residual=Residual(gate1_enabled=False),
+        residual=Residual(),
     ).activate()
 
     traverse_collect_scopes(tree, batch_points, context=default_context)

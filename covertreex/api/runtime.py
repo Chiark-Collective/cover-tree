@@ -103,10 +103,25 @@ def _set_nested(payload: Dict[str, Any], path: Sequence[str], value: Any) -> Non
 
 @dataclass(frozen=True)
 class Residual:
-    """
-    Legacy wrapper for residual metric configuration.
-    
-    Most gate-related fields have been deprecated/removed.
+    """Configuration for residual correlation metric scope constraints.
+
+    This class configures optional scope-limiting parameters for the residual
+    correlation metric. For full residual metric setup, use `configure_residual_correlation`
+    or pass `residual_params` to engine-level `build_tree`.
+
+    Parameters
+    ----------
+    radius_floor : float, optional
+        Minimum radius for scope expansion during traversal.
+    scope_cap_path : str, optional
+        Path to JSON file with per-level radius caps.
+    scope_cap_default : float, optional
+        Default radius cap when no per-level cap matches.
+
+    See Also
+    --------
+    covertreex.metrics.residual.configure_residual_correlation : Full residual setup.
+    covertreex.metrics.residual.build_residual_backend : Build V-matrix backend.
     """
     radius_floor: float | None = None
     scope_cap_path: str | None = None
@@ -130,7 +145,53 @@ class Residual:
 
 @dataclass(frozen=True)
 class Runtime:
-    """Declarative runtime configuration that can activate a covertreex context."""
+    """Runtime configuration for covertreex cover tree operations.
+
+    Controls backend selection, metric type, engine, and various tuning parameters.
+    Use `activate()` to install as the global context, or pass directly to CoverTree.
+
+    Parameters
+    ----------
+    backend : str, optional
+        Array backend: "numpy" (default) or "jax".
+    precision : str, optional
+        Float precision: "float32" or "float64".
+    engine : str, optional
+        Execution engine: "python-numba" (reference), "rust-natural",
+        "rust-hilbert" (fastest, recommended for residual).
+    metric : str, optional
+        Distance metric: "euclidean" or "residual_correlation".
+    devices : tuple of str, optional
+        Restrict to specific devices (e.g., ("cpu",)).
+    enable_numba : bool, optional
+        Enable Numba JIT kernels.
+    enable_rust : bool, optional
+        Enable Rust backend when available.
+
+    Examples
+    --------
+    Basic Euclidean configuration:
+
+        >>> runtime = Runtime(metric="euclidean", enable_numba=True)
+        >>> tree = CoverTree(runtime).fit(points)
+
+    Fast Rust backend for residual metric:
+
+        >>> runtime = Runtime(
+        ...     metric="residual_correlation",
+        ...     engine="rust-hilbert",
+        ... )
+        >>> tree = CoverTree(runtime).fit(points)
+
+    Load from profile preset:
+
+        >>> runtime = Runtime.from_profile("residual-gold")
+
+    See Also
+    --------
+    CoverTree : Main tree interface.
+    Residual : Residual metric scope configuration.
+    """
 
     backend: str | None = None
     precision: str | None = None

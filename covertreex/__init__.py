@@ -1,4 +1,25 @@
-"""Parallel compressed cover tree library."""
+"""Covertreex: High-performance cover tree for k-NN queries.
+
+Quick Start
+-----------
+>>> from covertreex import CoverTree, Runtime, Residual
+>>>
+>>> # Basic Euclidean k-NN
+>>> tree = CoverTree().fit(points)
+>>> neighbors = tree.knn(query_points, k=10)
+>>>
+>>> # Residual correlation metric for Vecchia GP
+>>> residual = Residual(v_matrix=V, p_diag=p_diag, coords=coords)
+>>> runtime = Runtime(metric="residual", residual=residual)
+>>> tree = CoverTree(runtime).fit(points)
+>>> neighbors = tree.knn(points, k=50)
+
+Classes
+-------
+CoverTree : Main interface for building trees and running k-NN queries.
+Runtime : Configuration for backend, metric, and engine selection.
+Residual : Configuration for residual correlation metric (Vecchia GP).
+"""
 
 from importlib.metadata import version as _pkg_version
 
@@ -7,7 +28,11 @@ try:
 except Exception:  # pragma: no cover - best effort during local development
     __version__ = "0.0.1"
 
-from .engine import CoverTree
+# Primary user-facing API
+from .api import CoverTree, Runtime, Residual, PCCT
+
+# Internal/advanced APIs
+from .engine import CoverTree as EngineCoverTree, build_tree, get_engine
 from .core import (
     PCCTree,
     TreeBackend,
@@ -33,9 +58,18 @@ from .baseline import (
 )
 
 __all__ = [
+    # Primary API
     "__version__",
-    "PCCTree",
     "CoverTree",
+    "Runtime",
+    "Residual",
+    "PCCT",  # Deprecated alias
+    # Engine-level API
+    "build_tree",
+    "get_engine",
+    "EngineCoverTree",
+    # Internal
+    "PCCTree",
     "TreeBackend",
     "TreeLogStats",
     "available_metrics",

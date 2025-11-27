@@ -36,11 +36,39 @@ from covertreex.metrics._residual_numba import NUMBA_RESIDUAL_AVAILABLE
 from covertreex.queries._knn_numba import NUMBA_QUERY_AVAILABLE
 
 
+_DOCTOR_HELP = """Run environment diagnostics and verify dependencies.
+
+[bold cyan]Checks Performed[/bold cyan]
+
+  • Numba availability and JIT kernel status
+  • JAX backend + device detection (if configured)
+  • Artifact root writability
+  • Thread environment (BLAS, OpenMP)
+  • Rust backend availability
+
+[bold cyan]Examples[/bold cyan]
+
+  [dim]#[/dim] Check environment for default profile
+  python -m cli.pcct doctor
+
+  [dim]#[/dim] Check for residual metric requirements
+  python -m cli.pcct doctor --profile residual-gold
+
+  [dim]#[/dim] Fail CI if warnings detected
+  python -m cli.pcct doctor --fail-on-warning
+
+[bold cyan]Exit Codes[/bold cyan]
+
+  0 — All checks passed
+  1 — Warnings detected (with --fail-on-warning)
+  2 — Critical errors detected"""
+
 app = typer.Typer(
     add_completion=False,
     pretty_exceptions_enable=False,
     invoke_without_command=True,
-    help="Environment guardrails for PCCT runs.",
+    rich_markup_mode="rich",
+    help=_DOCTOR_HELP,
 )
 
 

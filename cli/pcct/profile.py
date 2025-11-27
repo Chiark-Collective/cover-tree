@@ -14,10 +14,32 @@ from profiles.loader import (
 )
 
 
+_PROFILE_HELP = """List and describe profile presets from profiles/.
+
+[bold cyan]Available Profiles[/bold cyan]
+
+  • [bold]default[/bold]         — Euclidean metric, Numba backend
+  • [bold]residual-gold[/bold]   — Residual metric gold standard (N=32K, D=3, k=50)
+  • [bold]residual-fast[/bold]   — Residual metric optimized for speed
+  • [bold]residual-audit[/bold]  — Residual with audit logging enabled
+  • [bold]cpu-debug[/bold]       — Debug profile with verbose diagnostics
+
+[bold cyan]Examples[/bold cyan]
+
+  [dim]#[/dim] List all profiles
+  python -m cli.pcct profile list
+
+  [dim]#[/dim] Show full profile definition
+  python -m cli.pcct profile describe residual-gold
+
+  [dim]#[/dim] Export as JSON
+  python -m cli.pcct profile describe residual-gold --format json"""
+
 app = typer.Typer(
     add_completion=False,
     pretty_exceptions_enable=False,
-    help="Profile utilities for listing and describing runtime presets.",
+    rich_markup_mode="rich",
+    help=_PROFILE_HELP,
 )
 
 

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2025-11-27
+
+API cleanup release with library-first focus.
+
+### Changed
+- **Renamed PCCT → CoverTree** as the primary class name (`PCCT` remains as alias)
+- `fit()`, `insert()`, `delete()` now return `CoverTree` instances (enables method chaining)
+- Added `num_points` and `dimension` properties to `CoverTree`
+- Updated README and CLAUDE.md for library-first usage
+- CLI help enhanced with examples and better option descriptions
+
+### Removed
+- Deprecated gate-related functionality from Residual class
+- Removed tests for deprecated gate functionality and implementation-specific tie-breaking
+
 ## [0.1.0] - 2025-11-27
 
 First stable release with production-ready performance.

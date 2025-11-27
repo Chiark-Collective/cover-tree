@@ -44,7 +44,7 @@ def residual_backend_config() -> None:
 def _knn_result(runtime: Runtime, *, queries: np.ndarray | None = None, k: int = K) -> tuple[np.ndarray, np.ndarray]:
     query_batch = QUERIES if queries is None else np.asarray(queries, dtype=np.float64)
     tree = PCCT(runtime).fit(POINTS, mis_seed=123)
-    indices, distances = PCCT(runtime, tree).knn(
+    indices, distances = tree.knn(
         query_batch,
         k=k,
         return_distances=True,

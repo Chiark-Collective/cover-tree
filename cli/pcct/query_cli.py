@@ -9,11 +9,45 @@ from .execution import benchmark_run
 from .options import QueryCLIOptions, resolve_metric_flag
 from .query import execute_query_benchmark
 
+_QUERY_HELP = """Run k-NN benchmark with tree construction and query throughput measurement.
+
+[bold cyan]Examples[/bold cyan]
+
+  [dim]#[/dim] Basic Euclidean benchmark (default metric)
+  python -m cli.pcct query --dimension 3 --tree-points 8192 --k 10
+
+  [dim]#[/dim] High-performance Rust backend (recommended for production)
+  python -m cli.pcct query --engine rust-hilbert --tree-points 32768 --k 50
+
+  [dim]#[/dim] Residual correlation metric for GP workloads
+  python -m cli.pcct query --metric residual --engine rust-hilbert \\
+      --tree-points 32768 --dimension 3 --k 50
+
+  [dim]#[/dim] Load a profile preset with overrides
+  python -m cli.pcct query --profile residual-gold --set seeds.global_seed=42
+
+  [dim]#[/dim] Compare against baseline implementations
+  python -m cli.pcct query --baseline scipy,sklearn --tree-points 4096
+
+[bold cyan]Key Options[/bold cyan]
+
+  [bold]--engine[/bold]      Execution backend: python-numba, rust-natural, rust-hilbert
+  [bold]--metric[/bold]      Distance metric: euclidean, residual, residual-lite
+  [bold]--profile[/bold]     Load YAML preset (see: profile list)
+  [bold]--tree-points[/bold] Number of points to insert into tree
+  [bold]--k[/bold]           Number of nearest neighbors per query
+
+[bold cyan]Output[/bold cyan]
+
+  Reports tree construction time (sec), query throughput (queries/sec),
+  and median query latency. Telemetry written to logs/ by default."""
+
 query_app = typer.Typer(
     add_completion=False,
     pretty_exceptions_enable=False,
     invoke_without_command=True,
-    help="Run cover-tree benchmarks driven by profiles and engine overrides.",
+    rich_markup_mode="rich",
+    help=_QUERY_HELP,
 )
 
 @query_app.callback()

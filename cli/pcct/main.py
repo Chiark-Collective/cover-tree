@@ -12,9 +12,37 @@ from .telemetry_cli import telemetry_app
 from .breakdown_cli import breakdown_app
 
 
-_HELP = """Parallel compressed cover tree (PCCT) command line interface.
+_HELP = """[bold]Covertreex[/bold] — Parallel compressed cover tree (PCCT) CLI.
 
-Subcommands cover benchmarking, profiles, diagnostics, and analysis."""
+High-performance k-NN queries with residual correlation for Gaussian process pipelines.
+
+[bold cyan]Quick Start[/bold cyan]
+  [dim]#[/dim] Run a basic benchmark
+  python -m cli.pcct query --dimension 3 --tree-points 8192 --k 10
+
+  [dim]#[/dim] Run with Rust backend (fastest)
+  python -m cli.pcct query --engine rust-hilbert --tree-points 32768
+
+  [dim]#[/dim] Run residual metric benchmark
+  python -m cli.pcct query --metric residual --engine rust-hilbert
+
+  [dim]#[/dim] Use a profile preset
+  python -m cli.pcct query --profile residual-gold
+
+[bold cyan]Common Workflows[/bold cyan]
+  • [bold]query[/bold]     — Run k-NN benchmarks (most common)
+  • [bold]build[/bold]     — Build tree only, measure construction time
+  • [bold]profile[/bold]   — List/describe available profile presets
+  • [bold]doctor[/bold]    — Check environment and dependencies
+
+[bold cyan]Profiles[/bold cyan]
+  Profiles are YAML presets in profiles/. List with: profile list
+  Available: default, residual-gold, residual-fast, residual-audit, cpu-debug
+
+[bold cyan]Engines[/bold cyan]
+  • python-numba  — Reference impl with full telemetry
+  • rust-natural  — Rust backend, natural point order
+  • rust-hilbert  — Rust + Hilbert ordering [bold green](fastest)[/bold green]"""
 
 app = typer.Typer(
     add_completion=False,
@@ -32,14 +60,14 @@ def pcct_callback() -> None:
 
 
 # Register Typer subcommands
-app.add_typer(profile_app, name="profile", help="Inspect configuration profiles.")
-app.add_typer(new_query_app, name="query", help="Run PCCT benchmarks with profiles.")
-app.add_typer(build_app, name="build", help="Construct trees with telemetry summaries.")
-app.add_typer(benchmark_app, name="benchmark", help="Repeat query runs and aggregate metrics.")
-app.add_typer(breakdown_app, name="breakdown", help="Generate runtime breakdown plots.")
-app.add_typer(plugins_app, name="plugins", help="Inspect registered plugins.")
-app.add_typer(telemetry_app, name="telemetry", help="Inspect telemetry artifacts.")
-app.add_typer(doctor_app, name="doctor", help="Run preflight environment checks.")
+app.add_typer(profile_app, name="profile", help="List/describe profile presets from profiles/")
+app.add_typer(new_query_app, name="query", help="Run k-NN benchmark with tree build + queries")
+app.add_typer(build_app, name="build", help="Build tree only (no queries), measure construction")
+app.add_typer(benchmark_app, name="benchmark", help="Run query benchmark multiple times, aggregate stats")
+app.add_typer(breakdown_app, name="breakdown", help="Generate per-phase timing breakdown plots")
+app.add_typer(plugins_app, name="plugins", help="List registered traversal/metric plugins")
+app.add_typer(telemetry_app, name="telemetry", help="Inspect/export JSONL telemetry artifacts")
+app.add_typer(doctor_app, name="doctor", help="Check Numba/JAX availability, verify environment")
 
 
 def main() -> None:

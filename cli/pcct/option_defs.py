@@ -77,7 +77,7 @@ ProfileOption = Annotated[
     Optional[str],
     typer.Option(
         "--profile",
-        help="Profile to load from profiles/ (omit to use manual CLI flags).",
+        help="YAML preset: default, residual-gold, residual-fast, residual-audit, cpu-debug. See: profile list",
         rich_help_panel=RUNTIME_PANEL,
     ),
 ]
@@ -94,7 +94,7 @@ MetricOption = Annotated[
     Literal["auto", "euclidean", "residual", "residual-lite"],
     typer.Option(
         "--metric",
-        help="Force a specific metric or infer it from the profile when set to 'auto'.",
+        help="Distance metric: euclidean (standard), residual (GP correlation), residual-lite (faster residual), auto (infer from profile).",
         rich_help_panel=RUNTIME_PANEL,
     ),
 ]
@@ -110,7 +110,7 @@ EngineOption = Annotated[
     ],
     typer.Option(
         "--engine",
-        help="Select the cover-tree engine (default: python-numba).",
+        help="Execution engine: python-numba (reference), rust-natural (fast), rust-hilbert (fastest, recommended).",
         rich_help_panel=RUNTIME_PANEL,
     ),
 ]
@@ -258,7 +258,7 @@ ResidualVarianceOption = Annotated[
 ]
 ResidualKernelTypeOption = Annotated[
     Optional[int],
-    typer.Option("--residual-kernel-type", help="Kernel type (0=RBF, 1=Matern52).", rich_help_panel=RESIDUAL_PANEL),
+    typer.Option("--residual-kernel-type", help="GP kernel: 0=RBF (squared exponential), 1=Matérn 5/2.", rich_help_panel=RESIDUAL_PANEL),
 ]
 ResidualInducingOption = Annotated[
     int,

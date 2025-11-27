@@ -16,7 +16,7 @@ def _diagnostics_runtime(*, diagnostics: bool | None = True) -> Runtime:
     kwargs = {
         "backend": "numpy",
         "precision": "float64",
-        "residual": Residual(gate1_enabled=False),
+        "residual": Residual(),
     }
     if diagnostics is not None:
         kwargs["diagnostics"] = diagnostics
