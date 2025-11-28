@@ -25,18 +25,15 @@ pip install covertreex
 
 ```python
 import numpy as np
-from covertreex import CoverTree
+from covertreex import cover_tree
 
-# Build tree from points
-points = np.random.randn(10000, 3)
-tree = CoverTree().fit(points)
-
-# Query k nearest neighbors
-query_points = np.random.randn(100, 3)
-neighbors = tree.knn(query_points, k=10)
+# Build tree and query
+coords = np.random.randn(10000, 3).astype(np.float32)
+tree = cover_tree(coords)
+neighbors = tree.knn(k=10)
 
 # With distances
-neighbors, distances = tree.knn(query_points, k=10, return_distances=True)
+neighbors, distances = tree.knn(k=10, return_distances=True)
 ```
 
 ### Residual Correlation Metric (Vecchia GP)
@@ -45,18 +42,17 @@ For Gaussian process applications with Vecchia approximations:
 
 ```python
 import numpy as np
-from covertreex import ResidualCoverTree
+from covertreex import cover_tree
+from covertreex.kernels import Matern52
 
 coords = np.random.randn(10000, 3).astype(np.float32)
-tree = ResidualCoverTree(
-    coords,
-    variance=1.0,
-    lengthscale=1.0,
-    inducing_count=512,
-)
 
-# Query all points
+# Option 1: Provide a kernel (V-matrix built internally)
+tree = cover_tree(coords, kernel=Matern52(lengthscale=1.0, variance=1.0))
 neighbors = tree.knn(k=50)
+
+# Option 2: Provide pre-computed V-matrix (from your GP)
+# tree = cover_tree(coords, v_matrix=V, p_diag=p_diag)
 
 # Predecessor constraint (for Vecchia): neighbor j must have j < query i
 neighbors = tree.knn(k=50, predecessor_mode=True)
@@ -65,14 +61,13 @@ neighbors = tree.knn(k=50, predecessor_mode=True)
 ### Engine Selection
 
 ```python
-# ResidualCoverTree defaults to rust-hilbert (fastest)
-tree = ResidualCoverTree(coords, engine="rust-hilbert")
-tree = ResidualCoverTree(coords, engine="rust-natural")
+from covertreex import cover_tree
+from covertreex.kernels import Matern52
 
-# For CoverTree, use Runtime
-from covertreex import Runtime
-runtime = Runtime(engine="rust-hilbert")
-tree = CoverTree(runtime).fit(points)
+# cover_tree defaults to rust-hilbert (fastest)
+tree = cover_tree(coords, kernel=Matern52(lengthscale=1.0), engine="rust-hilbert")
+tree = cover_tree(coords, kernel=Matern52(lengthscale=1.0), engine="rust-natural")
+tree = cover_tree(coords, kernel=Matern52(lengthscale=1.0), engine="python-numba")
 ```
 
 ### Profile Presets
@@ -100,45 +95,54 @@ Residual correlation k-NN benchmark (AMD Ryzen 9 9950X, N=32k, D=3, k=50):
 
 ## API Reference
 
-### CoverTree
+### cover_tree (recommended)
 
-Main interface for building trees and running k-NN queries.
+Factory function for building cover trees. Handles all configuration internally.
 
 ```python
-CoverTree(runtime: Runtime = Runtime())
-    .fit(points) -> tree              # Build tree from points
-    .knn(queries, k=10) -> indices    # Find k nearest neighbors
-    .knn(queries, k=10, return_distances=True) -> (indices, distances)
+from covertreex import cover_tree
+from covertreex.kernels import Matern52, RBF
+
+# Euclidean distance (default)
+tree = cover_tree(coords)
+
+# Residual correlation with kernel
+tree = cover_tree(coords, kernel=Matern52(lengthscale=1.0, variance=1.0))
+tree = cover_tree(coords, kernel=RBF(lengthscale=2.0))
+
+# Residual correlation with pre-computed V-matrix
+tree = cover_tree(coords, v_matrix=V, p_diag=p_diag, kernel_diag=k_diag)
+
+# Query
+neighbors = tree.knn(k=10)
+neighbors = tree.knn(k=50, predecessor_mode=True)  # Vecchia constraint
+neighbors, distances = tree.knn(k=10, return_distances=True)
 ```
 
-### Runtime
+### Kernel Classes
 
-Configuration for backend, metric, and engine selection.
+GP kernels for residual correlation metric:
 
 ```python
-Runtime(
-    engine="rust-hilbert",           # Execution engine
-    metric="residual_correlation",   # Distance metric
-    backend="numpy",                 # Array backend
-    precision="float32",             # Float precision
-)
+from covertreex.kernels import Matern52, RBF
+
+# Matérn 5/2 kernel (recommended for GP)
+kernel = Matern52(lengthscale=1.0, variance=1.0)
+
+# RBF (squared exponential) kernel
+kernel = RBF(lengthscale=2.0, variance=1.0)
 ```
 
-### Residual Backend
+### CoverTree (advanced)
 
-For Vecchia GP residual correlation:
+Lower-level interface with explicit runtime configuration:
 
 ```python
-from covertreex.metrics.residual import build_residual_backend
+from covertreex import CoverTree, Runtime
 
-backend = build_residual_backend(
-    coords,                    # (n, d) spatial coordinates
-    seed=42,                   # Random seed
-    inducing_count=512,        # Number of inducing points
-    variance=1.0,              # Kernel variance σ²
-    lengthscale=1.0,           # Kernel lengthscale ℓ
-    kernel_type=0,             # 0=RBF, 1=Matérn 5/2
-)
+runtime = Runtime(engine="rust-hilbert", metric="euclidean")
+tree = CoverTree(runtime).fit(points)
+neighbors = tree.knn(query_points, k=10)
 ```
 
 ## Development

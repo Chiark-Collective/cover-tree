@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Kernel-based API**: New `cover_tree()` factory function as the recommended entry point
+  - Accepts kernel objects (`Matern52`, `RBF`) instead of raw parameters
+  - Supports pre-computed V-matrices for integration with existing GP code
+  - Unified interface for Euclidean and residual correlation metrics
+- **Kernel classes**: `Matern52` and `RBF` in `covertreex.kernels` module
+- **BuiltCoverTree wrapper**: Consistent `knn(k=...)` interface across all engines
+
+### Deprecated
+- `ResidualCoverTree` class (use `cover_tree(coords, kernel=...)` instead)
+
 ## [0.3.1] - 2025-11-28
 
 ### Added

@@ -10,34 +10,29 @@ Covertreex is a high-performance cover tree library for k-NN queries, optimized 
 
 ## Library API
 
-The main user-facing API:
+The recommended entry point is the `cover_tree()` factory function:
 
 ```python
-from covertreex import CoverTree, Runtime
+from covertreex import cover_tree
+from covertreex.kernels import Matern52
 
 # Basic Euclidean k-NN
-tree = CoverTree().fit(points)
-neighbors = tree.knn(query_points, k=10)
+tree = cover_tree(coords)
+neighbors = tree.knn(k=10)
 
-# Fast Rust backend
-runtime = Runtime(engine="rust-hilbert")
-tree = CoverTree(runtime).fit(points)
+# Residual correlation with kernel (V-matrix built internally)
+tree = cover_tree(coords, kernel=Matern52(lengthscale=1.0, variance=1.0))
+neighbors = tree.knn(k=50)
 
-# Residual correlation metric
-from covertreex.metrics.residual import build_residual_backend, configure_residual_correlation
-
-backend = build_residual_backend(coords, seed=42, inducing_count=512)
-runtime = Runtime(metric="residual_correlation", engine="rust-hilbert")
-ctx = runtime.activate()
-configure_residual_correlation(backend, context=ctx)
-tree = CoverTree(runtime).fit(indices)
-neighbors = tree.knn(indices, k=50)
+# Residual correlation with pre-computed V-matrix (from your GP)
+tree = cover_tree(coords, v_matrix=V, p_diag=p_diag)
+neighbors = tree.knn(k=50, predecessor_mode=True)  # Vecchia constraint
 ```
 
-Key classes:
-- `CoverTree` — Main interface for tree building and k-NN queries
-- `Runtime` — Configuration for backend, metric, and engine selection
-- `build_residual_backend` — Creates V-matrix backend for residual metric
+Key exports:
+- `cover_tree()` — Factory function (recommended entry point)
+- `Matern52`, `RBF` — Kernel classes for residual correlation
+- `CoverTree`, `Runtime` — Lower-level API for advanced use cases
 
 ## Build & Development Commands
 
@@ -88,7 +83,8 @@ Use these scripts for performance validation—do not create ad-hoc benchmark sc
 ### Module Structure
 
 - `covertreex/` — core library
-  - `api/` — public façade (`CoverTree`, `Runtime`, `Residual`)
+  - `api/` — public façade (`cover_tree`, `CoverTree`, `Runtime`)
+  - `kernels.py` — GP kernel classes (`Matern52`, `RBF`)
   - `engine.py` — engine implementations (python-numba, rust-hilbert, etc.)
   - `algo/` — algorithms: batch insert, MIS, conflict graphs, traversal strategies
   - `metrics/` — distance metrics including residual correlation
