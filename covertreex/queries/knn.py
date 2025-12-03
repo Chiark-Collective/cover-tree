@@ -194,27 +194,47 @@ def _knn_impl(
     if batch.ndim == 1:
         batch = batch.reshape(-1, 1) if use_index_payload else batch[None, :]
     
+    # Track whether we need to use residual metric fallback
+    use_residual_fallback = False
+
     if runtime.enable_rust:
+        # Check if kernel type is supported by Rust backend (only RBF currently)
+        # Non-RBF kernels must fall through to Python path which uses kernel_provider
         try:
-            return _rust_knn_query(
-                tree,
-                batch,
-                k=k,
-                return_distances=return_distances,
-                predecessor_mode=predecessor_mode,
-                backend=backend,
-                context=context,
-                op_log=op_log,
-            )
-        except ImportError:
-            pass
-    
-    if runtime.residual_use_static_euclidean_tree:
+            from covertreex.metrics.residual.core import get_residual_backend
+            host_backend = get_residual_backend()
+            kernel_type = getattr(host_backend, "kernel_type", "rbf")  # default to rbf for backwards compat
+        except (RuntimeError, ImportError):
+            kernel_type = "rbf"  # No residual backend configured, assume Euclidean/RBF
+
+        rust_supported = kernel_type == "rbf"
+
+        if rust_supported:
+            try:
+                return _rust_knn_query(
+                    tree,
+                    batch,
+                    k=k,
+                    return_distances=return_distances,
+                    predecessor_mode=predecessor_mode,
+                    backend=backend,
+                    context=context,
+                    op_log=op_log,
+                )
+            except ImportError:
+                pass
+        else:
+            # Rust is enabled but kernel type is not supported (e.g., Matern52)
+            # Fall through to residual_knn_query which uses the kernel_provider
+            use_residual_fallback = True
+
+    if runtime.residual_use_static_euclidean_tree or use_residual_fallback:
         return residual_knn_query(
             tree,
             batch,
             k=k,
             return_distances=return_distances,
+            predecessor_mode=predecessor_mode,
             backend=backend,
             context=context,
         )

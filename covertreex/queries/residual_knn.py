@@ -54,6 +54,7 @@ def residual_knn_query(
     *,
     k: int,
     return_distances: bool = False,
+    predecessor_mode: bool = False,
     backend: TreeBackend | None = None,
     context: cx_config.RuntimeContext | None = None,
 ) -> Any:
@@ -203,15 +204,24 @@ def residual_knn_query(
     else:
         # Python Fallback
         for q_idx, q_dataset_idx in enumerate(query_indices):
+            # In predecessor_mode, effective k is min(k, query_dataset_idx)
+            # because we can only have predecessors with index < query
+            effective_k = min(k, int(q_dataset_idx)) if predecessor_mode else k
             indices, dists = _single_query_residual_knn(
                 q_dataset_idx,
                 tree_indices=tree_indices,
                 si_cache=si_cache_np,
                 child_cache=child_cache,
                 root_indices=root_candidates,
-                k=k,
+                k=effective_k,
                 host_backend=host_backend,
+                predecessor_mode=predecessor_mode,
             )
+            # Pad to original k if needed
+            if predecessor_mode and len(indices) < k:
+                pad_size = k - len(indices)
+                indices = np.concatenate([indices, np.full(pad_size, -1, dtype=np.int64)])
+                dists = np.concatenate([dists, np.full(pad_size, np.inf, dtype=np.float64)])
             results_indices.append(indices)
             results_distances.append(dists)
         
@@ -245,6 +255,7 @@ def _single_query_residual_knn(
     root_indices: Sequence[int],
     k: int,
     host_backend: ResidualCorrHostData,
+    predecessor_mode: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Single-query k-NN using Best-First Search on Euclidean tree with Residual Metric.
@@ -322,16 +333,22 @@ def _single_query_residual_knn(
         # Update k-NN heap
         for i, node_idx in enumerate(batch_nodes):
             d = float(dists[i])
-            
-            # Add to best_heap
-            if len(best_heap) < k:
-                heapq.heappush(best_heap, (-d, node_idx))
-            else:
-                worst_dist = -best_heap[0][0]
-                if d < worst_dist:
-                    heapq.heapreplace(best_heap, (-d, node_idx))
-            
-            # Expand children
+            dataset_idx = int(batch_dataset_indices[i])
+
+            # In predecessor_mode, only add to result if dataset_idx < query
+            # But always explore children (they might have valid predecessors)
+            is_valid_predecessor = not predecessor_mode or dataset_idx < q_dataset_idx
+
+            if is_valid_predecessor:
+                # Add to best_heap
+                if len(best_heap) < k:
+                    heapq.heappush(best_heap, (-d, node_idx))
+                else:
+                    worst_dist = -best_heap[0][0]
+                    if d < worst_dist:
+                        heapq.heapreplace(best_heap, (-d, node_idx))
+
+            # Expand children (always, even if parent is not a valid predecessor)
             children = child_cache.get(node_idx)
             if children.size > 0:
                 # Here we should compute priorities for children.
@@ -361,8 +378,9 @@ def _single_query_residual_knn(
                         heapq.heappush(candidate_heap, (priority, counter, int(child)))
                         counter += 1
 
-    # Extract results
+    # Extract results - map node indices back to dataset indices
     ordered = sorted((-dist, idx) for dist, idx in best_heap)
-    indices = np.asarray([idx for _, idx in ordered], dtype=np.int64)
+    node_indices = np.asarray([idx for _, idx in ordered], dtype=np.int64)
+    dataset_indices = tree_indices[node_indices]  # Map node -> dataset
     distances = np.asarray([dist for dist, _ in ordered], dtype=np.float64)
-    return indices, distances
+    return dataset_indices, distances
